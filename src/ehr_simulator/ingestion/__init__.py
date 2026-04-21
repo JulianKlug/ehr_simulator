@@ -12,6 +12,7 @@ from ehr_simulator.ingestion.canonical import (
     validate,
 )
 from ehr_simulator.ingestion.exceptions import AdapterError, IngestionIssue
+from ehr_simulator.ingestion.synthetic import SyntheticDataset, load_synthetic
 
 __all__ = [
     "ADMISSION_SCHEMA",
@@ -22,5 +23,7 @@ __all__ = [
     "IngestionIssue",
     "SCALAR_TS_SCHEMA",
     "SCHEMAS",
+    "SyntheticDataset",
+    "load_synthetic",
     "validate",
 ]
