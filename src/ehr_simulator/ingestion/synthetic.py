@@ -78,7 +78,7 @@ _ADMISSION_FACTS: tuple[tuple[str, dict[str, str]], ...] = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass
 class SyntheticDataset:
     scalar_ts: pd.DataFrame
     admission: pd.DataFrame
@@ -92,13 +92,18 @@ def load_synthetic(*, seed: int = 42) -> SyntheticDataset:
     Calls :func:`validate` with ``strict=True`` on every frame before
     returning, so a regression in the generator surfaces as a test failure
     rather than silent schema drift.
-    """
-    rng = np.random.default_rng(seed)
 
-    scalar_ts = _build_scalar_ts(rng)
+    Each builder gets an independent ``Generator`` seeded off ``seed`` so
+    that adding a variable to one builder cannot silently shift the RNG
+    state seen by the others.
+    """
+    rng_scalar = np.random.default_rng(seed)
+    rng_ai = np.random.default_rng(seed + 1)
+
+    scalar_ts = _build_scalar_ts(rng_scalar)
     admission = _build_admission()
     imaging = _build_imaging()
-    ai_output = _build_ai_output(rng)
+    ai_output = _build_ai_output(rng_ai)
 
     scalar_ts = validate(scalar_ts, CanonicalShape.SCALAR_TS, strict=True, dataset=_DATASET_NAME)
     admission = validate(admission, CanonicalShape.ADMISSION, strict=True, dataset=_DATASET_NAME)

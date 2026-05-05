@@ -58,7 +58,7 @@ def _is_valid_json(val: object) -> bool:
         return False
     try:
         json.loads(val)
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return False
     return True
 
@@ -70,7 +70,7 @@ def _is_valid_json_list_or_null(val: object) -> bool:
         return False
     try:
         parsed = json.loads(val)
-    except (json.JSONDecodeError, ValueError):
+    except ValueError:
         return False
     return isinstance(parsed, list) and all(isinstance(x, str) for x in parsed)
 

@@ -24,7 +24,7 @@ packages = ["src/ehr_simulator"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-n auto --strict-markers"
+addopts = "-n auto"
 
 [tool.ruff]
 line-length = 100
