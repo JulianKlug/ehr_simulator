@@ -125,7 +125,7 @@ def render_facet_timeline_svg(
             panel_spacing=0.25,
         )
     )
-    if has_data:
+    if has_data:  # noqa: SIM108 — plotnine geom layers don't support `geom + geom` outside `plot + geom`
         plot = plot + p9.geom_line() + p9.geom_point(size=1.8)
     else:
         plot = plot + p9.geom_blank()
