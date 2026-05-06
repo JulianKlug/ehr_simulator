@@ -1,0 +1,30 @@
+<section class="panel panel-ai panel-state-{{ state }}"
+         aria-label="ai panel — {{ state }}"
+         data-panel="ai"
+         data-state="{{ state }}">
+    <header>AI output</header>
+    {% if state == "empty-expected" %}
+        <p class="empty">No AI output for this patient.</p>
+    {% elif state == "empty-unexpected" %}
+        <p class="empty">No AI output at this timepoint yet (data exists later).</p>
+    {% elif state == "error" %}
+        <p class="error">Render failed: {{ error }}</p>
+    {% else %}
+        {% if state == "partial" %}
+            <p class="flash-warn">AI payload incomplete.</p>
+        {% endif %}
+        <ul class="ai-list">
+            {% for row in rows %}
+            <li>
+                <span class="ai-time">t={{ "%.1f"|format(row.t_minutes) }}</span>
+                <span class="ai-model">model={{ row.model_id }}</span>
+                <ul class="ai-payload">
+                    {% for key, value in row.payload.items() %}
+                    <li><code>{{ key }}</code>: {{ value }}</li>
+                    {% endfor %}
+                </ul>
+            </li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+</section>

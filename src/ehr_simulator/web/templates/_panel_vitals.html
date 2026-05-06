@@ -1,0 +1,33 @@
+<section class="panel panel-vitals panel-state-{{ state }}"
+         aria-label="vitals panel — {{ state }}"
+         data-panel="vitals"
+         data-state="{{ state }}">
+    <header>Vitals</header>
+    {% if state == "empty-expected" %}
+        <p class="empty">No vitals recorded for this patient.</p>
+    {% elif state == "empty-unexpected" %}
+        <p class="empty">No vitals at this timepoint yet (data exists later).</p>
+    {% elif state == "error" %}
+        <p class="error">Render failed: {{ error }}</p>
+    {% else %}
+        {% if state == "partial" %}
+            <p class="flash-warn">Partial data at this timepoint.</p>
+        {% endif %}
+        <div class="charts">
+            {% for chart in charts %}
+            <figure class="chart" data-variable="{{ chart.variable }}">
+                <figcaption>{{ chart.variable }}</figcaption>
+                {{ chart.svg | safe }}
+                <table class="a11y-fallback" aria-label="{{ chart.variable }} timeline data">
+                    <thead><tr><th>t (min)</th><th>{{ chart.variable }}</th><th>unit</th></tr></thead>
+                    <tbody>
+                        {% for row in chart.table_rows %}
+                        <tr><td>{{ row.t }}</td><td>{{ row.value }}</td><td>{{ row.unit }}</td></tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </figure>
+            {% endfor %}
+        </div>
+    {% endif %}
+</section>

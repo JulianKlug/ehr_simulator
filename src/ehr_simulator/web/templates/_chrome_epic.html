@@ -1,0 +1,14 @@
+<main class="chrome-epic-tabs" data-chrome="epic">
+    <nav role="tablist" aria-label="EHR panels">
+        <button role="tab" aria-controls="tab-vitals" aria-selected="true" data-tab="vitals">Vitals</button>
+        <button role="tab" aria-controls="tab-labs" aria-selected="false" data-tab="labs">Labs</button>
+        <button role="tab" aria-controls="tab-admission" aria-selected="false" data-tab="admission">Admission</button>
+        <button role="tab" aria-controls="tab-imaging" aria-selected="false" data-tab="imaging">Imaging</button>
+        <button role="tab" aria-controls="tab-ai" aria-selected="false" data-tab="ai">AI</button>
+    </nav>
+    <div role="tabpanel" id="tab-vitals">{{ panels.vitals | safe }}</div>
+    <div role="tabpanel" id="tab-labs" hidden>{{ panels.labs | safe }}</div>
+    <div role="tabpanel" id="tab-admission" hidden>{{ panels.admission | safe }}</div>
+    <div role="tabpanel" id="tab-imaging" hidden>{{ panels.imaging | safe }}</div>
+    <div role="tabpanel" id="tab-ai" hidden>{{ panels.ai | safe }}</div>
+</main>

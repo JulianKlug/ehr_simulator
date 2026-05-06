@@ -1,0 +1,25 @@
+<section class="panel panel-imaging panel-state-{{ state }}"
+         aria-label="imaging panel — {{ state }}"
+         data-panel="imaging"
+         data-state="{{ state }}">
+    <header>Imaging</header>
+    {% if state == "empty-expected" %}
+        <p class="empty">No imaging recorded for this patient.</p>
+    {% elif state == "empty-unexpected" %}
+        <p class="empty">No imaging at this timepoint yet (data exists later).</p>
+    {% elif state == "error" %}
+        <p class="error">Render failed: {{ error }}</p>
+    {% else %}
+        {% if state == "partial" %}
+            <p class="flash-warn">Imaging present but report text incomplete.</p>
+        {% endif %}
+        <ul class="imaging-list">
+            {% for row in rows %}
+            <li>
+                <strong>{{ row.modality }}</strong> @ t={{ "%.1f"|format(row.t_minutes) }} min
+                — {{ row.report_text or "(no report text)" }}
+            </li>
+            {% endfor %}
+        </ul>
+    {% endif %}
+</section>

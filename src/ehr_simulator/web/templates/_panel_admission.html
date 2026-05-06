@@ -1,0 +1,18 @@
+<section class="panel panel-admission panel-state-{{ state }}"
+         aria-label="admission panel — {{ state }}"
+         data-panel="admission"
+         data-state="{{ state }}">
+    <header>Admission</header>
+    {% if state == "empty-expected" %}
+        <p class="empty">No admission record for this patient.</p>
+    {% elif state == "error" %}
+        <p class="error">Render failed: {{ error }}</p>
+    {% else %}
+        <dl class="admission-facts">
+            {% for fact in facts %}
+            <dt>{{ fact.field }}</dt>
+            <dd>{{ fact.value }}</dd>
+            {% endfor %}
+        </dl>
+    {% endif %}
+</section>
