@@ -6,13 +6,25 @@ requires-python = ">=3.11"
 dependencies = [
     "pandas>=2.2",
     "pandera[pandas]>=0.20",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "jinja2>=3.1",
+    "plotnine>=0.13",
+    "structlog>=24.4",
 ]
+
+[project.scripts]
+ehr-simulator = "ehr_simulator.cli:main"
 
 [dependency-groups]
 dev = [
     "pytest>=8.0",
     "pytest-xdist>=3.5",
     "ruff>=0.6",
+    "httpx>=0.27",
+    "pytest-playwright>=0.5",
+    "beautifulsoup4>=4.12",
+    "freezegun>=1.5",
 ]
 
 [build-system]
@@ -24,7 +36,10 @@ packages = ["src/ehr_simulator"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-n auto"
+addopts = "-n auto --strict-markers -m 'not e2e'"
+markers = [
+    "e2e: end-to-end Playwright tests (require chromium installed)",
+]
 
 [tool.ruff]
 line-length = 100
