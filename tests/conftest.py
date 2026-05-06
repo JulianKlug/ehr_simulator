@@ -37,6 +37,11 @@ def tmp_log_dir(tmp_path: Path) -> Iterator[Path]:
 
 
 @pytest.fixture
+def geneva_fixture_dir() -> Path:
+    return Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture
 def client(tmp_log_dir: Path, dataset: SyntheticDataset) -> Iterator[object]:
     from fastapi.testclient import TestClient
 

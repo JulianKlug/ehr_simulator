@@ -35,6 +35,7 @@ The public entry point is :func:`validate`.
 
 from __future__ import annotations
 
+import contextlib
 import json
 from enum import StrEnum
 
@@ -156,6 +157,25 @@ SCHEMAS: dict[CanonicalShape, pa.DataFrameSchema] = {
 }
 
 
+def empty_frame(shape: CanonicalShape) -> pd.DataFrame:
+    """Return an empty DataFrame conforming to the given canonical shape.
+
+    Columns and dtypes are derived from the pandera schema, so adding a
+    column to the schema flows through to every adapter's empty-frame
+    construction without code changes.
+    """
+    schema = SCHEMAS[shape]
+    columns: dict[str, pd.Series] = {}
+    for name, column in schema.columns.items():
+        pa_dtype = column.dtype
+        try:
+            pandas_dtype = pa_dtype.type
+        except AttributeError:
+            pandas_dtype = object
+        columns[name] = pd.Series([], dtype=pandas_dtype)
+    return pd.DataFrame(columns)
+
+
 def validate(
     frame: pd.DataFrame,
     shape: CanonicalShape,
@@ -202,6 +222,8 @@ def validate(
     except pa.errors.SchemaErrors as exc:
         failing_idx = _failing_indices(exc)
         cleaned = frame.drop(index=failing_idx).reset_index(drop=True)
+        with contextlib.suppress(pa.errors.SchemaError):
+            cleaned = schema.validate(cleaned, lazy=False)
         issues = _issues_from_failure_cases(frame, exc, dataset)
         cleaned.attrs["adapter_error"] = AdapterError(
             f"[{dataset}/{shape.value}] {len(issues)} row(s) dropped during lenient validation",

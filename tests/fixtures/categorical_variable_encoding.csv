@@ -1,0 +1,20 @@
+sample_label,baseline_value,other_categories
+Sex,['Female'],['Male']
+Referral,['Emergency service (144)'],"['Self referral or GP', 'In-hospital event', 'Other hospital']"
+Prestroke disability (Rankin),[0.0],"['5.0', '1.0', '2.0', '4.0', '3.0']"
+Antihypert. drugs pre-stroke,['no'],['yes']
+Lipid lowering drugs pre-stroke,['no'],['yes']
+Antiplatelet drugs,['no'],['yes']
+Anticoagulants,['no'],['yes']
+MedHist Hypertension,['no'],['yes']
+MedHist Diabetes,['no'],['yes']
+MedHist Hyperlipidemia,['no'],['yes']
+MedHist Smoking,['no'],['yes']
+MedHist Atrial Fibr.,['no'],['yes']
+MedHist CHD,['no'],['yes']
+MedHist PAD,['no'],['yes']
+MedHist cerebrovascular_event,[False],['True']
+categorical_onset_to_admission_time,['271-540min'],"['onset_unknown', 'intra_hospital', '541-1440min', '<270min', '>1440min']"
+wake_up_stroke,[False],['True']
+categorical_IVT,['271-540min'],"['no_IVT', '91-270min', '<90min', '>540min']"
+categorical_IAT,['271-540min'],"['no_IAT', '>540min', '<270min']"

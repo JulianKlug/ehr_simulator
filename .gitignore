@@ -1,4 +1,5 @@
 .EXAMPLE_DATA_PATHS
+docs/data-contract.md.tmp
 logs/
 
 # Byte-compiled / optimized / DLL files

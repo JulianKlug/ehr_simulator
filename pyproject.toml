@@ -25,6 +25,7 @@ dev = [
     "pytest-playwright>=0.5",
     "beautifulsoup4>=4.12",
     "freezegun>=1.5",
+    "openpyxl>=3.1",
 ]
 
 [build-system]
@@ -34,11 +35,15 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ehr_simulator"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"src/ehr_simulator/ingestion/data/geneva_units.json" = "ehr_simulator/ingestion/data/geneva_units.json"
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-n auto --strict-markers -m 'not e2e'"
+addopts = "-n auto --strict-markers -m 'not e2e and not real_data'"
 markers = [
     "e2e: end-to-end Playwright tests (require chromium installed)",
+    "real_data: opt-in smoke tests against the real Geneva CSV (~1.5 GB)",
 ]
 
 [tool.ruff]

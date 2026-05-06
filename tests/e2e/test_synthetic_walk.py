@@ -70,9 +70,7 @@ def test_e2e_walk_synth_001_via_keyboard(page: Page, live_server: str) -> None:
 
 
 @pytest.mark.e2e
-def test_e2e_active_tab_survives_timepoint_navigation(
-    page: Page, live_server: str
-) -> None:
+def test_e2e_active_tab_survives_timepoint_navigation(page: Page, live_server: str) -> None:
     """Round-02 FINDING-009: clicking Next must not reset the active tab.
 
     Regression test for the sessionStorage-backed tab persistence in
@@ -84,18 +82,12 @@ def test_e2e_active_tab_survives_timepoint_navigation(
     page.wait_for_selector("#patient-view[data-t-index='0']")
     # Default tab is Admission.
     assert (
-        page.locator('[role="tab"][data-tab="admission"]').get_attribute(
-            "aria-selected"
-        )
-        == "true"
+        page.locator('[role="tab"][data-tab="admission"]').get_attribute("aria-selected") == "true"
     )
 
     # Click Labs and verify selection.
     page.locator('[role="tab"][data-tab="labs"]').click()
-    assert (
-        page.locator('[role="tab"][data-tab="labs"]').get_attribute("aria-selected")
-        == "true"
-    )
+    assert page.locator('[role="tab"][data-tab="labs"]').get_attribute("aria-selected") == "true"
 
     # Advance via the Next button. The htmx swap re-renders #patient-view
     # with Admission selected at the template level — JS must restore Labs.
@@ -105,8 +97,8 @@ def test_e2e_active_tab_survives_timepoint_navigation(
         page.locator(".tp-next").click()
     page.wait_for_selector("#patient-view[data-t-index='1']")
     page.wait_for_function(
-        "document.querySelector(\"[role=tab][data-tab=labs]\").getAttribute"
-        "(\"aria-selected\") === \"true\""
+        'document.querySelector("[role=tab][data-tab=labs]").getAttribute'
+        '("aria-selected") === "true"'
     )
 
     # Advance again via keyboard — same persistence requirement.
@@ -115,7 +107,4 @@ def test_e2e_active_tab_survives_timepoint_navigation(
     ):
         page.keyboard.press("]")
     page.wait_for_selector("#patient-view[data-t-index='2']")
-    assert (
-        page.locator('[role="tab"][data-tab="labs"]').get_attribute("aria-selected")
-        == "true"
-    )
+    assert page.locator('[role="tab"][data-tab="labs"]').get_attribute("aria-selected") == "true"

@@ -27,6 +27,8 @@ jobs:
         run: uv run ruff format --check .
       - name: Test
         run: uv run pytest
+      - name: Data-contract drift check
+        run: uv run python scripts/gen_data_contract.py --check
 
   e2e:
     runs-on: ubuntu-latest
