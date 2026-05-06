@@ -1,0 +1,20 @@
+<header role="region" aria-label="patient summary" class="summary-card">
+    <div class="summary-row">
+        <span class="summary-pid"><strong>{{ patient_slice.patient_id }}</strong></span>
+        <span class="summary-meta">
+            age {{ admission_facts.get("age", "?") }} ·
+            sex {{ admission_facts.get("sex", "?") }}
+        </span>
+        <span class="summary-time">
+            t = {{ "%.1f"|format(patient_slice.t_minutes) }} min
+            <small>(timepoint {{ patient_slice.timepoint_index + 1 }} of {{ patient_slice.timepoints|length }})</small>
+        </span>
+    </div>
+    <div class="summary-counts" aria-label="revealed-row counts">
+        <span class="badge badge-scalar" data-count="{{ counts.scalar_ts }}">scalar_ts: {{ counts.scalar_ts }}</span>
+        <span class="badge badge-imaging" data-count="{{ counts.imaging }}">imaging: {{ counts.imaging }}</span>
+        <span class="badge badge-ai" data-count="{{ counts.ai }}">ai: {{ counts.ai }}</span>
+        <span class="badge badge-admission" data-count="{{ counts.admission }}">admission: {{ counts.admission }}</span>
+    </div>
+    <div id="summary-flash" role="status" aria-live="polite"></div>
+</header>

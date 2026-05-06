@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>EHR simulator — {{ patient_id }} (t_index={{ t_index }})</title>
+    <link rel="stylesheet" href="/static/theme.css" />
+    <script src="/static/htmx.min.js" defer></script>
+    <script src="/static/keyboard.js" defer></script>
+</head>
+<body class="chrome-{{ chrome }}">
+    <details id="shortcut-overlay" class="a11y-fallback">
+        <summary>Keyboard shortcuts</summary>
+        <ul>
+            <li><kbd>]</kbd> next timepoint</li>
+            <li><kbd>[</kbd> previous timepoint</li>
+            <li><kbd>?</kbd> toggle this overlay</li>
+        </ul>
+    </details>
+    {{ inner | safe }}
+</body>
+</html>

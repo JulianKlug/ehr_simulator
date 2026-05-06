@@ -1,0 +1,9 @@
+<div id="patient-view"
+     data-patient-id="{{ patient_slice.patient_id }}"
+     data-t-index="{{ patient_slice.timepoint_index }}"
+     data-t-count="{{ patient_slice.timepoints|length }}"
+     data-t-minutes="{{ patient_slice.t_minutes }}"
+     data-chrome="{{ chrome }}">
+    {{ summary_html | safe }}
+    {{ chrome_html | safe }}
+</div>
