@@ -1,3 +1,4 @@
+.EXAMPLE_DATA_PATHS
 logs/
 
 # Byte-compiled / optimized / DLL files
