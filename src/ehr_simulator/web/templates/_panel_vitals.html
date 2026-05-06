@@ -13,21 +13,17 @@
         {% if state == "partial" %}
             <p class="flash-warn">Partial data at this timepoint.</p>
         {% endif %}
-        <div class="charts">
-            {% for chart in charts %}
-            <figure class="chart" data-variable="{{ chart.variable }}">
-                <figcaption>{{ chart.variable }}</figcaption>
-                {{ chart.svg | safe }}
-                <table class="a11y-fallback" aria-label="{{ chart.variable }} timeline data">
-                    <thead><tr><th>t (min)</th><th>{{ chart.variable }}</th><th>unit</th></tr></thead>
-                    <tbody>
-                        {% for row in chart.table_rows %}
-                        <tr><td>{{ row.t }}</td><td>{{ row.value }}</td><td>{{ row.unit }}</td></tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </figure>
-            {% endfor %}
-        </div>
+        <figure class="chart vitals-chart" data-panel="vitals">
+            <figcaption>Vitals — shared time axis ({{ variables | join(", ") }})</figcaption>
+            {{ chart_svg | safe }}
+            <table class="a11y-fallback" aria-label="vitals timeline data">
+                <thead><tr><th>t (min)</th><th>variable</th><th>value</th><th>unit</th></tr></thead>
+                <tbody>
+                    {% for row in table_rows %}
+                    <tr><td>{{ row.t }}</td><td>{{ row.variable }}</td><td>{{ row.value }}</td><td>{{ row.unit }}</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </figure>
     {% endif %}
 </section>

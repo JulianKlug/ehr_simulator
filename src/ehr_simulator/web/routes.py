@@ -163,8 +163,41 @@ def _render_panels(patient_slice: PatientSlice, request: Request) -> dict[str, s
 
 
 def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
-    return _render_scalar_panel(
-        patient_slice, request, panel="vitals", template="_panel_vitals.html"
+    """Vitals: one shared-x facet plot of all vital variables (FINDING-003)."""
+    from ehr_simulator.web.charts import render_facet_timeline_svg
+    from ehr_simulator.web.panels import _VITAL_VARS
+
+    templates = request.app.state.templates
+    state = patient_slice.panel_states["vitals"]
+    rows = patient_slice.scalar_ts.loc[patient_slice.scalar_ts.variable.isin(_VITAL_VARS)]
+
+    chart_svg: str | None = None
+    table_rows: list[dict[str, object]] = []
+    variables_present: list[str] = []
+    if state in {"loading", "partial"} and not rows.empty:
+        variables_present = sorted(rows["variable"].unique().tolist())
+        chart_svg = render_facet_timeline_svg(
+            rows.sort_values(["variable", "t_minutes"]),
+            variables_present,
+        )
+        table_rows = [
+            {
+                "t": float(r.t_minutes),
+                "variable": r.variable,
+                "value": float(r.value),
+                "unit": r.unit,
+            }
+            for r in rows.sort_values(["t_minutes", "variable"]).itertuples(index=False)
+        ]
+
+    return templates.get_template("_panel_vitals.html").render(
+        request=request,
+        patient_slice=patient_slice,
+        state=state,
+        error=patient_slice.panel_errors.get("vitals"),
+        chart_svg=chart_svg,
+        variables=variables_present,
+        table_rows=table_rows,
     )
 
 
