@@ -112,6 +112,7 @@ async def patient_timepoint(
 
 def _render_summary(patient_slice: PatientSlice, request: Request, *, chrome: str) -> str:
     templates = request.app.state.templates
+    dataset = request.app.state.dataset
     admission_facts = {
         row.field: row.value for row in patient_slice.admission.itertuples(index=False)
     }
@@ -121,12 +122,14 @@ def _render_summary(patient_slice: PatientSlice, request: Request, *, chrome: st
         "ai": int(len(patient_slice.ai_output)),
         "admission": int(len(patient_slice.admission)),
     }
+    all_patient_ids = sorted(dataset.admission["patient_id"].unique().tolist())
     return templates.get_template("_summary_card.html").render(
         request=request,
         patient_slice=patient_slice,
         admission_facts=admission_facts,
         counts=counts,
         chrome=chrome,
+        all_patient_ids=all_patient_ids,
     )
 
 

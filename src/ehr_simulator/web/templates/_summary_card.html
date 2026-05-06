@@ -1,4 +1,40 @@
+{% set total = patient_slice.timepoints | length %}
+{% set idx = patient_slice.timepoint_index %}
+{% set at_first = idx == 0 %}
+{% set at_last = idx == total - 1 %}
 <header role="region" aria-label="patient summary" class="summary-card">
+    <nav class="patient-nav" aria-label="patient and timepoint navigation">
+        <a class="nav-home" href="/">← All patients</a>
+        <span class="patient-jumper" role="group" aria-label="jump to patient">
+            <span class="nav-label">Patient:</span>
+            {% for pid in all_patient_ids %}
+            <a href="/patient/{{ pid }}/timepoint/0?chrome={{ chrome }}"
+               {% if pid == patient_slice.patient_id %}class="patient-link is-current" aria-current="page"{% else %}class="patient-link"{% endif %}>
+                {{ pid }}
+            </a>
+            {% endfor %}
+        </span>
+        <span class="timepoint-nav" role="group" aria-label="walk timepoints">
+            <button type="button"
+                    class="tp-btn tp-prev"
+                    {% if at_first %}disabled aria-disabled="true"{% else %}hx-get="/patient/{{ patient_slice.patient_id }}/timepoint/{{ idx - 1 }}?chrome={{ chrome }}" hx-target="#patient-view" hx-swap="outerHTML"{% endif %}
+                    title="Previous timepoint (keyboard: [)"
+                    aria-label="previous timepoint (shortcut: [)">
+                ‹ Prev <kbd>[</kbd>
+            </button>
+            <span class="tp-position" aria-live="polite">
+                t = {{ "%.0f"|format(patient_slice.t_minutes) }} min
+                <small>({{ idx + 1 }}/{{ total }})</small>
+            </span>
+            <button type="button"
+                    class="tp-btn tp-next"
+                    {% if at_last %}disabled aria-disabled="true"{% else %}hx-get="/patient/{{ patient_slice.patient_id }}/timepoint/{{ idx + 1 }}?chrome={{ chrome }}" hx-target="#patient-view" hx-swap="outerHTML"{% endif %}
+                    title="Next timepoint (keyboard: ])"
+                    aria-label="next timepoint (shortcut: ])">
+                Next <kbd>]</kbd> ›
+            </button>
+        </span>
+    </nav>
     <div class="summary-row">
         <span class="summary-pid"><strong>{{ patient_slice.patient_id }}</strong></span>
         <span class="summary-meta">

@@ -179,3 +179,101 @@ body.chrome-epic [role="tabpanel"][hidden] {
     background: #fff8d6;
     border-color: #c9a200;
 }
+
+/* Visible patient + timepoint navigation (FINDING-006). */
+.summary-card {
+    border-bottom: 1px solid var(--color-border);
+    padding-bottom: 0.5rem;
+    margin-bottom: 0.75rem;
+}
+
+.patient-nav {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem 1.25rem;
+    padding: 0.5rem 0;
+    border-bottom: 1px solid var(--color-border);
+    margin-bottom: 0.5rem;
+}
+
+.patient-nav .nav-home {
+    color: var(--color-focus-ring);
+    text-decoration: none;
+    font-weight: 600;
+}
+
+.patient-nav .nav-home:hover {
+    text-decoration: underline;
+}
+
+.patient-nav .nav-label {
+    color: var(--color-muted);
+    font-weight: 600;
+}
+
+.patient-jumper {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+}
+
+.patient-link {
+    text-decoration: none;
+    padding: 0.15rem 0.5rem;
+    border: 1px solid var(--color-border);
+    border-radius: 3px;
+    color: var(--color-text);
+    background: #fafafa;
+}
+
+.patient-link:hover {
+    border-color: var(--color-focus-ring);
+}
+
+.patient-link.is-current {
+    background: var(--color-focus-ring);
+    color: #ffffff;
+    border-color: var(--color-focus-ring);
+    font-weight: 600;
+}
+
+.timepoint-nav {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-left: auto;
+}
+
+.tp-btn {
+    padding: 0.25rem 0.6rem;
+    border: 1px solid var(--color-border);
+    background: #fafafa;
+    color: var(--color-text);
+    border-radius: 3px;
+    cursor: pointer;
+    font: inherit;
+}
+
+.tp-btn:hover:not([disabled]) {
+    border-color: var(--color-focus-ring);
+}
+
+.tp-btn[disabled] {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+.tp-btn kbd {
+    padding: 0 0.2rem;
+    background: #ffffff;
+    border: 1px solid var(--color-border);
+    border-radius: 2px;
+    font-size: 0.85em;
+}
+
+.tp-position {
+    font-variant-numeric: tabular-nums;
+    min-width: 8em;
+    text-align: center;
+}
