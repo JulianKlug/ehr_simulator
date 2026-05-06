@@ -16,10 +16,30 @@
         <figure class="chart vitals-chart" data-panel="vitals">
             <figcaption>Vitals — shared time axis ({{ variables | join(", ") }})</figcaption>
             {{ chart_svg | safe }}
+            <table class="values-table vitals-values" aria-label="vitals values by timepoint">
+                <thead>
+                    <tr>
+                        <th scope="col">t (min)</th>
+                        {% for var in variables %}
+                        <th scope="col">{{ var }}{% if units.get(var) %} <small>({{ units[var] }})</small>{% endif %}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in pivot_rows %}
+                    <tr{% if row.is_current %} class="row-current" aria-current="time"{% endif %}>
+                        <th scope="row">{{ "%.0f"|format(row.t) }}</th>
+                        {% for v in row.cells %}
+                        <td title="{{ variables[loop.index0] }} at t={{ '%.0f'|format(row.t) }} min">{% if v is none %}—{% else %}{{ "%.2f"|format(v) }}{% endif %}</td>
+                        {% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
             <table class="a11y-fallback" aria-label="vitals timeline data">
                 <thead><tr><th>t (min)</th><th>variable</th><th>value</th><th>unit</th></tr></thead>
                 <tbody>
-                    {% for row in table_rows %}
+                    {% for row in fallback_rows %}
                     <tr><td>{{ row.t }}</td><td>{{ row.variable }}</td><td>{{ row.value }}</td><td>{{ row.unit }}</td></tr>
                     {% endfor %}
                 </tbody>
