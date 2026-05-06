@@ -166,15 +166,24 @@ def _render_panels(patient_slice: PatientSlice, request: Request) -> dict[str, s
 
 
 def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
-    """Vitals: one shared-x facet plot + a visible wide-format values table."""
-    from ehr_simulator.web.charts import render_facet_timeline_svg
+    """Vitals: one labeled mini-chart per variable on a shared x-axis +
+    a wide-format values table.
+
+    Round-02 FINDING-007 (unreadable plot) and FINDING-008 (single-timestep
+    empty plot): per-variable rendering replaces ``facet_wrap``. plotnine's
+    facet strip text was rendering as empty grey rectangles in the SVG
+    output, which left clinicians staring at five unlabeled rows. Stacking
+    individually-labeled mini-charts lets us caption each row in HTML and
+    pin the same x-range across them so the time axis still lines up.
+    """
+    from ehr_simulator.web.charts import render_timeline_svg
     from ehr_simulator.web.panels import _VITAL_VARS
 
     templates = request.app.state.templates
     state = patient_slice.panel_states["vitals"]
     rows = patient_slice.scalar_ts.loc[patient_slice.scalar_ts.variable.isin(_VITAL_VARS)]
 
-    chart_svg: str | None = None
+    chart_panels: list[dict[str, object]] = []
     fallback_rows: list[dict[str, object]] = []
     variables_present: list[str] = []
     units: dict[str, str] = {}
@@ -183,10 +192,23 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
 
     if state in {"loading", "partial"} and not rows.empty:
         variables_present = sorted(rows["variable"].unique().tolist())
-        chart_svg = render_facet_timeline_svg(
-            rows.sort_values(["variable", "t_minutes"]),
-            variables_present,
-        )
+        for r in rows.itertuples(index=False):
+            units.setdefault(r.variable, str(r.unit))
+        all_t = rows["t_minutes"].astype(float)
+        t_lo = float(all_t.min())
+        t_hi = float(all_t.max())
+        # Single-timepoint frames: pad the x-range so plotnine doesn't
+        # collapse to a degenerate axis.
+        x_range = (t_lo - 1.0, t_hi + 1.0) if t_lo == t_hi else (t_lo, t_hi)
+        sorted_rows = rows.sort_values(["variable", "t_minutes"])
+        for var in variables_present:
+            chart_panels.append(
+                {
+                    "variable": var,
+                    "unit": units.get(var, ""),
+                    "svg": render_timeline_svg(sorted_rows, var, x_range=x_range),
+                }
+            )
         fallback_rows = [
             {
                 "t": float(r.t_minutes),
@@ -196,8 +218,6 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
             }
             for r in rows.sort_values(["t_minutes", "variable"]).itertuples(index=False)
         ]
-        for r in rows.itertuples(index=False):
-            units.setdefault(r.variable, str(r.unit))
         pivot: dict[float, dict[str, float]] = {}
         for r in rows.itertuples(index=False):
             pivot.setdefault(float(r.t_minutes), {})[r.variable] = float(r.value)
@@ -215,7 +235,7 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
         patient_slice=patient_slice,
         state=state,
         error=patient_slice.panel_errors.get("vitals"),
-        chart_svg=chart_svg,
+        chart_panels=chart_panels,
         variables=variables_present,
         units=units,
         pivot_rows=pivot_rows,

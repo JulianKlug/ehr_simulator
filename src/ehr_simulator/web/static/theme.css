@@ -132,6 +132,55 @@ body.chrome-epic [role="tabpanel"][hidden] {
     display: none;
 }
 
+/* Vitals per-variable mini-charts (FINDING-007 / FINDING-008).
+ *
+ * Each row is labeled in HTML/CSS rather than relying on plotnine's facet
+ * strip text (which the SVG renderer was dropping into empty grey rectangles).
+ */
+.vitals-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-top: 0.25rem;
+}
+
+.vitals-row {
+    display: grid;
+    grid-template-columns: 5.5rem 1fr;
+    align-items: center;
+    border-top: 1px solid #eef2f7;
+    padding-top: 0.25rem;
+}
+
+.vitals-row:first-child {
+    border-top: 0;
+    padding-top: 0;
+}
+
+.vitals-label {
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.85em;
+    letter-spacing: 0.04em;
+    color: #222;
+}
+
+.vitals-label .vitals-unit {
+    display: block;
+    font-weight: 400;
+    text-transform: none;
+    letter-spacing: 0;
+    color: var(--color-muted);
+    font-size: 0.85em;
+}
+
+.vitals-svg svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    max-height: 130px;
+}
+
 /* Vitals values table (FINDING-004): visible raw values under the chart. */
 .values-table {
     border-collapse: collapse;

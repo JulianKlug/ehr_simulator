@@ -13,9 +13,19 @@
         {% if state == "partial" %}
             <p class="flash-warn">Partial data at this timepoint.</p>
         {% endif %}
-        <figure class="chart vitals-chart" data-panel="vitals">
+        <figure class="chart vitals-chart" data-panel="vitals" data-variables="{{ variables | join(',') }}">
             <figcaption>Vitals — shared time axis ({{ variables | join(", ") }})</figcaption>
-            {{ chart_svg | safe }}
+            <div class="vitals-stack">
+                {% for panel in chart_panels %}
+                <div class="vitals-row" data-variable="{{ panel.variable }}">
+                    <div class="vitals-label">
+                        <span class="vitals-name">{{ panel.variable }}</span>
+                        {% if panel.unit %}<small class="vitals-unit">{{ panel.unit }}</small>{% endif %}
+                    </div>
+                    <div class="vitals-svg">{{ panel.svg | safe }}</div>
+                </div>
+                {% endfor %}
+            </div>
             <table class="values-table vitals-values" aria-label="vitals values by timepoint">
                 <thead>
                     <tr>
