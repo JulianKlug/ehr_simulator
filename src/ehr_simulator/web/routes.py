@@ -47,7 +47,7 @@ async def patient_timepoint(
     request: Request,
     patient_id: str,
     t_index: int,
-    chrome: Literal["dense", "epic"] = "dense",
+    chrome: Literal["dense", "epic"] = "epic",
 ) -> HTMLResponse:
     dataset = request.app.state.dataset
     templates = request.app.state.templates

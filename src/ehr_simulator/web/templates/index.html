@@ -13,9 +13,9 @@
             {% for pid in patient_ids %}
             <li>
                 <strong>{{ pid }}</strong>:
-                <a href="/patient/{{ pid }}/timepoint/0?chrome=dense">dense</a>
-                <span aria-hidden="true">·</span>
                 <a href="/patient/{{ pid }}/timepoint/0?chrome=epic">epic</a>
+                <span aria-hidden="true">·</span>
+                <a href="/patient/{{ pid }}/timepoint/0?chrome=dense">dense</a>
             </li>
             {% endfor %}
         </ul>

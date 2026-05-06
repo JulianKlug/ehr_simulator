@@ -109,8 +109,8 @@ def test_chrome_query_param_routes_to_correct_template(client: TestClient) -> No
     assert dense_soup.select_one("main.chrome-dense-grid") is not None
     assert epic_soup.select_one("main.chrome-epic-tabs") is not None
     assert epic_soup.select_one("nav[role='tablist']") is not None
-    # default == dense
-    assert default_soup.select_one("main.chrome-dense-grid") is not None
+    # default == epic (clinician feedback on session-02: tabbed layout preferred)
+    assert default_soup.select_one("main.chrome-epic-tabs") is not None
 
 
 def test_synth_003_imaging_panel_is_empty_expected_at_t0(client: TestClient) -> None:
