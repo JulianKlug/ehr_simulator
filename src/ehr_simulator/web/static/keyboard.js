@@ -91,6 +91,34 @@
         }
     }
 
+    // Tab persistence (FINDING-009): the epic-chrome template re-renders
+    // with Admission selected after every htmx swap. Survive timepoint
+    // navigation by remembering the active tab in sessionStorage and
+    // re-applying it after each swap.
+    const TAB_STORAGE_KEY = "ehrsim:active-tab";
+
+    function getChromeKey() {
+        const view = document.getElementById("patient-view");
+        const chrome = view && view.dataset.chrome ? view.dataset.chrome : "default";
+        return TAB_STORAGE_KEY + ":" + chrome;
+    }
+
+    function rememberActiveTab(tabName) {
+        try {
+            sessionStorage.setItem(getChromeKey(), tabName);
+        } catch (err) {
+            // sessionStorage unavailable (private mode, etc.) — soft-fail.
+        }
+    }
+
+    function readRememberedTab() {
+        try {
+            return sessionStorage.getItem(getChromeKey());
+        } catch (err) {
+            return null;
+        }
+    }
+
     function activateTab(tab) {
         const tabs = tab.parentElement.querySelectorAll('[role="tab"]');
         const targetId = tab.getAttribute("aria-controls");
@@ -106,6 +134,19 @@
                 p.setAttribute("hidden", "");
             }
         });
+        const tabName = tab.dataset.tab;
+        if (tabName) {
+            rememberActiveTab(tabName);
+        }
+    }
+
+    function restoreActiveTab() {
+        const remembered = readRememberedTab();
+        if (!remembered) return;
+        const tab = document.querySelector(
+            '[role="tab"][data-tab="' + remembered + '"]'
+        );
+        if (tab) activateTab(tab);
     }
 
     function onClick(e) {
@@ -118,4 +159,17 @@
 
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("click", onClick);
+    // Restore on initial page load.
+    if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", restoreActiveTab);
+    } else {
+        restoreActiveTab();
+    }
+    // Restore after every htmx swap that touches #patient-view.
+    document.body.addEventListener("htmx:afterSwap", function (e) {
+        const target = e.detail && e.detail.target;
+        if (target && target.id === "patient-view") {
+            restoreActiveTab();
+        }
+    });
 })();
