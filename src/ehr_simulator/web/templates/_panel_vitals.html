@@ -13,39 +13,91 @@
         {% if state == "partial" %}
             <p class="flash-warn">Partial data at this timepoint.</p>
         {% endif %}
-        <figure class="chart vitals-chart" data-panel="vitals" data-variables="{{ variables | join(',') }}">
-            <figcaption>Vitals — shared time axis ({{ variables | join(", ") }})</figcaption>
-            <div class="vitals-stack">
-                {% for panel in chart_panels %}
-                <div class="vitals-row" data-variable="{{ panel.variable }}">
-                    <div class="vitals-label">
-                        <span class="vitals-name">{{ panel.variable }}</span>
-                        {% if panel.unit %}<small class="vitals-unit">{{ panel.unit }}</small>{% endif %}
+        <figure class="chart vitals-chart" data-panel="vitals">
+            <figcaption class="visually-hidden">Vitals — shared time axis ({{ variables | join(", ") }})</figcaption>
+            {% if upper_panels %}
+            <div class="vitals-figure" data-figure="upper">
+                <p class="vitals-figure-caption">Hemodynamics</p>
+                <div class="vitals-stack">
+                    {% for panel in upper_panels %}
+                    <div class="vitals-row{% if panel.is_bottom %} vitals-row-bottom{% endif %}"
+                         data-group="{{ panel.group }}">
+                        <div class="vitals-svg">{{ panel.svg | safe }}</div>
+                        {% if panel.group == "bp" and bp_partial_note %}
+                        <p class="vitals-panel-note" data-group="bp">{{ bp_partial_note }}</p>
+                        {% endif %}
                     </div>
-                    <div class="vitals-svg">{{ panel.svg | safe }}</div>
+                    {% endfor %}
                 </div>
-                {% endfor %}
             </div>
+            {% endif %}
+            {% if lower_panels %}
+            <div class="vitals-figure" data-figure="lower">
+                <p class="vitals-figure-caption">Oxygenation &amp; metabolic</p>
+                <div class="vitals-stack">
+                    {% for panel in lower_panels %}
+                    <div class="vitals-row{% if panel.is_bottom %} vitals-row-bottom{% endif %}"
+                         data-group="{{ panel.group }}">
+                        <div class="vitals-svg">{{ panel.svg | safe }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            {% endif %}
+            {% if pivot_rows %}
+            {% set bp_cols = variables | select('in', ['sbp', 'dbp']) | list %}
             <table class="values-table vitals-values" aria-label="vitals values by timepoint">
+                <colgroup>
+                    <col class="col-t" />
+                    {% for var in variables %}
+                    <col class="col-{{ var }}{% if var in ['sbp', 'dbp'] %} col-bp{% endif %}" />
+                    {% endfor %}
+                </colgroup>
                 <thead>
+                    {% if bp_cols %}
+                    <tr class="superhead">
+                        <th scope="col" rowspan="2">t (min)</th>
+                        {% set ns = namespace(emitted=false) %}
+                        {% for var in variables %}
+                            {% if var in ['sbp', 'dbp'] %}
+                                {% if not ns.emitted %}
+                                <th scope="colgroup" colspan="{{ bp_cols | length }}" class="superhead-bp">BP <small>(mmHg)</small></th>
+                                {% set ns.emitted = true %}
+                                {% endif %}
+                            {% else %}
+                                <th scope="col" rowspan="2">{{ 'SpO₂' if var == 'spo2' else var | upper }}{% if units.get(var) %} <small>({{ units[var] }})</small>{% endif %}</th>
+                            {% endif %}
+                        {% endfor %}
+                    </tr>
+                    <tr>
+                        {% for var in variables %}
+                            {% if var in ['sbp', 'dbp'] %}
+                            <th scope="col" class="bp-subhead">{{ var | upper }}</th>
+                            {% endif %}
+                        {% endfor %}
+                    </tr>
+                    {% else %}
                     <tr>
                         <th scope="col">t (min)</th>
                         {% for var in variables %}
-                        <th scope="col">{{ var }}{% if units.get(var) %} <small>({{ units[var] }})</small>{% endif %}</th>
+                        <th scope="col">{{ 'SpO₂' if var == 'spo2' else var | upper }}{% if units.get(var) %} <small>({{ units[var] }})</small>{% endif %}</th>
                         {% endfor %}
                     </tr>
+                    {% endif %}
                 </thead>
                 <tbody>
                     {% for row in pivot_rows %}
                     <tr{% if row.is_current %} class="row-current" aria-current="time"{% endif %}>
                         <th scope="row">{{ "%.0f"|format(row.t) }}</th>
                         {% for v in row.cells %}
-                        <td title="{{ variables[loop.index0] }} at t={{ '%.0f'|format(row.t) }} min">{% if v is none %}—{% else %}{{ "%.2f"|format(v) }}{% endif %}</td>
+                        <td class="cell-{{ variables[loop.index0] }}{% if variables[loop.index0] in ['sbp', 'dbp'] %} cell-bp{% endif %}"
+                            title="{{ variables[loop.index0] }} at t={{ '%.0f'|format(row.t) }} min">{% if v is none %}—{% else %}{{ "%.2f"|format(v) }}{% endif %}</td>
                         {% endfor %}
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
+            {% endif %}
             <table class="a11y-fallback" aria-label="vitals timeline data">
                 <thead><tr><th>t (min)</th><th>variable</th><th>value</th><th>unit</th></tr></thead>
                 <tbody>

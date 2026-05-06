@@ -229,6 +229,107 @@ def broken_render_client(
         yield c
 
 
+def test_vitals_panel_round_03_layout(client: TestClient) -> None:
+    """Round-03 layout contract:
+
+    1. Two figure groupings — "upper" (BP+HR+RR) and "lower" (SpO₂+Temp).
+    2. BP panel is grouped (single SVG with both lines) and stamped with
+       ``data-group="bp"``.
+    3. HR, RR, SpO₂, Temp panels each get their own SVG with
+       ``data-group=<var>``.
+    4. Values table uses ``<colgroup>`` and a "BP" superhead spanning SBP
+       and DBP columns.
+    5. Column order in the values table matches the panel reading order
+       (t | SBP | DBP | HR | RR | SpO₂ | Temp).
+    """
+    r = client.get("/patient/synth_001/timepoint/2")
+    assert r.status_code == 200
+    soup = BeautifulSoup(r.text, "html.parser")
+    vitals = soup.select_one("section[data-panel='vitals']")
+    assert vitals is not None
+
+    upper = vitals.select_one("[data-figure='upper']")
+    lower = vitals.select_one("[data-figure='lower']")
+    assert upper is not None, "upper hemodynamics figure missing"
+    assert lower is not None, "lower oxygenation/metabolic figure missing"
+
+    upper_groups = [row.get("data-group") for row in upper.select(".vitals-row")]
+    assert upper_groups == ["bp", "hr", "rr"], (
+        f"upper figure must contain BP→HR→RR, got {upper_groups}"
+    )
+    lower_groups = [row.get("data-group") for row in lower.select(".vitals-row")]
+    assert lower_groups == ["spo2", "temp"], (
+        f"lower figure must contain SpO₂→Temp, got {lower_groups}"
+    )
+
+    bp_svg = upper.select_one("[data-group='bp'] svg")
+    assert bp_svg is not None
+    assert bp_svg.get("data-group") == "bp"
+    # Both SBP and DBP present at t_index=2 → no missing flag.
+    assert bp_svg.get("data-bp-missing") is None
+
+    # Bottom-row marker on the last panel of each figure (drives the
+    # "render x-tick labels here only" CSS hook).
+    upper_rows = upper.select(".vitals-row")
+    assert "vitals-row-bottom" in upper_rows[-1].get("class", [])
+    assert all("vitals-row-bottom" not in r.get("class", []) for r in upper_rows[:-1])
+    lower_rows = lower.select(".vitals-row")
+    assert "vitals-row-bottom" in lower_rows[-1].get("class", [])
+
+    # Values table: BP superhead + colgroup with col-bp class.
+    values = vitals.select_one("table.vitals-values")
+    assert values is not None
+    superhead_bp = values.select_one("th.superhead-bp")
+    assert superhead_bp is not None, "BP superhead missing"
+    assert superhead_bp.get("colspan") == "2"
+    bp_cols = values.select("colgroup col.col-bp")
+    assert len(bp_cols) == 2, "expected exactly two BP <col> entries (SBP + DBP)"
+
+    # Column order in the body cells: t (th), then sbp, dbp, hr, rr, spo2, temp.
+    first_row = values.select_one("tbody tr")
+    assert first_row is not None
+    cell_classes = [td.get("class", []) for td in first_row.select("td")]
+    cell_order = [
+        next((c for c in classes if c.startswith("cell-")), None) for classes in cell_classes
+    ]
+    assert cell_order == [
+        "cell-sbp",
+        "cell-dbp",
+        "cell-hr",
+        "cell-rr",
+        "cell-spo2",
+        "cell-temp",
+    ], f"values-table column order mismatch: {cell_order}"
+
+
+def test_vitals_panel_partial_dbp_renders_panel_note(tmp_log_dir: Path) -> None:
+    """When DBP is missing from the slice but SBP is present, the BP panel
+    SVG carries ``data-bp-missing="dbp"`` and a panel-level note ('DBP
+    missing at this timepoint.') renders below the BP SVG. This is the
+    round-03 partial-within-group behavior.
+    """
+    from ehr_simulator.ingestion.synthetic import load_synthetic
+    from ehr_simulator.web.app import create_app
+
+    base = load_synthetic()
+    # Drop DBP entirely from synth_001 to simulate the partial state.
+    keep = ~((base.scalar_ts["patient_id"] == "synth_001") & (base.scalar_ts["variable"] == "dbp"))
+    base.scalar_ts = base.scalar_ts.loc[keep].reset_index(drop=True)
+
+    app = create_app(log_dir=tmp_log_dir, dataset_loader=lambda: base)
+    with TestClient(app) as c:
+        r = c.get("/patient/synth_001/timepoint/0")
+    assert r.status_code == 200
+    soup = BeautifulSoup(r.text, "html.parser")
+    bp_svg = soup.select_one("[data-group='bp'] svg")
+    assert bp_svg is not None
+    assert bp_svg.get("data-bp-missing") == "dbp"
+    note = soup.select_one("p.vitals-panel-note[data-group='bp']")
+    assert note is not None, "expected per-panel BP partial note"
+    assert "DBP" in note.get_text()
+    assert "missing" in note.get_text().lower()
+
+
 def test_renderer_exception_contains_to_single_panel(broken_render_client: TestClient) -> None:
     r = broken_render_client.get("/patient/synth_001/timepoint/0")
     assert r.status_code == 200

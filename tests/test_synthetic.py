@@ -42,6 +42,21 @@ def test_load_synthetic_timepoints_non_negative() -> None:
     assert (d.ai_output["t_minutes"] >= 0).all()
 
 
+def test_load_synthetic_includes_rr() -> None:
+    """Round-03 added respiratory rate to the synthetic dataset.
+
+    `_VITAL_VARS` panel routing also has to know about it; see
+    ``test_panels.py::test_vitals_panel_routes_rr``.
+    """
+    d = load_synthetic()
+    rr = d.scalar_ts[d.scalar_ts["variable"] == "rr"]
+    assert not rr.empty, "rr missing from synthetic scalar_ts"
+    assert set(rr["unit"].unique()) == {"breaths/min"}
+    # Value range from the synthetic generator (12.0–20.0 breaths/min).
+    assert (rr["value"] >= 12.0).all()
+    assert (rr["value"] <= 20.0).all()
+
+
 def test_load_synthetic_synth_002_missing_labs_at_60min() -> None:
     d = load_synthetic()
     labs = {"hgb", "na", "cr", "glucose"}

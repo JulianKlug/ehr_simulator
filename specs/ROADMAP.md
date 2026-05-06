@@ -30,9 +30,13 @@ Status: shipped 2026-04-21 (commits `dbf0b9d` .. `afd73f6` + `8d49d17` post-revi
 Spec: `session-01-data-contract.md`.
 Locked: 4 pandera schemas, synthetic adapter, 15 tests, CI on Python 3.11/3.12.
 
-### Session 2 — Thin UI on synthetic + structlog [NEXT]
+### Session 2 — Thin UI on synthetic + structlog [SHIPPED]
 
+Status: shipped 2026-05-06 (rounds 01–03 of clinician feedback addressed).
 Spec: `session-02-thin-ui-synthetic.md`.
+Feedback log: `specs/feedback/session-02-feedback.md` (round-03 design decisions
+landed via /plan-design-review on 2026-05-06; variant D — HTML-stitched
+BP-grouped panels — approved and implemented).
 
 Goal: a clinician can open `localhost:8000`, pick `synth_001`, scrub through three timepoints, and see vitals + admission + AI panels rendered against `load_synthetic()`. No real data, no answer capture, no SQLite.
 
@@ -50,7 +54,7 @@ Locks in:
 
 **Test inventory:** ≥6 tests. ≥2 unit (structlog mandatory fields, plotnine renderer returns SVG). ≥2 integration (panel HTMX swap, keyboard shortcuts). ≥1 [→E2E] (one synthetic patient end-to-end render). ≥1 a11y assertion.
 
-### Session 3 — Geneva adapter
+### Session 3 — Geneva adapter [NEXT]
 
 Goal: `load_geneva(csv_path, params_path)` returns a dataset that conforms to all four canonical schemas, exercising every adapter responsibility documented in Session 1.
 

@@ -70,3 +70,14 @@ def test_panel_state_detection_table(
 def test_patient_timepoints_returns_sorted_unique(synthetic) -> None:
     tps = patient_timepoints(synthetic, "synth_001")
     assert tps == (0.0, 60.0, 180.0)
+
+
+def test_vitals_panel_routes_rr(synthetic) -> None:
+    """Round-03: RR is now part of the vitals panel. The slice keeps RR
+    rows; the route then groups them into the upper figure."""
+    from ehr_simulator.web.panels import _VITAL_VARS
+
+    assert "rr" in _VITAL_VARS
+    sliced = slice_to_timepoint(synthetic, "synth_001", t_minutes=180.0, timepoint_index=2)
+    rr_rows = sliced.scalar_ts.loc[sliced.scalar_ts.variable == "rr"]
+    assert not rr_rows.empty, "RR rows must reach the vitals panel slice"

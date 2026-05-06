@@ -165,50 +165,150 @@ def _render_panels(patient_slice: PatientSlice, request: Request) -> dict[str, s
     return out
 
 
-def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
-    """Vitals: one labeled mini-chart per variable on a shared x-axis +
-    a wide-format values table.
+# Round-03 layout: BP grouped on shared mmHg, then HR, RR; SpO2/Temp below.
+# Order is fixed (clinician reading order); only present vitals get rendered,
+# but the order they appear within each figure stays stable.
+_VITALS_TABLE_ORDER: tuple[str, ...] = ("sbp", "dbp", "hr", "rr", "spo2", "temp")
+_BP_PANEL_VARS: frozenset[str] = frozenset({"sbp", "dbp"})
+_BP_GROUP_VARS_ORDERED: tuple[str, ...] = ("sbp", "dbp")
+_UPPER_SINGLE_VARS: tuple[str, ...] = ("hr", "rr")
+_LOWER_SINGLE_VARS: tuple[str, ...] = ("spo2", "temp")
 
-    Round-02 FINDING-007 (unreadable plot) and FINDING-008 (single-timestep
-    empty plot): per-variable rendering replaces ``facet_wrap``. plotnine's
-    facet strip text was rendering as empty grey rectangles in the SVG
-    output, which left clinicians staring at five unlabeled rows. Stacking
-    individually-labeled mini-charts lets us caption each row in HTML and
-    pin the same x-range across them so the time axis still lines up.
+
+def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
+    """Vitals: two stacked figures.
+
+    Round-03 layout (`specs/feedback/session-02-feedback.md` round-03):
+
+    - **Upper figure** (hemodynamics): BP grouped on a shared mmHg y-scale,
+      then HR, then RR — top to bottom.
+    - **Lower figure** (oxygenation/metabolic): SpO₂, then Temp.
+    - All panels in a figure share the same x-range; tick labels render on
+      the bottom-most panel only.
+    - Partial-within-BP: if SBP or DBP is missing from the slice, the BP
+      panel renders a faint dashed expected band at the missing variable's
+      reference range and the panel-level note "DBP missing at this
+      timepoint." appears below the BP panel.
+
+    Round-02 lineage (FINDING-007 / FINDING-008): per-variable rendering
+    instead of ``facet_wrap`` because plotnine's facet strip text rendered
+    as empty grey rectangles. Round-03 keeps that pattern for HR/RR/SpO₂/
+    Temp and adds a single multi-line plotnine call for the BP panel.
     """
-    from ehr_simulator.web.charts import render_timeline_svg
+    from ehr_simulator.web.charts import render_grouped_bp_svg, render_timeline_svg
     from ehr_simulator.web.panels import _VITAL_VARS
 
     templates = request.app.state.templates
     state = patient_slice.panel_states["vitals"]
     rows = patient_slice.scalar_ts.loc[patient_slice.scalar_ts.variable.isin(_VITAL_VARS)]
 
-    chart_panels: list[dict[str, object]] = []
+    upper_panels: list[dict[str, object]] = []
+    lower_panels: list[dict[str, object]] = []
     fallback_rows: list[dict[str, object]] = []
     variables_present: list[str] = []
     units: dict[str, str] = {}
     pivot_rows: list[dict[str, object]] = []
+    bp_missing: list[str] = []
+    bp_partial_note: str | None = None
     current_t = float(patient_slice.t_minutes)
 
     if state in {"loading", "partial"} and not rows.empty:
-        variables_present = sorted(rows["variable"].unique().tolist())
+        present_set = set(rows["variable"].astype(str).unique().tolist())
         for r in rows.itertuples(index=False):
             units.setdefault(r.variable, str(r.unit))
+        # Stable column order for the values table (matches the panel reading
+        # order: BP → HR → RR → SpO₂ → Temp).
+        variables_present = [v for v in _VITALS_TABLE_ORDER if v in present_set]
+
         all_t = rows["t_minutes"].astype(float)
         t_lo = float(all_t.min())
         t_hi = float(all_t.max())
-        # Single-timepoint frames: pad the x-range so plotnine doesn't
-        # collapse to a degenerate axis.
         x_range = (t_lo - 1.0, t_hi + 1.0) if t_lo == t_hi else (t_lo, t_hi)
         sorted_rows = rows.sort_values(["variable", "t_minutes"])
-        for var in variables_present:
-            chart_panels.append(
+
+        present_bp: frozenset[str] = frozenset(present_set & _BP_PANEL_VARS)
+        bp_missing = [v for v in _BP_GROUP_VARS_ORDERED if v not in present_bp]
+
+        # Compose upper figure (BP → HR → RR), then lower (SpO₂ → Temp).
+        upper_specs: list[dict[str, object]] = []
+        if present_bp:
+            upper_specs.append(
                 {
-                    "variable": var,
-                    "unit": units.get(var, ""),
-                    "svg": render_timeline_svg(sorted_rows, var, x_range=x_range),
+                    "group": "bp",
+                    "label": "BP",
+                    "unit": "mmHg",
+                    "is_grouped": True,
+                    "present_bp": present_bp,
+                    "missing": list(bp_missing),
                 }
             )
+        for var in _UPPER_SINGLE_VARS:
+            if var in present_set:
+                upper_specs.append(
+                    {
+                        "group": var,
+                        "label": var.upper(),
+                        "unit": units.get(var, ""),
+                        "is_grouped": False,
+                        "variable": var,
+                    }
+                )
+        lower_specs: list[dict[str, object]] = []
+        for var in _LOWER_SINGLE_VARS:
+            if var in present_set:
+                lower_specs.append(
+                    {
+                        "group": var,
+                        "label": "SpO₂" if var == "spo2" else var.upper(),
+                        "unit": units.get(var, ""),
+                        "is_grouped": False,
+                        "variable": var,
+                    }
+                )
+
+        def _render_specs(
+            specs: list[dict[str, object]],
+        ) -> list[dict[str, object]]:
+            rendered: list[dict[str, object]] = []
+            for idx, spec in enumerate(specs):
+                is_bottom = idx == len(specs) - 1
+                if spec["is_grouped"]:
+                    svg = render_grouped_bp_svg(
+                        sorted_rows,
+                        present_vars=spec["present_bp"],  # type: ignore[arg-type]
+                        x_range=x_range,
+                        is_bottom=is_bottom,
+                    )
+                else:
+                    svg = render_timeline_svg(
+                        sorted_rows,
+                        spec["variable"],  # type: ignore[arg-type]
+                        x_range=x_range,
+                        is_bottom=is_bottom,
+                    )
+                rendered.append(
+                    {
+                        "group": spec["group"],
+                        "label": spec["label"],
+                        "unit": spec["unit"],
+                        "svg": svg,
+                        "is_bottom": is_bottom,
+                        "is_grouped": spec["is_grouped"],
+                        "missing": spec.get("missing", []),
+                    }
+                )
+            return rendered
+
+        upper_panels = _render_specs(upper_specs)
+        lower_panels = _render_specs(lower_specs)
+
+        if bp_missing and present_bp:
+            # Specific to round-03: the BP panel internally annotates which
+            # of SBP/DBP is missing, layered on top of the panel-level
+            # "Partial data at this timepoint." badge.
+            missing_label = ", ".join(v.upper() for v in bp_missing)
+            bp_partial_note = f"{missing_label} missing at this timepoint."
+
         fallback_rows = [
             {
                 "t": float(r.t_minutes),
@@ -235,11 +335,13 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
         patient_slice=patient_slice,
         state=state,
         error=patient_slice.panel_errors.get("vitals"),
-        chart_panels=chart_panels,
+        upper_panels=upper_panels,
+        lower_panels=lower_panels,
         variables=variables_present,
         units=units,
         pivot_rows=pivot_rows,
         fallback_rows=fallback_rows,
+        bp_partial_note=bp_partial_note,
     )
 
 

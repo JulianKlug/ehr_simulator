@@ -23,7 +23,7 @@ from ehr_simulator.ingestion.synthetic import SyntheticDataset
 PanelState = Literal["loading", "empty-expected", "empty-unexpected", "partial", "error"]
 PanelName = Literal["vitals", "labs", "admission", "imaging", "ai"]
 
-_VITAL_VARS = frozenset({"hr", "sbp", "dbp", "spo2", "temp"})
+_VITAL_VARS = frozenset({"hr", "sbp", "dbp", "rr", "spo2", "temp"})
 _LAB_VARS = frozenset({"hgb", "na", "cr", "glucose", "wbc", "plt"})
 _AI_REQUIRED_KEYS = frozenset({"prob_deterioration_6h", "prob_mrs_0_2_90d"})
 

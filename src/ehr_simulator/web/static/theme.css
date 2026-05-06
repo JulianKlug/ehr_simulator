@@ -132,53 +132,81 @@ body.chrome-epic [role="tabpanel"][hidden] {
     display: none;
 }
 
-/* Vitals per-variable mini-charts (FINDING-007 / FINDING-008).
+/* Vitals stacked-panel charts.
  *
- * Each row is labeled in HTML/CSS rather than relying on plotnine's facet
- * strip text (which the SVG renderer was dropping into empty grey rectangles).
+ * Round-02 (FINDING-007 / FINDING-008): per-variable rendering replaced
+ * plotnine ``facet_wrap`` because facet strip text rendered as empty grey
+ * rectangles. Round-03 extends the pattern: panels are stacked into TWO
+ * figures (hemodynamics: BP-grouped → HR → RR; oxygenation/metabolic:
+ * SpO₂ → Temp). Panel labels live inside the SVG as the y-axis title.
+ *
+ * Layout:
+ *   .vitals-figure       — one of the two stacked groups
+ *   .vitals-stack        — the column of panels inside a figure
+ *   .vitals-row          — a single panel (one SVG)
+ *   .vitals-row-bottom   — the bottom panel (renders the time axis)
+ *
+ * Width contract: SVGs span the full panel width (no per-row label column);
+ * the chart container scrolls horizontally on narrow viewports because
+ * collapsing a continuous time axis under 720px is worse than a scroll.
  */
-.vitals-stack {
-    display: flex;
-    flex-direction: column;
-    gap: 0.35rem;
+.vitals-chart {
+    overflow-x: auto;
+}
+
+.vitals-figure {
     margin-top: 0.25rem;
 }
 
-.vitals-row {
-    display: grid;
-    grid-template-columns: 5.5rem 1fr;
-    align-items: center;
-    border-top: 1px solid #eef2f7;
-    padding-top: 0.25rem;
+.vitals-figure + .vitals-figure {
+    margin-top: 1rem;
 }
 
-.vitals-row:first-child {
+.vitals-figure-caption {
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 0.8em;
+    letter-spacing: 0.05em;
+    color: var(--color-muted);
+    margin: 0 0 0.25rem 0;
+}
+
+.vitals-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    min-width: 720px;
+}
+
+.vitals-row {
+    /* Stacked rows: no border, no padding — gridlines from the SVG are the
+     * only horizontal guides, keeping the visual flat. */
     border-top: 0;
     padding-top: 0;
 }
 
-.vitals-label {
-    font-weight: 600;
-    text-transform: uppercase;
-    font-size: 0.85em;
-    letter-spacing: 0.04em;
-    color: #222;
-}
-
-.vitals-label .vitals-unit {
-    display: block;
-    font-weight: 400;
-    text-transform: none;
-    letter-spacing: 0;
-    color: var(--color-muted);
-    font-size: 0.85em;
+.vitals-row-bottom {
+    /* The bottom panel carries the x-axis labels — give it a touch more
+     * vertical room so the labels don't get cropped. */
+    margin-bottom: 0.25rem;
 }
 
 .vitals-svg svg {
+    /* All panel SVGs scale uniformly with the container width. The renderer
+     * gives the bottom panel ~0.25in extra figsize for axis labels, so the
+     * bottom row ends up taller naturally — no per-row max-height override
+     * is needed (those caused aspect distortion at wide viewports). */
     display: block;
     width: 100%;
     height: auto;
-    max-height: 130px;
+    max-height: 240px;
+}
+
+.vitals-panel-note {
+    margin: 0.1rem 0 0.25rem 0;
+    font-size: 0.85em;
+    color: #b35900;
+    font-style: italic;
 }
 
 /* Vitals values table (FINDING-004): visible raw values under the chart. */
@@ -220,6 +248,53 @@ body.chrome-epic [role="tabpanel"][hidden] {
 
 .values-table tr:hover:not(.row-current) {
     background: #f0f6ff;
+}
+
+/* Round-03 BP-grouped column header: thin "BP" superhead spanning the SBP
+ * and DBP columns, plus a faint blue tint on grouped cells so the eye
+ * tracks them as one unit. The tint is intentionally subtle (3% blue) —
+ * loud enough to mark grouping, not loud enough to compete with the
+ * row-current highlight. */
+.values-table .superhead-bp {
+    background: #e8f0fc;
+    color: #1f3a5f;
+    border-bottom: 2px solid #b8c8e0;
+    text-align: center;
+}
+
+.values-table .bp-subhead {
+    background: #f0f4fa;
+    font-size: 0.9em;
+}
+
+.values-table .col-bp + .col-bp,
+.values-table .col-bp:first-of-type {
+    background: rgba(31, 111, 235, 0.04);
+}
+
+.values-table .cell-bp {
+    background: rgba(31, 111, 235, 0.04);
+}
+
+.values-table tr.row-current td.cell-bp {
+    /* Row-current overrides BP tint — clinical "where am I right now"
+     * signal beats the column-grouping signal. */
+    background: #fff8d6;
+}
+
+/* Screen-reader-only utility (round-03: visible figcaption is replaced by
+ * the per-figure caption div, but a11y still needs a single aggregate
+ * caption attached to the parent figure element). */
+.visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
 }
 
 /* Labs table (FINDING-005): variable-by-timepoint matrix. */

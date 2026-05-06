@@ -29,6 +29,10 @@ Deferred items from the /autoplan review on 2026-04-21. These are OUT of scope f
 - **Wire backup cadence into S5 SQLite boot.** D10 is design-doc-load-bearing from Phase 1 ship onward; the single Phase-2 policy gate cannot retroactively cover Phase-1 sessions. S5 spec must include nightly copy + post-session CSV-export hook. Depends on: S5.
 - **Re-evaluate chart-library choice for the divergence view at S6.5.** Plotnine is locked for everyday timeline panels (S6) but may be wrong for the divergence view specifically — the divergence view is the open-source adoption hook and benefits from interactive scrubbing. Candidates at S6.5 spec time: plotnine + JS scrubber overlay, or a small D3 island just for that figure. Depends on: S6 shipped, plotnine in production.
 
+## From plan-design-review on session-02 round-03 feedback (2026-05-06)
+
+- **Add DESIGN.md.** Vitals colors, BP-grouping contract, line-style rules currently live as a Python dict (`VITALS_COLORS` in `web/charts.py`) plus inline docstrings. Round-03 added two more variables and tightened the SBP/DBP shade contract — the next design ask that touches non-vitals will hit the same gap. Run `/design-consultation` to formalize. Revival criterion: any session that introduces new visual primitives outside the vitals/labs panels (e.g., divergence view, AI-output panel restyling). Depends on: nothing — can run anytime.
+
 ## From plan-eng-review on session-02-thin-ui-synthetic.md (2026-05-05)
 
 - **Measure inline-SVG payload size at S8 scale before the chrome-A/B-vs-Geneva session.** Plotnine SVGs are ~10–30KB each with embedded styles; five panels per swap could push 200KB+ at Geneva density (24 timepoints). If measured, the swap shape (full-panel-swap vs per-chart streaming via `hx-swap-oob`) can be tuned before the second neurologist session. Synthetic data is too small to surface this. Revival criterion: when S8 starts and Geneva real frames are available. Depends on: S3/S7 shipped.

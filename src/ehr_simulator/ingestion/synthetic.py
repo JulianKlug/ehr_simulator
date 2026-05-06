@@ -33,6 +33,7 @@ _VITALS: tuple[tuple[str, str, float, float], ...] = (
     ("hr", "bpm", 60.0, 100.0),
     ("sbp", "mmHg", 110.0, 160.0),
     ("dbp", "mmHg", 60.0, 95.0),
+    ("rr", "breaths/min", 12.0, 20.0),
     ("spo2", "%", 94.0, 100.0),
     ("temp", "degC", 36.2, 37.8),
 )
