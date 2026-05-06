@@ -172,3 +172,10 @@ body.chrome-epic [role="tabpanel"][hidden] {
 .values-table tr:hover:not(.row-current) {
     background: #f0f6ff;
 }
+
+/* Labs table (FINDING-005): variable-by-timepoint matrix. */
+.labs-table th[aria-current="time"],
+.labs-table td.cell-current {
+    background: #fff8d6;
+    border-color: #c9a200;
+}

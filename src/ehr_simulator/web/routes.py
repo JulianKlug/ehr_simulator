@@ -221,45 +221,46 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
 
 
 def _render_labs(patient_slice: PatientSlice, request: Request) -> str:
-    return _render_scalar_panel(patient_slice, request, panel="labs", template="_panel_labs.html")
-
-
-def _render_scalar_panel(
-    patient_slice: PatientSlice,
-    request: Request,
-    *,
-    panel: str,
-    template: str,
-) -> str:
-    from ehr_simulator.web.charts import render_timeline_svg
-    from ehr_simulator.web.panels import _LAB_VARS, _VITAL_VARS
+    """Labs: variable-by-timepoint table (FINDING-005). Tabular form is the
+    clinical standard for labs; charts add visual noise without aiding the
+    point-in-time read."""
+    from ehr_simulator.web.panels import _LAB_VARS
 
     templates = request.app.state.templates
-    state = patient_slice.panel_states[panel]
-    var_set = _VITAL_VARS if panel == "vitals" else _LAB_VARS
-    rows = patient_slice.scalar_ts.loc[patient_slice.scalar_ts.variable.isin(var_set)]
+    state = patient_slice.panel_states["labs"]
+    rows = patient_slice.scalar_ts.loc[patient_slice.scalar_ts.variable.isin(_LAB_VARS)]
 
-    charts: list[dict[str, object]] = []
+    timepoints: list[float] = []
+    variables_present: list[str] = []
+    units: dict[str, str] = {}
+    table_rows: list[dict[str, object]] = []
+    current_t = float(patient_slice.t_minutes)
+
     if state in {"loading", "partial"} and not rows.empty:
-        for variable in sorted(rows["variable"].unique()):
-            sub = rows.loc[rows.variable == variable].sort_values("t_minutes")
-            charts.append(
+        timepoints = sorted({float(t) for t in rows["t_minutes"].tolist()})
+        variables_present = sorted(rows["variable"].unique().tolist())
+        for r in rows.itertuples(index=False):
+            units.setdefault(r.variable, str(r.unit))
+        pivot: dict[str, dict[float, float]] = {}
+        for r in rows.itertuples(index=False):
+            pivot.setdefault(r.variable, {})[float(r.t_minutes)] = float(r.value)
+        for variable in variables_present:
+            table_rows.append(
                 {
                     "variable": variable,
-                    "svg": render_timeline_svg(sub, variable),
-                    "table_rows": [
-                        {"t": float(r.t_minutes), "value": float(r.value), "unit": r.unit}
-                        for r in sub.itertuples(index=False)
-                    ],
+                    "unit": units.get(variable, ""),
+                    "cells": [pivot[variable].get(t) for t in timepoints],
                 }
             )
 
-    return templates.get_template(template).render(
+    return templates.get_template("_panel_labs.html").render(
         request=request,
         patient_slice=patient_slice,
         state=state,
-        error=patient_slice.panel_errors.get(panel),
-        charts=charts,
+        error=patient_slice.panel_errors.get("labs"),
+        timepoints=timepoints,
+        current_t=current_t,
+        table_rows=table_rows,
     )
 
 
