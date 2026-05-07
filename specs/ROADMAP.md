@@ -77,9 +77,9 @@ Helpers declared at module scope inside `geneva.py` (will be lifted to `_shared.
 
 **Test inventory:** ≥11 tests. 5+ unit (`_drop_imputed`, `_inverse_normalize`, `_decode_categorical` including the 0.5-edge case, hour-bucket → minutes, `_path_traversal_guard`). 3+ integration (source-routing branches, strict vs lenient on real-shaped data, empty IMAGING/AI_OUTPUT frame assertions). 2+ E2E (full Geneva fixture round-trip; `docs/data-contract.md` drift CI check). 1+ regression (`AdapterError` on missing required cols).
 
-**Fixture strategy:** `tests/fixtures/build_geneva_fixture.py` reads the real CSV, samples N rows per source category, replaces `value`/identifiers with random-but-realistic fakes, writes `tests/fixtures/geneva_sample.csv`. Both committed. Re-run when source schema changes.
+**Fixture strategy:** `tests/fixtures/geneva/build_geneva_fixture.py` reads the real CSV, samples N rows per source category, replaces `value`/identifiers with random-but-realistic fakes, writes `tests/fixtures/geneva/geneva_sample.csv`. Both committed. Re-run when source schema changes. (Session 4 mirrored the layout under `tests/fixtures/mimic/`.)
 
-### Session 4 — MIMIC-III adapter [NEXT]
+### Session 4 — MIMIC-III adapter [SHIPPED]
 
 Goal: prove the canonical contract generalizes. MIMIC mirrors Geneva's structure; `notes` replaces `stroke_registry`, source vocabulary differs, normalization params live at a different path. Everything else should compose.
 
@@ -89,7 +89,7 @@ Refactor: lift the four helpers declared in S3 to `_shared.py` only if MIMIC's s
 
 **Test inventory:** ≥10 tests. Mirror of Session 3 + 1 regression test asserting that lifted `_shared.py` helpers produce identical output for both datasets given equivalent inputs.
 
-### Session 5 — Study config + CLI
+### Session 5 — Study config + CLI [NEXT]
 
 Goal: nothing runs end-to-end against real data until the simulator knows which patients, timepoints, and questions to use. This session adds Pydantic-validated YAML configs and a Typer CLI surface.
 

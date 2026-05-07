@@ -4,16 +4,27 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Current state
 
-Session 1 (data contract + repo scaffolding) shipped: Python 3.11 package at `src/ehr_simulator/` with four pandera schemas locking the canonical in-memory shapes (`SCALAR_TS`, `ADMISSION`, `IMAGING`, `AI_OUTPUT`), a synthetic reference adapter, and 15 contract tests. No FastAPI server, SQLite, HTMX, MIMIC/Geneva adapters, or UI yet — those are later sessions per `specs/`.
+Sessions 1-4 shipped. Python 3.11 package at `src/ehr_simulator/` with:
+
+- **Data contract** (`ingestion/canonical.py`): four pandera schemas locking the canonical in-memory shapes (`SCALAR_TS`, `ADMISSION`, `IMAGING`, `AI_OUTPUT`).
+- **Adapters** (`ingestion/`): `synthetic` (reference), `geneva` (real Geneva CSV), `mimic` (MIMIC-III CSV). Geneva + MIMIC share `_shared.py` (CSV reader, normalisation params, sidecar contract validation, categorical decoding, panel builders). `__init__.py` re-exports `load_geneva`, `GenevaDataset`, `load_mimic`, `MimicDataset`.
+- **Sidecar drift gate**: `_shared.parse_normalisation_sidecar(..., check=True)` validates the columns/order/numeric content of the normalisation CSV against a frozen JSON expectation. CI runs both adapters' real-data sidecar smoke and fails on drift.
+- **FastAPI + HTMX UI** (`web/`): `app.py` factory + lifespan, `routes.py` (timepoint slicing + per-patient routes), `panels.py` (5-state taxonomy: loading / empty-expected / empty-unexpected / partial / error), `charts.py` (plotnine SVG renderer with a11y fallback table), Jinja templates and static assets. CLI entrypoint `ehr-simulator serve` boots the server.
+- **Logging** (`logging.py`): structlog JSONL pipeline rolling at UTC midnight to `./logs/current.jsonl`.
+- **Tests**: 110 tests across 13 files (canonical, synthetic, geneva, mimic, shared, charts, panels, routes, cli, logging, a11y, static_assets, data_contract). 4 additional `@pytest.mark.real_data` tests run only in CI's real-data smoke job.
+
+Still not shipped: SQLite, login/clinician identity, question-answering with per-timepoint gating, CSV export, AI-on/AI-off randomization, MIMIC/Geneva real-data wired into the UI. Those land in Sessions 5-11 per `specs/ROADMAP.md`.
 
 Commands:
 
 - `uv sync` — install dependencies (generates `uv.lock` on first run).
-- `uv run pytest` — run the test suite (15 tests, parallelized via `pytest-xdist`).
+- `uv run pytest` — run the test suite (110 tests, parallelized via `pytest-xdist`; real-data tests deselected by default).
+- `uv run pytest -m real_data` — run the real-data smoke suite (requires Geneva + MIMIC CSVs at `.EXAMPLE_DATA_PATHS`).
 - `uv run ruff check .` — lint.
 - `uv run ruff format .` — format.
+- `uv run ehr-simulator serve` — boot the FastAPI server at http://localhost:8000.
 
-CI (`.github/workflows/ci.yml`) runs `uv sync --locked`, `ruff check`, `ruff format --check`, and `pytest` on Python 3.11 and 3.12.
+CI (`.github/workflows/ci.yml`) runs `uv sync --locked`, `ruff check`, `ruff format --check`, `pytest` on Python 3.11 and 3.12, plus a real-data smoke job that exercises both adapters and the sidecar drift gate.
 
 ## What's being built
 

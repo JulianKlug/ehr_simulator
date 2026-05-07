@@ -86,7 +86,7 @@ def render_contract() -> str:
     closing = (
         "Adapter-specific routing rules: see "
         "`ehr_simulator/ingestion/{adapter}.py` module docstring "
-        "(currently: `synthetic.py`, `geneva.py`)."
+        "(currently: `synthetic.py`, `geneva.py`, `mimic.py`)."
     )
     parts = [
         "# Canonical data contract",

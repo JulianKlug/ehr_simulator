@@ -80,4 +80,4 @@ The public entry point is :func:`validate`.
 
 **Uniqueness:** `patient_id`, `t_minutes`, `model_id`.
 
-Adapter-specific routing rules: see `ehr_simulator/ingestion/{adapter}.py` module docstring (currently: `synthetic.py`, `geneva.py`).
+Adapter-specific routing rules: see `ehr_simulator/ingestion/{adapter}.py` module docstring (currently: `synthetic.py`, `geneva.py`, `mimic.py`).
