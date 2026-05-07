@@ -19,7 +19,10 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
+from ehr_simulator.ingestion import _shared
 from ehr_simulator.ingestion._shared import (
+    CategoricalGroup,
+    _decode_categorical,
     _drop_imputed,
     _inverse_normalize,
     _load_categorical_encoding,
@@ -118,6 +121,82 @@ def test_shared_path_traversal_guard_dataset_param_in_issue(tmp_path: Path) -> N
     with pytest.raises(AdapterError) as exc_mimic:
         _path_traversal_guard(outside, tmp_path, dataset="mimic")
     assert exc_mimic.value.issues[0].dataset == "mimic"
+
+
+# ---------------------------------------------------------------------------
+# #4 — layered parity regression: function identity + behavioral cross-vocab
+# ---------------------------------------------------------------------------
+
+
+def test_shared_helpers_produce_identical_output_for_equivalent_inputs() -> None:
+    """ROADMAP-mandated parity regression.
+
+    Sub-(a) function identity: every helper exported by ``_shared.__all__``
+    is the same Python object whether reached via ``geneva`` or ``mimic``.
+    Catches accidental re-fork.
+
+    Sub-(b) behavioral parity on synthetic cross-vocabulary inputs: the
+    helper output is identical regardless of which adapter's source vocab
+    the input rows came from.
+    """
+    from ehr_simulator.ingestion import geneva as geneva_module
+    from ehr_simulator.ingestion import mimic as mimic_module
+
+    # Sub-(a): function identity over _shared.__all__
+    for name in _shared.__all__:
+        shared_obj = getattr(_shared, name)
+        geneva_obj = getattr(geneva_module, name)
+        mimic_obj = getattr(mimic_module, name)
+        assert shared_obj is geneva_obj, f"{name} re-forked between _shared and geneva"
+        assert shared_obj is mimic_obj, f"{name} re-forked between _shared and mimic"
+
+    # Sub-(b1): _drop_imputed produces same surviving row-count regardless of
+    # which dataset's source vocab the rows came from.
+    cross_vocab = pd.DataFrame(
+        {
+            "source": [
+                "EHR",
+                "stroke_registry",
+                "stroke_registry_pop_imputed",
+                "notes",
+                "notes_locf_imputed",
+                "missing_pop_imputed",
+            ],
+            "value": [1, 2, 3, 4, 5, 6],
+        }
+    )
+    survivors_via_geneva = geneva_module._drop_imputed(cross_vocab)
+    survivors_via_mimic = mimic_module._drop_imputed(cross_vocab)
+    pd.testing.assert_frame_equal(survivors_via_geneva, survivors_via_mimic)
+    assert sorted(survivors_via_geneva["source"].tolist()) == [
+        "EHR",
+        "notes",
+        "stroke_registry",
+    ]
+
+    # Sub-(b2): _inverse_normalize is pure math — same z, mean, std → same float
+    z, mean, std = 1.5, 73.6, 14.5
+    via_geneva = geneva_module._inverse_normalize(z, mean, std)
+    via_mimic = mimic_module._inverse_normalize(z, mean, std)
+    assert via_geneva == via_mimic
+
+    # Sub-(b3): _decode_categorical returns the same (label, None) regardless
+    # of the dataset kwarg when only one row is >=0.5.
+    group = CategoricalGroup(
+        group_name="Sex",
+        baseline="Female",
+        other_labels=("Male",),
+        one_hot_columns=("sex_male",),
+    )
+    rows = pd.DataFrame([{"sample_label": "sex_male", "value": 0.7}])
+    decoded_g, issue_g = _decode_categorical(
+        rows, group, strict=True, patient_id="p1", dataset="geneva"
+    )
+    decoded_m, issue_m = _decode_categorical(
+        rows, group, strict=True, patient_id="p1", dataset="mimic"
+    )
+    assert decoded_g == decoded_m == "Male"
+    assert issue_g is None and issue_m is None
 
 
 # ---------------------------------------------------------------------------
