@@ -29,6 +29,10 @@ jobs:
         run: uv run pytest
       - name: Data-contract drift check
         run: uv run python scripts/gen_data_contract.py --check
+      - name: Geneva fixture sidecar drift check
+        run: uv run python tests/fixtures/geneva/build_geneva_fixture.py --check
+      - name: MIMIC fixture sidecar drift check
+        run: uv run python tests/fixtures/mimic/build_mimic_fixture.py --check
 
   e2e:
     runs-on: ubuntu-latest
