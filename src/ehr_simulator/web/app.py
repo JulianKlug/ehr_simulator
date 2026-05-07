@@ -45,6 +45,7 @@ from ehr_simulator.logging import (
     reset_request_context,
     setup_logging,
 )
+from ehr_simulator.web.middleware import CSPMiddleware
 from ehr_simulator.web.panels import DatasetLike
 
 _THIS_DIR = Path(__file__).resolve().parent
@@ -95,6 +96,7 @@ def create_app(
 
     app.include_router(router)
     app.add_middleware(RequestContextMiddleware)
+    app.add_middleware(CSPMiddleware)
     return app
 
 
