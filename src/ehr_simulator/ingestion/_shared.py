@@ -30,9 +30,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
+import structlog
 
 from ehr_simulator.ingestion.canonical import CanonicalShape, validate
 from ehr_simulator.ingestion.exceptions import AdapterError, IngestionIssue
+
+_LOG = structlog.get_logger("ehr_simulator")
 
 __all__ = [
     "CategoricalGroup",
@@ -332,6 +335,15 @@ def _decode_categorical(
 
     argmax_idx = values.idxmax()
     picked_label = label_for_column[labels.loc[argmax_idx]]
+    _LOG.warning(
+        "categorical decode fell back to argmax",
+        event_kind="ingest.categorical.argmax_fallback",
+        dataset=dataset,
+        patient_id=patient_id,
+        group_name=group.group_name,
+        winner_label=picked_label,
+        candidate_count=n_above,
+    )
     issue = IngestionIssue(
         dataset=dataset,
         patient_id=patient_id,
@@ -405,6 +417,12 @@ def _read_features_csv(
         for src in unknown_in_chunk:
             if src not in seen_unknown:
                 seen_unknown.add(src)
+                _LOG.warning(
+                    "unrecognized source value",
+                    event_kind="ingest.source.unrecognized",
+                    dataset=dataset,
+                    source_value=src,
+                )
                 issues.append(
                     IngestionIssue(
                         dataset=dataset,

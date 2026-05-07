@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pandas as pd
 import pytest
+import structlog
 
 from ehr_simulator.ingestion import _shared
 from ehr_simulator.ingestion._shared import (
@@ -259,3 +260,77 @@ def test_shared_read_features_csv_emits_issue_for_unrecognized_source(tmp_path: 
         i.dataset == "geneva" and i.reason == "unrecognized source value: unknown_vocab_v2"
         for i in issues
     )
+
+
+# ---------------------------------------------------------------------------
+# #8 — _decode_categorical argmax fallback emits structlog WARNING (S5)
+# ---------------------------------------------------------------------------
+
+
+def test_decode_categorical_argmax_fallback_emits_warning() -> None:
+    """Per /plan-eng-review note in §3: use ``structlog.testing.capture_logs``
+    NOT pytest's ``caplog`` — structlog events do not flow through stdlib
+    logging unless explicitly chained, so caplog would silently miss them.
+    """
+    group = CategoricalGroup(
+        group_name="stroke_location",
+        baseline="left_MCA",
+        other_labels=("right_MCA", "no_stroke"),
+        one_hot_columns=("stroke_location_right_mca", "stroke_location_no_stroke"),
+    )
+    rows = pd.DataFrame(
+        {
+            "sample_label": ["stroke_location_right_mca", "stroke_location_no_stroke"],
+            "value": [0.7, 0.6],  # both >=0.5 → ambiguous
+        }
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        decoded, issue = _decode_categorical(
+            rows,
+            group,
+            strict=False,
+            patient_id="p1",
+            dataset="geneva",
+        )
+
+    assert issue is not None  # S3 behavior preserved
+    assert decoded in {"right_MCA", "no_stroke"}
+    warning_events = [
+        e for e in captured if e.get("event_kind") == "ingest.categorical.argmax_fallback"
+    ]
+    assert len(warning_events) == 1
+    event = warning_events[0]
+    assert event["log_level"] == "warning"
+    assert event["dataset"] == "geneva"
+    assert event["patient_id"] == "p1"
+    assert event["group_name"] == "stroke_location"
+    assert event["candidate_count"] == 2
+
+
+def test_read_features_csv_unrecognized_source_emits_warning(tmp_path: Path) -> None:
+    csv = tmp_path / "tiny.csv"
+    pd.DataFrame(
+        {
+            "relative_sample_date_hourly_cat": [0, 0],
+            "case_admission_id": ["p1", "p1"],
+            "sample_label": ["age", "weight"],
+            "source": ["EHR", "leaked_vocab"],
+            "value": [0.1, 0.2],
+        }
+    ).to_csv(csv, index=False)
+
+    with structlog.testing.capture_logs() as captured:
+        _read_features_csv(
+            csv,
+            required_columns=_REQUIRED_COLUMNS,
+            dataset="geneva",
+            known_sources=("EHR", "stroke_registry"),
+        )
+
+    warning_events = [e for e in captured if e.get("event_kind") == "ingest.source.unrecognized"]
+    assert len(warning_events) == 1
+    event = warning_events[0]
+    assert event["log_level"] == "warning"
+    assert event["dataset"] == "geneva"
+    assert event["source_value"] == "leaked_vocab"

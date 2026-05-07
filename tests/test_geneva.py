@@ -580,3 +580,59 @@ def test_load_geneva_raises_on_missing_required_columns(
     with pytest.raises(AdapterError) as exc:
         load_geneva(out_csv, geneva_fixture_dir, strict=True)
     assert "source" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# S5: defensive-issue test — _read_features_csv against the Geneva fixture
+# ---------------------------------------------------------------------------
+
+
+def test_read_features_csv_emits_issue_for_unrecognized_source_geneva_fixture(
+    geneva_fixture_dir: Path, tmp_path: Path
+) -> None:
+    """TODOS.md S4 carryover: a MIMIC vocab leak (``source = "notes"``) into
+    a Geneva CSV must surface as an :class:`IngestionIssue` AND a structlog
+    WARNING — never as a silent drop. Mirror of test_shared.py #7 + #8 but
+    exercises the real Geneva fixture so the integration boundary is locked.
+    """
+    import structlog
+
+    from ehr_simulator.ingestion._shared import _read_features_csv
+
+    base = pd.read_csv(geneva_fixture_dir / "geneva_sample.csv")
+    leaked_row = pd.DataFrame(
+        {
+            "relative_sample_date_hourly_cat": [0],
+            "case_admission_id": ["geneva_fixture_001"],
+            "sample_label": ["age"],
+            "source": ["notes"],
+            "value": [42.0],
+        }
+    )
+    polluted = pd.concat([base, leaked_row], ignore_index=True)
+    polluted_csv = tmp_path / "geneva_with_leak.csv"
+    polluted.to_csv(polluted_csv, index=False)
+
+    with structlog.testing.capture_logs() as captured:
+        frame, issues = _read_features_csv(
+            polluted_csv,
+            required_columns=(
+                "relative_sample_date_hourly_cat",
+                "case_admission_id",
+                "sample_label",
+                "source",
+                "value",
+            ),
+            dataset="geneva",
+            known_sources=("EHR", "stroke_registry"),
+        )
+
+    # (a) The leaked row is dropped.
+    assert "notes" not in frame["source"].astype(str).tolist()
+    # (b) The structlog WARNING fires.
+    warning_events = [e for e in captured if e.get("event_kind") == "ingest.source.unrecognized"]
+    assert len(warning_events) == 1
+    assert warning_events[0]["dataset"] == "geneva"
+    assert warning_events[0]["source_value"] == "notes"
+    # (c) The IngestionIssue surfaces in the issues list.
+    assert any(i.dataset == "geneva" and "notes" in i.reason for i in issues)
