@@ -1,0 +1,5 @@
+schema_version: "1"
+questions:
+  - question_id: q1
+    prompt: "A likert with no scale"
+    response_type: likert

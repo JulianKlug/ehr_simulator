@@ -1,0 +1,37 @@
+schema_version: "1"
+questions:
+  - question_id: deterioration_6h
+    prompt: "Will the patient have a neurological deterioration in the next 6 hours?"
+    response_type: categorical
+    options: [Yes, No, Unknown]
+
+  - question_id: survives_hospital
+    prompt: "Will the patient survive the hospital stay?"
+    response_type: categorical
+    options: [Yes, No, Unknown]
+
+  - question_id: good_outcome_3mo
+    prompt: "Will the patient have a good neurological outcome at 3 months?"
+    response_type: probability-0-100
+
+  - question_id: dead_6mo
+    prompt: "Will the patient be dead at 6 months?"
+    response_type: categorical
+    options: [Yes, No, Unknown]
+
+  - question_id: confidence
+    prompt: "How confident are you in your assessment?"
+    response_type: likert
+    scale_min: 1
+    scale_max: 5
+    scale_min_label: "Not at all"
+    scale_max_label: "Very"
+
+  - question_id: contributing_factors
+    prompt: "Which factors contributed most to your decision?"
+    response_type: multi-select
+    options: [Imaging, Vitals, Labs, Medical history, AI output]
+
+  - question_id: free_notes
+    prompt: "Any additional reasoning?"
+    response_type: free-text

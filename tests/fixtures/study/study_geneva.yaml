@@ -1,0 +1,7 @@
+schema_version: "1"
+dataset: geneva
+csv_path: ../geneva/geneva_sample.csv
+params_dir: ../geneva
+patient_ids: [geneva_fixture_001, geneva_fixture_002]
+time_unit: hours
+timepoints: [0, 1, 24, 48]

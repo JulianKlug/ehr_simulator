@@ -11,6 +11,9 @@ dependencies = [
     "jinja2>=3.1",
     "plotnine>=0.13",
     "structlog>=24.4",
+    "typer>=0.12",
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
 ]
 
 [project.scripts]
@@ -26,6 +29,7 @@ dev = [
     "beautifulsoup4>=4.12",
     "freezegun>=1.5",
     "openpyxl>=3.1",
+    "types-pyyaml>=6.0",
 ]
 
 [build-system]

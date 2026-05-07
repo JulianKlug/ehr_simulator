@@ -1,0 +1,5 @@
+schema_version: "1"
+dataset: synthetic
+patient_ids: [synth_001]
+time_unit: days
+timepoints: [0, 1]

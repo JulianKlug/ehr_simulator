@@ -1,0 +1,7 @@
+schema_version: "1"
+dataset: mimic
+csv_path: ../mimic/mimic_sample.csv
+params_dir: ../mimic
+patient_ids: [mimic_fixture_001, mimic_fixture_002]
+time_unit: hours
+timepoints: [0, 1, 24, 48]

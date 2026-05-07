@@ -1,0 +1,4 @@
+dataset: synthetic
+patient_ids: [synth_001]
+time_unit: minutes
+timepoints: [0, 60]

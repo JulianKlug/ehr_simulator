@@ -47,6 +47,11 @@ def mimic_fixture_dir() -> Path:
 
 
 @pytest.fixture
+def study_fixture_dir() -> Path:
+    return Path(__file__).parent / "fixtures" / "study"
+
+
+@pytest.fixture
 def client(tmp_log_dir: Path, dataset: SyntheticDataset) -> Iterator[object]:
     from fastapi.testclient import TestClient
 

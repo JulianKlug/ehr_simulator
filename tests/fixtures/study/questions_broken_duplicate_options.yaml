@@ -1,0 +1,6 @@
+schema_version: "1"
+questions:
+  - question_id: q1
+    prompt: "Categorical with duplicate options"
+    response_type: categorical
+    options: [Yes, No, Yes]

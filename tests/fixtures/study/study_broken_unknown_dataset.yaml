@@ -1,0 +1,5 @@
+schema_version: "1"
+dataset: omop
+patient_ids: [pid_001]
+time_unit: minutes
+timepoints: [0, 60]

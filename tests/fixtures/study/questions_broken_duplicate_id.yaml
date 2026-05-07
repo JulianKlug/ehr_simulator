@@ -1,0 +1,8 @@
+schema_version: "1"
+questions:
+  - question_id: dup
+    prompt: "First"
+    response_type: free-text
+  - question_id: dup
+    prompt: "Second with the same id"
+    response_type: free-text
