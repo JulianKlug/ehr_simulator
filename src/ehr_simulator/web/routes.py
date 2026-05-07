@@ -58,7 +58,12 @@ async def patient_timepoint(
         body = f'<div class="error-flash" role="alert">Patient \'{patient_id}\' not found</div>'
         return HTMLResponse(content=body, status_code=404)
 
-    timepoints = patient_timepoints(dataset, patient_id)
+    study_tps = getattr(request.app.state, "study_timepoints", None)
+    timepoints = (
+        tuple(float(t) for t in study_tps)
+        if study_tps is not None
+        else patient_timepoints(dataset, patient_id)
+    )
     if t_index < 0 or t_index >= len(timepoints):
         body = (
             f'<div class="error-flash" role="alert">'

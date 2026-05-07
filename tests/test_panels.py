@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 
 from ehr_simulator.ingestion.synthetic import load_synthetic
-from ehr_simulator.web.panels import patient_timepoints, slice_to_timepoint
+from ehr_simulator.web.panels import DatasetLike, patient_timepoints, slice_to_timepoint
 
 
 @pytest.fixture(scope="module")
@@ -81,3 +81,28 @@ def test_vitals_panel_routes_rr(synthetic) -> None:
     sliced = slice_to_timepoint(synthetic, "synth_001", t_minutes=180.0, timepoint_index=2)
     rr_rows = sliced.scalar_ts.loc[sliced.scalar_ts.variable == "rr"]
     assert not rr_rows.empty, "RR rows must reach the vitals panel slice"
+
+
+def test_dataset_like_protocol_accepts_all_three_dataset_classes(
+    synthetic, geneva_fixture_dir, mimic_fixture_dir
+) -> None:
+    """DatasetLike is structurally satisfied by all three adapter classes
+    (per /plan-eng-review tension B). Locks the typing generalization that
+    lets ``walk_preflight`` accept any adapter dataset."""
+    from ehr_simulator.ingestion.geneva import load_geneva
+    from ehr_simulator.ingestion.mimic import load_mimic
+
+    geneva = load_geneva(
+        geneva_fixture_dir / "geneva_sample.csv",
+        geneva_fixture_dir,
+        strict=False,
+    )
+    mimic = load_mimic(
+        mimic_fixture_dir / "mimic_sample.csv",
+        mimic_fixture_dir,
+        strict=False,
+    )
+
+    assert isinstance(synthetic, DatasetLike)
+    assert isinstance(geneva, DatasetLike)
+    assert isinstance(mimic, DatasetLike)

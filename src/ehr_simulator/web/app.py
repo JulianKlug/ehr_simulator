@@ -37,7 +37,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
 from ehr_simulator.ingestion.exceptions import AdapterError
-from ehr_simulator.ingestion.synthetic import SyntheticDataset, load_synthetic
+from ehr_simulator.ingestion.synthetic import load_synthetic
 from ehr_simulator.logging import (
     bind_request_context,
     get_logger,
@@ -45,6 +45,7 @@ from ehr_simulator.logging import (
     reset_request_context,
     setup_logging,
 )
+from ehr_simulator.web.panels import DatasetLike
 
 _THIS_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _THIS_DIR / "templates"
@@ -54,7 +55,7 @@ _STATIC_DIR = _THIS_DIR / "static"
 def create_app(
     *,
     log_dir: Path = Path("logs"),
-    dataset_loader: Callable[[], SyntheticDataset] = load_synthetic,
+    dataset_loader: Callable[[], DatasetLike] = load_synthetic,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -94,6 +95,36 @@ def create_app(
 
     app.include_router(router)
     app.add_middleware(RequestContextMiddleware)
+    return app
+
+
+def app_from_study_config(
+    study_path: Path,
+    questions_path: Path,
+    *,
+    log_dir: Path = Path("logs"),
+) -> FastAPI:
+    """Build a FastAPI app whose dataset_loader and timepoints come from the study config.
+
+    Sets ``app.state.study_timepoints`` to ``study.timepoints_minutes`` so
+    ``routes.patient_timepoint`` resolves the URL ordinal ``t_index`` against
+    the **study-defined** timepoints, not against dataset-derived ones (per
+    /plan-eng-review issue 1.2 — closes the silent study-validity bug where
+    Geneva's 24+ distinct timepoints would otherwise shadow a 3-timepoint
+    pilot study).
+
+    The synthetic-only ``serve`` path (no ``--config``) does NOT call this
+    function and therefore leaves ``app.state.study_timepoints`` unset; the
+    routes fall back to ``patient_timepoints(dataset, pid)`` in that case.
+    """
+    from ehr_simulator.cli_support import build_dataset_loader
+    from ehr_simulator.config import load_questions, load_study_config
+
+    study = load_study_config(study_path)
+    load_questions(questions_path)  # validate shape; the parsed model isn't wired up until S9
+    loader = build_dataset_loader(study)
+    app = create_app(log_dir=log_dir, dataset_loader=loader)
+    app.state.study_timepoints = list(study.timepoints_minutes)
     return app
 
 

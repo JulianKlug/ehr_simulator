@@ -14,14 +14,31 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol, runtime_checkable
 
 import pandas as pd
 
-from ehr_simulator.ingestion.synthetic import SyntheticDataset
-
 PanelState = Literal["loading", "empty-expected", "empty-unexpected", "partial", "error"]
 PanelName = Literal["vitals", "labs", "admission", "imaging", "ai"]
+
+
+@runtime_checkable
+class DatasetLike(Protocol):
+    """Structural type for any adapter dataset.
+
+    Per /plan-eng-review tension B: ``slice_to_timepoint`` and
+    ``patient_timepoints`` were originally typed against ``SyntheticDataset``
+    only, which prevented ``walk_preflight`` from compiling against
+    Geneva/MIMIC. The three adapter dataclasses (``SyntheticDataset``,
+    ``GenevaDataset``, ``MimicDataset``) all expose the four canonical-frame
+    attrs and so satisfy this Protocol structurally.
+    """
+
+    scalar_ts: pd.DataFrame
+    admission: pd.DataFrame
+    imaging: pd.DataFrame
+    ai_output: pd.DataFrame
+
 
 _VITAL_VARS = frozenset({"hr", "sbp", "dbp", "rr", "spo2", "temp"})
 _LAB_VARS = frozenset({"hgb", "na", "cr", "glucose", "wbc", "plt"})
@@ -50,7 +67,7 @@ class PatientSlice:
     panel_errors: dict[str, str | None]
 
 
-def patient_timepoints(dataset: SyntheticDataset, patient_id: str) -> tuple[float, ...]:
+def patient_timepoints(dataset: DatasetLike, patient_id: str) -> tuple[float, ...]:
     """Sorted distinct ``t_minutes`` for ``patient_id`` across all time-varying shapes.
 
     The ordinal URL index (``t_index``) maps into this tuple. Patients with
@@ -74,7 +91,7 @@ def patient_timepoints(dataset: SyntheticDataset, patient_id: str) -> tuple[floa
 
 
 def slice_to_timepoint(
-    dataset: SyntheticDataset,
+    dataset: DatasetLike,
     patient_id: str,
     t_minutes: float,
     timepoint_index: int,
