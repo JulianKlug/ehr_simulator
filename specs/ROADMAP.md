@@ -54,7 +54,7 @@ Locks in:
 
 **Test inventory:** ≥6 tests. ≥2 unit (structlog mandatory fields, plotnine renderer returns SVG). ≥2 integration (panel HTMX swap, keyboard shortcuts). ≥1 [→E2E] (one synthetic patient end-to-end render). ≥1 a11y assertion.
 
-### Session 3 — Geneva adapter [NEXT]
+### Session 3 — Geneva adapter [SHIPPED]
 
 Goal: `load_geneva(csv_path, params_path)` returns a dataset that conforms to all four canonical schemas, exercising every adapter responsibility documented in Session 1.
 
@@ -79,7 +79,7 @@ Helpers declared at module scope inside `geneva.py` (will be lifted to `_shared.
 
 **Fixture strategy:** `tests/fixtures/build_geneva_fixture.py` reads the real CSV, samples N rows per source category, replaces `value`/identifiers with random-but-realistic fakes, writes `tests/fixtures/geneva_sample.csv`. Both committed. Re-run when source schema changes.
 
-### Session 4 — MIMIC-III adapter
+### Session 4 — MIMIC-III adapter [NEXT]
 
 Goal: prove the canonical contract generalizes. MIMIC mirrors Geneva's structure; `notes` replaces `stroke_registry`, source vocabulary differs, normalization params live at a different path. Everything else should compose.
 

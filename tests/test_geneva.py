@@ -92,14 +92,18 @@ def test_inverse_normalize_round_trip() -> None:
 
 def test_decode_categorical_threshold_below_returns_baseline() -> None:
     rows = pd.DataFrame([_row("sex_male", 0.4)])
-    decoded, issue = _decode_categorical(rows, _SEX_GROUP, strict=True, patient_id="p1")
+    decoded, issue = _decode_categorical(
+        rows, _SEX_GROUP, strict=True, patient_id="p1", dataset="geneva"
+    )
     assert decoded == "Female"
     assert issue is None
 
 
 def test_decode_categorical_threshold_above_returns_match() -> None:
     rows_sex = pd.DataFrame([_row("sex_male", 0.7)])
-    decoded, issue = _decode_categorical(rows_sex, _SEX_GROUP, strict=True, patient_id="p1")
+    decoded, issue = _decode_categorical(
+        rows_sex, _SEX_GROUP, strict=True, patient_id="p1", dataset="geneva"
+    )
     assert decoded == "Male"
     assert issue is None
 
@@ -110,7 +114,9 @@ def test_decode_categorical_threshold_above_returns_match() -> None:
             _row("categorical_iat_<270min", 0.1),
         ]
     )
-    decoded, issue = _decode_categorical(rows_iat, _IAT_GROUP, strict=True, patient_id="p1")
+    decoded, issue = _decode_categorical(
+        rows_iat, _IAT_GROUP, strict=True, patient_id="p1", dataset="geneva"
+    )
     assert decoded == ">540min"
     assert issue is None
 
@@ -249,6 +255,7 @@ def test_load_categorical_encoding_covers_all_19_groups(geneva_fixture_dir: Path
     groups = _load_categorical_encoding(
         geneva_fixture_dir / "categorical_variable_encoding.csv",
         sample_labels,
+        dataset="geneva",
     )
     assert len(groups) == 19
     for group in groups.values():
@@ -260,13 +267,16 @@ def test_load_categorical_encoding_covers_all_19_groups(geneva_fixture_dir: Path
         _load_categorical_encoding(
             geneva_fixture_dir / "categorical_variable_encoding.csv",
             stripped,
+            dataset="geneva",
         )
     assert "sex_male" in str(exc.value)
 
 
 def test_decode_categorical_edge_cases() -> None:
     rows_eq = pd.DataFrame([_row("sex_male", 0.5)])
-    decoded, issue = _decode_categorical(rows_eq, _SEX_GROUP, strict=True, patient_id="p1")
+    decoded, issue = _decode_categorical(
+        rows_eq, _SEX_GROUP, strict=True, patient_id="p1", dataset="geneva"
+    )
     assert decoded == "Male"
     assert issue is None
 
@@ -278,19 +288,25 @@ def test_decode_categorical_edge_cases() -> None:
         ]
     )
     with pytest.raises(AdapterError) as exc_info:
-        _decode_categorical(rows_ambig, _IAT_GROUP, strict=True, patient_id="p_amb")
+        _decode_categorical(
+            rows_ambig, _IAT_GROUP, strict=True, patient_id="p_amb", dataset="geneva"
+        )
     assert exc_info.value.issues[0].patient_id == "p_amb"
     assert "ambiguous" in exc_info.value.issues[0].reason
 
     empty = pd.DataFrame(columns=["sample_label", "value"])
     with pytest.raises(AdapterError):
-        _decode_categorical(empty, _SEX_GROUP, strict=True, patient_id="p1")
-    decoded, issue = _decode_categorical(empty, _SEX_GROUP, strict=False, patient_id="p1")
+        _decode_categorical(empty, _SEX_GROUP, strict=True, patient_id="p1", dataset="geneva")
+    decoded, issue = _decode_categorical(
+        empty, _SEX_GROUP, strict=False, patient_id="p1", dataset="geneva"
+    )
     assert decoded == "Female"
     assert issue is not None
     assert "empty" in issue.reason
 
-    decoded, issue = _decode_categorical(rows_ambig, _IAT_GROUP, strict=False, patient_id="p_amb")
+    decoded, issue = _decode_categorical(
+        rows_ambig, _IAT_GROUP, strict=False, patient_id="p_amb", dataset="geneva"
+    )
     assert decoded == ">540min"
     assert issue is not None
     assert "picked >540min from 2 candidates" in issue.reason
@@ -313,12 +329,12 @@ def test_path_traversal_guard_rejects_outside_root(tmp_path: Path) -> None:
     inside.parent.mkdir(parents=True, exist_ok=True)
     inside.touch()
 
-    assert _path_traversal_guard(inside, tmp_path).resolve() == inside.resolve()
-    assert _path_traversal_guard(inside, None).resolve() == inside.resolve()
+    assert _path_traversal_guard(inside, tmp_path, dataset="geneva").resolve() == inside.resolve()
+    assert _path_traversal_guard(inside, None, dataset="geneva").resolve() == inside.resolve()
 
     other = Path("/tmp") / "ehr_traversal_test_outside"
     with pytest.raises(AdapterError) as exc:
-        _path_traversal_guard(other, tmp_path)
+        _path_traversal_guard(other, tmp_path, dataset="geneva")
     assert "path traversal" in exc.value.issues[0].reason
     assert str(other.resolve()) in exc.value.issues[0].reason
 
@@ -379,7 +395,7 @@ def test_load_normalisation_params_raises_on_missing_column(tmp_path: Path) -> N
     bad = tmp_path / "norm.csv"
     pd.DataFrame({"variable": ["age"], "original_mean": [1.0]}).to_csv(bad, index=False)
     with pytest.raises(AdapterError) as exc:
-        _load_normalisation_params(bad)
+        _load_normalisation_params(bad, dataset="geneva")
     assert "original_std" in str(exc.value)
 
 
@@ -393,7 +409,7 @@ def test_load_categorical_encoding_raises_on_malformed_cell(tmp_path: Path) -> N
         }
     ).to_csv(bad, index=False)
     with pytest.raises(AdapterError) as exc:
-        _load_categorical_encoding(bad, sample_labels={"sex_male"})
+        _load_categorical_encoding(bad, sample_labels={"sex_male"}, dataset="geneva")
     assert "Sex" in str(exc.value) or "row 0" in str(exc.value)
 
 
@@ -477,7 +493,12 @@ def test_load_geneva_strict_vs_lenient(geneva_fixture_dir: Path, tmp_path: Path)
     assert isinstance(dataset, GenevaDataset)
 
     csv = pd.read_csv(geneva_fixture_dir / "geneva_sample.csv", dtype=str)
-    csv.loc[csv.index[0], "value"] = "not a number"
+    surviving = csv.index[
+        ~csv["source"].astype(str).str.contains("imputed", na=False)
+        & (csv["source"].astype(str) == "EHR")
+    ]
+    assert len(surviving) > 0, "fixture must contain at least one non-imputed EHR row"
+    csv.loc[surviving[0], "value"] = "not a number"
     out_csv = tmp_path / "geneva_sample.csv"
     csv.to_csv(out_csv, index=False)
     for fname in ("normalisation_parameters.csv", "categorical_variable_encoding.csv"):
@@ -514,7 +535,7 @@ def test_load_geneva_orphan_registry_variable_emits_issue(
     )
     orphan_reasons = [i.reason for i in dataset.issues if i.reason.startswith("orphan ")]
     assert orphan_reasons, "expected the fixture to contain orphan registry variables"
-    assert any("hypoperfusion" in r or "vascular" in r for r in orphan_reasons)
+    assert any("made_up_orphan_var" in r for r in orphan_reasons)
 
 
 # ---------------------------------------------------------------------------

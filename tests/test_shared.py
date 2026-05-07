@@ -1,0 +1,182 @@
+"""Lift-equivalence + FNF + unrecognized-source defense for `_shared.py`.
+
+These tests lock the parameterization contract introduced when S4 lifted
+S3's helpers out of :mod:`ehr_simulator.ingestion.geneva`. Each test
+exercises a helper across both Geneva and MIMIC inputs (or against
+synthetic frames spanning both source vocabularies) so that re-forking
+the helpers later — adding dataset-specific behavior in either adapter
+— surfaces as a failing test, not a silent divergence.
+
+The function-identity sub-test (#4) lands when ``mimic.py`` does, in
+commit 2; the remaining six tests land in commit 1.
+"""
+
+from __future__ import annotations
+
+import math
+from pathlib import Path
+
+import pandas as pd
+import pytest
+
+from ehr_simulator.ingestion._shared import (
+    _drop_imputed,
+    _inverse_normalize,
+    _load_categorical_encoding,
+    _load_normalisation_params,
+    _path_traversal_guard,
+    _read_features_csv,
+)
+from ehr_simulator.ingestion.exceptions import AdapterError
+
+_REQUIRED_COLUMNS: tuple[str, ...] = (
+    "relative_sample_date_hourly_cat",
+    "case_admission_id",
+    "sample_label",
+    "source",
+    "value",
+)
+
+
+# ---------------------------------------------------------------------------
+# #1 — _drop_imputed across both source vocabularies
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("source_vocab", "non_imputed_survivors"),
+    [
+        (
+            (
+                "EHR",
+                "EHR_locf_imputed",
+                "EHR_pop_imputed",
+                "EHR_pop_imputed_locf_imputed",
+                "stroke_registry",
+                "stroke_registry_locf_imputed",
+                "stroke_registry_pop_imputed",
+                "stroke_registry_pop_imputed_locf_imputed",
+            ),
+            ("EHR", "stroke_registry"),
+        ),
+        (
+            (
+                "EHR",
+                "EHR_locf_imputed",
+                "EHR_pop_imputed",
+                "EHR_pop_imputed_locf_imputed",
+                "notes",
+                "notes_locf_imputed",
+                "missing_pop_imputed",
+                "missing_pop_imputed_locf_imputed",
+            ),
+            ("EHR", "notes"),
+        ),
+    ],
+    ids=["geneva", "mimic"],
+)
+def test_shared_drop_imputed_handles_geneva_and_mimic_source_vocabularies(
+    source_vocab: tuple[str, ...], non_imputed_survivors: tuple[str, ...]
+) -> None:
+    frame = pd.DataFrame({"source": list(source_vocab), "value": list(range(len(source_vocab)))})
+    out = _drop_imputed(frame)
+    assert sorted(out["source"].tolist()) == sorted(non_imputed_survivors)
+
+
+# ---------------------------------------------------------------------------
+# #2 — inverse_normalize round-trip on real (mean, std) pairs from both datasets
+# ---------------------------------------------------------------------------
+
+
+def test_shared_inverse_normalize_pure_math() -> None:
+    geneva_params = pd.read_csv(
+        Path(__file__).parent / "fixtures" / "geneva" / "normalisation_parameters.csv"
+    )
+    pairs = [
+        (float(row.original_mean), float(row.original_std))
+        for row in geneva_params.itertuples(index=False)
+        if float(row.original_std) > 0.0
+    ]
+    assert pairs, "expected at least one (mean, std) pair in Geneva normalisation_parameters"
+    for x, (mean, std) in zip([0.5, -1.2, 17.3, -42.0], pairs[:4], strict=True):
+        z = (x - mean) / std
+        assert math.isclose(_inverse_normalize(z, mean, std), x, abs_tol=1e-9)
+
+
+# ---------------------------------------------------------------------------
+# #3 — path-traversal-guard threads dataset kwarg into the issue
+# ---------------------------------------------------------------------------
+
+
+def test_shared_path_traversal_guard_dataset_param_in_issue(tmp_path: Path) -> None:
+    outside = Path("/tmp") / "ehr_traversal_test_shared_outside"
+
+    with pytest.raises(AdapterError) as exc_geneva:
+        _path_traversal_guard(outside, tmp_path, dataset="geneva")
+    assert exc_geneva.value.issues[0].dataset == "geneva"
+
+    with pytest.raises(AdapterError) as exc_mimic:
+        _path_traversal_guard(outside, tmp_path, dataset="mimic")
+    assert exc_mimic.value.issues[0].dataset == "mimic"
+
+
+# ---------------------------------------------------------------------------
+# #5 — _load_normalisation_params wraps FileNotFoundError as AdapterError
+# ---------------------------------------------------------------------------
+
+
+def test_shared_load_normalisation_params_wraps_fnf_as_adapter_error(tmp_path: Path) -> None:
+    missing = tmp_path / "does_not_exist" / "reference_population_normalisation_parameters.csv"
+    with pytest.raises(AdapterError) as exc:
+        _load_normalisation_params(missing, dataset="mimic")
+    assert "mimic" in str(exc.value)
+    assert missing.name in str(exc.value)
+    assert str(missing) in str(exc.value)
+    assert exc.value.issues[0].dataset == "mimic"
+    assert "not found" in exc.value.issues[0].reason
+
+
+# ---------------------------------------------------------------------------
+# #6 — _load_categorical_encoding wraps FileNotFoundError as AdapterError
+# ---------------------------------------------------------------------------
+
+
+def test_shared_load_categorical_encoding_wraps_fnf_as_adapter_error(tmp_path: Path) -> None:
+    missing = tmp_path / "does_not_exist" / "categorical_variable_encoding.csv"
+    with pytest.raises(AdapterError) as exc:
+        _load_categorical_encoding(missing, sample_labels=set(), dataset="geneva")
+    assert "geneva" in str(exc.value)
+    assert missing.name in str(exc.value)
+    assert str(missing) in str(exc.value)
+    assert exc.value.issues[0].dataset == "geneva"
+    assert "not found" in exc.value.issues[0].reason
+
+
+# ---------------------------------------------------------------------------
+# #7 — _read_features_csv emits IngestionIssue for unrecognized source
+# ---------------------------------------------------------------------------
+
+
+def test_shared_read_features_csv_emits_issue_for_unrecognized_source(tmp_path: Path) -> None:
+    csv = tmp_path / "tiny.csv"
+    pd.DataFrame(
+        {
+            "relative_sample_date_hourly_cat": [0, 0, 0],
+            "case_admission_id": ["p1", "p1", "p1"],
+            "sample_label": ["age", "weight", "age"],
+            "source": ["EHR", "stroke_registry", "unknown_vocab_v2"],
+            "value": [0.1, 0.2, 0.3],
+        }
+    ).to_csv(csv, index=False)
+
+    frame, issues = _read_features_csv(
+        csv,
+        required_columns=_REQUIRED_COLUMNS,
+        dataset="geneva",
+        known_sources=("EHR", "stroke_registry"),
+    )
+    assert "unknown_vocab_v2" not in frame["source"].astype(str).tolist()
+    assert any(
+        i.dataset == "geneva" and i.reason == "unrecognized source value: unknown_vocab_v2"
+        for i in issues
+    )

@@ -38,7 +38,12 @@ def tmp_log_dir(tmp_path: Path) -> Iterator[Path]:
 
 @pytest.fixture
 def geneva_fixture_dir() -> Path:
-    return Path(__file__).parent / "fixtures"
+    return Path(__file__).parent / "fixtures" / "geneva"
+
+
+@pytest.fixture
+def mimic_fixture_dir() -> Path:
+    return Path(__file__).parent / "fixtures" / "mimic"
 
 
 @pytest.fixture
