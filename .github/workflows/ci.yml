@@ -33,6 +33,22 @@ jobs:
         run: uv run python tests/fixtures/geneva/build_geneva_fixture.py --check
       - name: MIMIC fixture sidecar drift check
         run: uv run python tests/fixtures/mimic/build_mimic_fixture.py --check
+      - name: CLI smoke
+        run: |
+          uv run ehr-simulator validate-config \
+            tests/fixtures/study/study_synthetic.yaml \
+            tests/fixtures/study/questions.yaml
+          uv run ehr-simulator validate-adapter \
+            tests/fixtures/study/study_synthetic.yaml
+          uv run ehr-simulator preflight \
+            tests/fixtures/study/study_synthetic.yaml \
+            tests/fixtures/study/questions.yaml
+          uv run ehr-simulator preview \
+            tests/fixtures/study/study_synthetic.yaml \
+            --patient synth_001 \
+            --questions tests/fixtures/study/questions.yaml \
+            --html-out /tmp/preview_smoke
+          test -s /tmp/preview_smoke/synth_001_t0.html
 
   e2e:
     runs-on: ubuntu-latest
