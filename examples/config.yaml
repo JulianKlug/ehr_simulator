@@ -1,0 +1,34 @@
+# Example study configuration — synthetic dataset.
+#
+# Works out of the box. Use this as the hello-world to exercise the CLI:
+#
+#   uv run ehr-simulator validate-config examples/config.yaml examples/questions.yaml
+#   uv run ehr-simulator validate-adapter examples/config.yaml
+#   uv run ehr-simulator preflight examples/config.yaml examples/questions.yaml
+#   uv run ehr-simulator preview examples/config.yaml --patient synth_001
+#   uv run ehr-simulator serve --config examples/config.yaml --questions examples/questions.yaml
+#
+# Copy this file and edit for a real pilot — see examples/geneva-config.yaml
+# for the real-data shape with csv_path/params_dir overrides.
+
+schema_version: "1"
+
+# `synthetic` ships three deterministic patients (synth_001/002/003) at
+# t = 0, 60, 180 minutes. No paths required. For real datasets switch to
+# `geneva` or `mimic` and add csv_path + params_dir.
+dataset: synthetic
+
+# Order is meaningful — the simulator walks patients in this sequence per
+# clinician session.
+patient_ids:
+  - synth_001
+  - synth_002
+  - synth_003
+
+# Either `minutes` or `hours`. Storage and URL ordinals are always in
+# minutes; this is just the wire format.
+time_unit: minutes
+
+# Sorted ascending, no duplicates, all >= 0. The URL ordinal `t_index`
+# maps into this list (t_index=0 -> first timepoint, etc.).
+timepoints: [0, 60, 180]

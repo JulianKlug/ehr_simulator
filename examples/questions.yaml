@@ -1,0 +1,50 @@
+# Example questions configuration.
+#
+# Five response-type primitives (likert, categorical, multi-select,
+# probability-0-100, free-text). Per-timepoint clinician answers are not
+# yet wired into the UI (that lands in S9a/b); validate-config + the
+# CLI commands accept this file today so the pilot can lock the question
+# set early.
+#
+# question_id must match ^[a-z0-9_]+$ — lowercase, digits, underscore
+# only (it becomes a CSV column suffix in S9c export, so no spaces or
+# special characters).
+
+schema_version: "1"
+
+questions:
+  - question_id: deterioration_6h
+    prompt: "Will the patient have a neurological deterioration in the next 6 hours?"
+    response_type: categorical
+    options: [Yes, No, Unknown]
+
+  - question_id: survives_hospital
+    prompt: "Will the patient survive the hospital stay?"
+    response_type: categorical
+    options: [Yes, No, Unknown]
+
+  - question_id: good_outcome_3mo
+    prompt: "What is the probability of a good neurological outcome at 3 months (mRS 0-2)?"
+    response_type: probability-0-100
+
+  - question_id: dead_6mo
+    prompt: "Will the patient be dead at 6 months?"
+    response_type: categorical
+    options: [Yes, No, Unknown]
+
+  - question_id: confidence
+    prompt: "How confident are you in your assessment?"
+    response_type: likert
+    scale_min: 1
+    scale_max: 5
+    scale_min_label: "Not at all"
+    scale_max_label: "Very"
+
+  - question_id: contributing_factors
+    prompt: "Which factors contributed most to your decision?"
+    response_type: multi-select
+    options: [Imaging, Vitals, Labs, Medical history, AI output]
+
+  - question_id: free_notes
+    prompt: "Any additional reasoning?"
+    response_type: free-text
