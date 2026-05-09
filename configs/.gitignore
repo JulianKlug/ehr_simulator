@@ -1,0 +1,8 @@
+# Local pilot configs stay out of version control — only the committed
+# example_*.yaml files (templates) are tracked. Anything else here is
+# treated as user-local and may contain real dataset paths or pilot
+# patient IDs that should not leak via git.
+
+*
+!.gitignore
+!example_*.yaml

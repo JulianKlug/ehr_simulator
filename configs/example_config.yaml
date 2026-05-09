@@ -2,14 +2,15 @@
 #
 # Works out of the box. Use this as the hello-world to exercise the CLI:
 #
-#   uv run ehr-simulator validate-config examples/config.yaml examples/questions.yaml
-#   uv run ehr-simulator validate-adapter examples/config.yaml
-#   uv run ehr-simulator preflight examples/config.yaml examples/questions.yaml
-#   uv run ehr-simulator preview examples/config.yaml --patient synth_001
-#   uv run ehr-simulator serve --config examples/config.yaml --questions examples/questions.yaml
+#   uv run ehr-simulator validate-config  configs/example_config.yaml configs/example_questions.yaml
+#   uv run ehr-simulator validate-adapter configs/example_config.yaml
+#   uv run ehr-simulator preflight        configs/example_config.yaml configs/example_questions.yaml
+#   uv run ehr-simulator preview          configs/example_config.yaml --patient synth_001
+#   uv run ehr-simulator serve --config   configs/example_config.yaml --questions configs/example_questions.yaml
 #
-# Copy this file and edit for a real pilot — see examples/geneva-config.yaml
-# for the real-data shape with csv_path/params_dir overrides.
+# Copy this file (e.g. to configs/my-study.yaml) and edit for a real pilot.
+# Anything under configs/ other than the committed example_*.yaml files is
+# gitignored — local pilot configs stay out of version control.
 
 schema_version: "1"
 
