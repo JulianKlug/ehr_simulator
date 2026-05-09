@@ -334,3 +334,122 @@ def test_read_features_csv_unrecognized_source_emits_warning(tmp_path: Path) -> 
     assert event["log_level"] == "warning"
     assert event["dataset"] == "geneva"
     assert event["source_value"] == "leaked_vocab"
+
+
+# ---------------------------------------------------------------------------
+# #10 — _build_admission decodes flat binary registry variables (S5 follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_build_admission_decodes_flat_binary_registry_variable() -> None:
+    """Geneva ships ~4 registry variables (vascular_occlusion,
+    hypoperfusion_*, vascular_stenosis_over_50p) as plain 0/1 flags, not
+    one-hot expansions. They appear in neither the normalisation_parameters
+    nor the categorical_variable_encoding lookups; pre-fix the adapter
+    silently dropped them as "orphan registry variable". Tier-3 decode
+    keeps the data as a True/False string and emits one WARNING per
+    distinct variable.
+    """
+    from ehr_simulator.ingestion._shared import _build_admission
+
+    registry_rows = pd.DataFrame(
+        {
+            "patient_id": ["p1", "p1", "p2", "p2"],
+            "t_minutes": [0.0, 0.0, 0.0, 0.0],
+            "sample_label": [
+                "vascular_occlusion",
+                "vascular_stenosis_over_50p",
+                "vascular_occlusion",
+                "vascular_stenosis_over_50p",
+            ],
+            "value": [1.0, 0.0, 0.0, 1.0],
+            "source": ["stroke_registry"] * 4,
+        }
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        admission, issues = _build_admission(
+            registry_rows,
+            norm_params={},
+            cat_groups={},
+            strict=False,
+            dataset="geneva",
+        )
+
+    # (a) Both flat binaries land in admission with True/False strings.
+    p1 = admission[admission["patient_id"] == "p1"]
+    p2 = admission[admission["patient_id"] == "p2"]
+    p1_map = dict(zip(p1["field"], p1["value"], strict=True))
+    p2_map = dict(zip(p2["field"], p2["value"], strict=True))
+    assert p1_map["vascular_occlusion"] == "True"
+    assert p1_map["vascular_stenosis_over_50p"] == "False"
+    assert p2_map["vascular_occlusion"] == "False"
+    assert p2_map["vascular_stenosis_over_50p"] == "True"
+
+    # (b) No "orphan registry variable" issues for these binaries.
+    assert not any("orphan registry variable" in i.reason for i in issues)
+
+    # (c) Exactly one WARNING per distinct variable (deduped across patients).
+    flat_warnings = [e for e in captured if e.get("event_kind") == "ingest.registry.flat_binary"]
+    flat_labels = sorted(e["sample_label"] for e in flat_warnings)
+    assert flat_labels == ["vascular_occlusion", "vascular_stenosis_over_50p"]
+
+
+def test_build_admission_strict_mode_still_emits_orphan_for_flat_binary() -> None:
+    """Under strict=True, the tier-3 decode is bypassed — orphan registry
+    variables continue to surface as IngestionIssue records (existing
+    behavior). Strict mode is the "I want to know everything that's
+    undeclared" gate; lenient is the "I want the data through" gate.
+    """
+    from ehr_simulator.ingestion._shared import _build_admission
+
+    registry_rows = pd.DataFrame(
+        {
+            "patient_id": ["p1"],
+            "t_minutes": [0.0],
+            "sample_label": ["vascular_occlusion"],
+            "value": [1.0],
+            "source": ["stroke_registry"],
+        }
+    )
+
+    admission, issues = _build_admission(
+        registry_rows,
+        norm_params={},
+        cat_groups={},
+        strict=True,
+        dataset="geneva",
+    )
+
+    assert "vascular_occlusion" not in admission["field"].tolist()
+    assert any(i.reason == "orphan registry variable: vascular_occlusion" for i in issues)
+
+
+def test_build_admission_non_binary_orphan_still_emits_issue() -> None:
+    """A non-binary value (e.g. 0.5, NaN) under an orphan label still
+    produces the IngestionIssue — only true 0/1 flags get the tier-3
+    decode. Guards against accidentally consuming a real numeric variable
+    that happens to skip the normalisation_parameters lookup.
+    """
+    from ehr_simulator.ingestion._shared import _build_admission
+
+    registry_rows = pd.DataFrame(
+        {
+            "patient_id": ["p1"],
+            "t_minutes": [0.0],
+            "sample_label": ["mystery_continuous"],
+            "value": [0.42],
+            "source": ["stroke_registry"],
+        }
+    )
+
+    admission, issues = _build_admission(
+        registry_rows,
+        norm_params={},
+        cat_groups={},
+        strict=False,
+        dataset="geneva",
+    )
+
+    assert "mystery_continuous" not in admission["field"].tolist()
+    assert any(i.reason == "orphan registry variable: mystery_continuous" for i in issues)

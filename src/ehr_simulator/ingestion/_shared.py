@@ -549,6 +549,7 @@ def _build_admission(
             one_hot_lookup[col] = group
 
     out_rows: list[dict[str, str]] = []
+    seen_flat_binary: set[str] = set()
     for patient_id, patient_rows in t0_rows.groupby("patient_id", sort=True):
         for group in cat_groups.values():
             mask = patient_rows["sample_label"].isin(group.one_hot_columns)
@@ -572,6 +573,33 @@ def _build_admission(
                 continue
             params = norm_params.get(label)
             if params is None:
+                # Tier 3: flat binary registry variable. Geneva ships some
+                # registry features (e.g. ``vascular_occlusion``) as plain
+                # 0/1 flags rather than as one-hot expansions of a declared
+                # categorical group. Under ``strict=False``, decode 0/1 to
+                # "False"/"True" (matching the existing categorical decode
+                # convention) and emit a once-per-variable WARNING so the
+                # gap is visible. Under strict, fall through to the orphan
+                # issue branch unchanged.
+                raw_value = float(row["value"])
+                if not strict and raw_value in (0.0, 1.0):
+                    decoded = "True" if raw_value == 1.0 else "False"
+                    if label not in seen_flat_binary:
+                        seen_flat_binary.add(label)
+                        _LOG.warning(
+                            "flat binary registry variable decoded as True/False",
+                            event_kind="ingest.registry.flat_binary",
+                            dataset=dataset,
+                            sample_label=label,
+                        )
+                    out_rows.append(
+                        {
+                            "patient_id": str(patient_id),
+                            "field": label,
+                            "value": decoded,
+                        }
+                    )
+                    continue
                 issues.append(
                     IngestionIssue(
                         dataset=dataset,
