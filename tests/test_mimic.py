@@ -399,3 +399,20 @@ def test_load_mimic_scalar_ts_unit_is_none_for_all_rows(mimic_fixture_dir: Path)
         strict=False,
     )
     assert dataset.scalar_ts["unit"].isna().all()
+
+
+def test_load_mimic_filters_to_patient_ids(mimic_fixture_dir: Path) -> None:
+    """Pilot-config push-down: ``patient_ids`` filters at the CSV reader
+    so a subset config doesn't pay the full-dataset cost."""
+    only_one = ("mimic_fixture_001",)
+    dataset = load_mimic(
+        mimic_fixture_dir / "mimic_sample.csv",
+        mimic_fixture_dir,
+        strict=False,
+        patient_ids=only_one,
+    )
+    scalar_pids = set(dataset.scalar_ts["patient_id"].astype(str).unique())
+    admission_pids = set(dataset.admission["patient_id"].astype(str).unique())
+    assert scalar_pids <= set(only_one)
+    assert admission_pids <= set(only_one)
+    assert "mimic_fixture_001" in admission_pids

@@ -148,6 +148,7 @@ def load_geneva(
     params_dir: Path,
     *,
     strict: bool = True,
+    patient_ids: tuple[str, ...] | None = None,
 ) -> GenevaDataset:
     """Load the Geneva preprocessed-features CSV into the four canonical shapes.
 
@@ -179,6 +180,7 @@ def load_geneva(
         required_columns=_REQUIRED_COLUMNS,
         dataset=_DATASET_NAME,
         known_sources=_NON_IMPUTED_SOURCES,
+        patient_ids=patient_ids,
     )
     issues.extend(read_issues)
     norm_params = _load_normalisation_params(

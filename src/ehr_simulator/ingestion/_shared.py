@@ -363,6 +363,7 @@ def _read_features_csv(
     dataset: str,
     known_sources: tuple[str, ...],
     chunksize: int = 500_000,
+    patient_ids: tuple[str, ...] | None = None,
 ) -> tuple[pd.DataFrame, list[IngestionIssue]]:
     """Read a preprocessed-features CSV in chunks and apply per-chunk filters.
 
@@ -371,12 +372,19 @@ def _read_features_csv(
     intentionally NOT in the dtype map so pandera's ``coerce=True`` can drop
     a malformed-value row in lenient mode rather than ``read_csv`` raising.
 
+    When ``patient_ids`` is set, each chunk is additionally filtered to keep
+    only rows whose ``case_admission_id`` is in the provided set. For pilot
+    use cases (a 3-50 patient subset of a 3K-patient dataset) this collapses
+    peak memory + load time by 50-1000× since most chunks drop to empty
+    after imputed + patient_id filtering.
+
     Defensive: any chunk row whose ``source`` is not in ``known_sources``
     (after imputed-substring filtering) is dropped and surfaces an
     :class:`IngestionIssue` once per unique unrecognized value. Locks the
     silent-drop failure mode for both adapters so a future Geneva CSV
     growing a ``notes`` row (or any new vocab drift) is visible, not lost.
     """
+    patient_filter = set(patient_ids) if patient_ids is not None else None
     header = pd.read_csv(csv_path, nrows=0)
     missing = set(required_columns) - set(header.columns)
     if missing:
@@ -412,6 +420,12 @@ def _read_features_csv(
         if chunk.empty:
             chunks.append(chunk)
             continue
+        if patient_filter is not None:
+            mask = chunk["case_admission_id"].astype(str).isin(patient_filter)
+            chunk = chunk[mask].reset_index(drop=True)
+            if chunk.empty:
+                chunks.append(chunk)
+                continue
         sources = chunk["source"].astype(str)
         unknown_in_chunk = set(sources.unique()) - known
         for src in unknown_in_chunk:

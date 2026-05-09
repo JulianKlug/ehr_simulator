@@ -59,12 +59,18 @@ def build_dataset_loader(study: StudyConfig) -> Callable[[], DatasetLike]:
 
     csv_path = Path(study.csv_path)
     params_dir = Path(study.params_dir)
+    # Filter at ingestion time so a pilot config (3-50 patients) doesn't
+    # pay the full-dataset memory + load-time cost (~600 MB / 51 s on
+    # Geneva real data). Skipped (None) only when no study config is in
+    # scope — `validate-adapter` and friends always pass a study, so the
+    # filter is always active when the CLI builds the loader.
+    pids = tuple(study.patient_ids)
 
     if dataset_name == "geneva":
         from ehr_simulator.ingestion.geneva import load_geneva
 
         def _load_geneva() -> DatasetLike:
-            return load_geneva(csv_path, params_dir, strict=False)
+            return load_geneva(csv_path, params_dir, strict=False, patient_ids=pids)
 
         return _load_geneva
 
@@ -72,7 +78,7 @@ def build_dataset_loader(study: StudyConfig) -> Callable[[], DatasetLike]:
         from ehr_simulator.ingestion.mimic import load_mimic
 
         def _load_mimic() -> DatasetLike:
-            return load_mimic(csv_path, params_dir, strict=False)
+            return load_mimic(csv_path, params_dir, strict=False, patient_ids=pids)
 
         return _load_mimic
 

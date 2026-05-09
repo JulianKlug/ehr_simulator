@@ -692,3 +692,45 @@ def test_load_geneva_renames_median_vitals_and_french_labs_to_canonical(
     # min_* and max_* aggregates pass through unchanged (they're real data
     # the panel layer just doesn't render today; S8 band rendering TODO).
     assert "max_heart_rate" in variables  # baseline fixture row, untouched
+
+
+# ---------------------------------------------------------------------------
+# S5 follow-up: patient_ids filter pushes down to the CSV reader
+# ---------------------------------------------------------------------------
+
+
+def test_load_geneva_filters_to_patient_ids(geneva_fixture_dir: Path) -> None:
+    """When ``patient_ids`` is set, every row in scalar_ts and admission must
+    belong to that subset. Pilot use case: 3 patients out of 3K should not
+    pay the full-dataset memory + load-time cost (~600 MB / 51 s on the real
+    Geneva CSV).
+    """
+    only_one = ("geneva_fixture_001",)
+    dataset = load_geneva(
+        geneva_fixture_dir / "geneva_sample.csv",
+        geneva_fixture_dir,
+        strict=False,
+        patient_ids=only_one,
+    )
+
+    scalar_pids = set(dataset.scalar_ts["patient_id"].astype(str).unique())
+    admission_pids = set(dataset.admission["patient_id"].astype(str).unique())
+    assert scalar_pids <= set(only_one)
+    assert admission_pids <= set(only_one)
+    # Sanity: at least the requested patient is present (the fixture has
+    # both geneva_fixture_001 and geneva_fixture_002).
+    assert "geneva_fixture_001" in scalar_pids
+    assert "geneva_fixture_001" in admission_pids
+
+
+def test_load_geneva_no_filter_loads_all_patients(geneva_fixture_dir: Path) -> None:
+    """Default (patient_ids=None) preserves S3 behavior: every patient in the
+    CSV ends up in admission/scalar_ts."""
+    dataset = load_geneva(
+        geneva_fixture_dir / "geneva_sample.csv",
+        geneva_fixture_dir,
+        strict=False,
+    )
+    pids = set(dataset.admission["patient_id"].astype(str).unique())
+    # Fixture has both patients.
+    assert {"geneva_fixture_001", "geneva_fixture_002"} <= pids
