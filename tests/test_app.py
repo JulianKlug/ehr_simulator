@@ -142,6 +142,14 @@ timepoints: [0, 60]
         in_study = client.get("/patient/synth_002/timepoint/0")
         assert in_study.status_code == 200
 
+        # The summary card's patient-jumper navigation must ALSO honor
+        # study_patient_ids — not just the index page. Off-study patient
+        # links would otherwise leak into the per-patient nav bar
+        # (user-reported 2026-05-09 against the real Geneva CSV: ~3K
+        # patients showed up in the per-patient selector).
+        assert "/patient/synth_001/timepoint" not in in_study.text
+        assert "/patient/synth_003/timepoint" not in in_study.text
+
 
 def test_app_from_study_config_preserves_patient_id_order(
     study_fixture_dir: Path, tmp_log_dir: Path

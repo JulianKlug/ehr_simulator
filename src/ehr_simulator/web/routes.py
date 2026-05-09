@@ -142,7 +142,14 @@ def _render_summary(patient_slice: PatientSlice, request: Request, *, chrome: st
         "ai": int(len(patient_slice.ai_output)),
         "admission": int(len(patient_slice.admission)),
     }
-    all_patient_ids = sorted(dataset.admission["patient_id"].unique().tolist())
+    # Mirror the index-route filter: with a study config loaded, the
+    # patient-jumper navigation only lists study patients (declared order
+    # preserved). Without a study config, fall back to the full dataset list.
+    study_patient_ids = getattr(request.app.state, "study_patient_ids", None)
+    if study_patient_ids is not None:
+        all_patient_ids = list(study_patient_ids)
+    else:
+        all_patient_ids = sorted(dataset.admission["patient_id"].unique().tolist())
     return templates.get_template("_summary_card.html").render(
         request=request,
         patient_slice=patient_slice,
