@@ -127,6 +127,7 @@ def app_from_study_config(
     loader = build_dataset_loader(study)
     app = create_app(log_dir=log_dir, dataset_loader=loader)
     app.state.study_timepoints = list(study.timepoints_minutes)
+    app.state.study_patient_ids = list(study.patient_ids)
     return app
 
 

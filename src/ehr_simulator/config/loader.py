@@ -13,6 +13,7 @@ change the hash. Consumed by S6 columns: ``answers.config_hash``,
 from __future__ import annotations
 
 import hashlib
+import re
 from pathlib import Path
 
 import yaml
@@ -23,6 +24,39 @@ from ehr_simulator.config.questions import Questions
 from ehr_simulator.config.study import StudyConfig
 
 
+class _ConfigLoader(yaml.SafeLoader):
+    """SafeLoader with the YAML 1.1 ``_``-as-digit-separator int resolver
+    removed.
+
+    Geneva's ``case_admission_id`` values look like ``100023_4784``. Under
+    pyyaml's default YAML 1.1 parsing those tokens match the int implicit
+    resolver (``100023_4784`` → int ``1000234784``, underscore stripped),
+    so the original ID is unrecoverable by the time Pydantic sees the data.
+    Removing the underscore-aware int pattern lets such tokens fall
+    through as plain strings, while plain numerics like ``60`` (in
+    ``timepoints``) still parse as ints.
+    """
+
+
+_ConfigLoader.yaml_implicit_resolvers = {
+    first_char: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:int"]
+    for first_char, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_ConfigLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:int",
+    re.compile(
+        r"""^(?:
+            [-+]?0b[0-1]+
+            |[-+]?0o?[0-7]+
+            |[-+]?(?:0|[1-9][0-9]*)
+            |[-+]?0x[0-9a-fA-F]+
+        )$""",
+        re.VERBOSE,
+    ),
+    list("-+0123456789"),
+)
+
+
 def _read_yaml(path: Path) -> dict:
     if not path.exists():
         raise ConfigError(f"{path}: file not found")
@@ -31,7 +65,7 @@ def _read_yaml(path: Path) -> dict:
     except OSError as exc:
         raise ConfigError(f"{path}: cannot read file ({exc})") from exc
     try:
-        data = yaml.safe_load(text)
+        data = yaml.load(text, Loader=_ConfigLoader)  # noqa: S506 - custom safe loader
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path}: invalid YAML ({exc})") from exc
     if data is None:

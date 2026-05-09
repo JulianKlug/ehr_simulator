@@ -158,6 +158,27 @@ def test_study_config_rejects(
     assert expected_field in str(excinfo.value)
 
 
+def test_study_config_patient_ids_coerce_yaml_numeric_literals(tmp_path: Path) -> None:
+    """YAML 1.1 (pyyaml's default) parses tokens like ``100023_4784`` as
+    numeric literals (underscore = digit separator). Geneva
+    ``case_admission_id`` values often look exactly like that. Without
+    coercion, a real-data study config would fail to load. Mirror of the
+    YAML-1.1 boolean mitigation in ``Question.options``.
+    """
+    path = tmp_path / "study.yaml"
+    path.write_text(
+        """schema_version: "1"
+dataset: synthetic
+patient_ids: [100023_4784, 1002417_9090]
+time_unit: minutes
+timepoints: [0]
+""",
+        encoding="utf-8",
+    )
+    study = load_study_config(path)
+    assert study.patient_ids == ["100023_4784", "1002417_9090"]
+
+
 def test_study_config_timepoints_minutes_property() -> None:
     study = StudyConfig(
         schema_version="1",

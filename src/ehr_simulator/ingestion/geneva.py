@@ -107,6 +107,32 @@ _REQUIRED_COLUMNS: tuple[str, ...] = (
 _NON_IMPUTED_SOURCES: tuple[str, ...] = ("EHR", "stroke_registry")
 _REGISTRY_SOURCE = "stroke_registry"
 
+# Map Geneva's per-hour-aggregate variable names to the canonical short codes
+# the panel layer (web/panels.py) filters on. Geneva ships min/median/max
+# triplets per vital per hour bucket; for now we surface the median under the
+# canonical name so the vitals panel renders. min_* and max_* rows pass
+# through unchanged — they stay in scalar_ts but won't match the vitals
+# filter, leaving room for an S8 band-rendering pass.
+#
+# Lab renames map French Geneva names to the canonical English short codes
+# the labs panel expects (hgb, na, cr, glucose, wbc, plt). `glucose` maps to
+# itself.
+_VARIABLE_RENAMES: dict[str, str] = {
+    # Vitals
+    "median_heart_rate": "hr",
+    "median_systolic_blood_pressure": "sbp",
+    "median_diastolic_blood_pressure": "dbp",
+    "median_respiratory_rate": "rr",
+    "median_oxygen_saturation": "spo2",
+    "temperature": "temp",
+    # Labs
+    "hemoglobine": "hgb",
+    "sodium": "na",
+    "creatinine": "cr",
+    "leucocytes": "wbc",
+    "thrombocytes": "plt",
+}
+
 
 @dataclass
 class GenevaDataset:
@@ -190,6 +216,9 @@ def load_geneva(
         scalar_ts, CanonicalShape.SCALAR_TS, strict=strict, issues=issues, dataset=_DATASET_NAME
     )
     scalar_ts = _apply_scalar_ts_inverse_normalize(scalar_ts, norm_params)
+    if not scalar_ts.empty:
+        scalar_ts = scalar_ts.copy()
+        scalar_ts["variable"] = scalar_ts["variable"].replace(_VARIABLE_RENAMES)
     admission = _validate_and_collect(
         admission, CanonicalShape.ADMISSION, strict=strict, issues=issues, dataset=_DATASET_NAME
     )

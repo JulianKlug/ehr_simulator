@@ -30,7 +30,14 @@ router = APIRouter()
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
     dataset = request.app.state.dataset
-    patient_ids = sorted(dataset.admission["patient_id"].unique().tolist())
+    # Study config (when loaded via `serve --config`) is the authoritative
+    # patient list — order is preserved, off-study patients are hidden.
+    # Without a study config, fall back to the full dataset list (S2 behavior).
+    study_patient_ids = getattr(request.app.state, "study_patient_ids", None)
+    if study_patient_ids is not None:
+        patient_ids = list(study_patient_ids)
+    else:
+        patient_ids = sorted(dataset.admission["patient_id"].unique().tolist())
     templates = request.app.state.templates
     return templates.TemplateResponse(
         request,
@@ -53,6 +60,14 @@ async def patient_timepoint(
     templates = request.app.state.templates
     is_htmx = request.headers.get("hx-request", "").lower() == "true"
 
+    study_patient_ids = getattr(request.app.state, "study_patient_ids", None)
+    if study_patient_ids is not None and patient_id not in study_patient_ids:
+        body = (
+            f'<div class="error-flash" role="alert">'
+            f"Patient '{patient_id}' is not part of this study"
+            f"</div>"
+        )
+        return HTMLResponse(content=body, status_code=404)
     known_pids = set(dataset.admission["patient_id"].unique().tolist())
     if patient_id not in known_pids:
         body = f'<div class="error-flash" role="alert">Patient \'{patient_id}\' not found</div>'

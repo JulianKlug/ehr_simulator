@@ -95,3 +95,94 @@ def test_serve_no_config_path_does_not_set_study_timepoints(tmp_log_dir: Path) -
 
     app = create_app(log_dir=tmp_log_dir)
     assert not hasattr(app.state, "study_timepoints") or app.state.study_timepoints is None
+
+
+def test_app_from_study_config_index_lists_only_study_patients(
+    study_fixture_dir: Path, tmp_log_dir: Path
+) -> None:
+    """The synthetic dataset has 3 patients (synth_001/002/003). When the
+    study config declares only one of them, the index page must render
+    only that one — not the full dataset list. Closes the post-S5 user
+    report: "all patients are loaded instead of loading only patients in
+    patient_ids" against the Geneva real-data CSV (~3K patients).
+    """
+    custom_dir = tmp_log_dir.parent / "study_subset"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    study_path = custom_dir / "study.yaml"
+    study_path.write_text(
+        """schema_version: "1"
+dataset: synthetic
+patient_ids: [synth_002]
+time_unit: minutes
+timepoints: [0, 60]
+""",
+        encoding="utf-8",
+    )
+
+    app = app_from_study_config(
+        study_path,
+        study_fixture_dir / "questions.yaml",
+        log_dir=tmp_log_dir,
+    )
+    assert app.state.study_patient_ids == ["synth_002"]
+
+    with TestClient(app) as client:
+        index = client.get("/")
+        assert index.status_code == 200
+        assert "synth_002" in index.text
+        assert "synth_001" not in index.text
+        assert "synth_003" not in index.text
+
+        # Off-study patient URL 404s with the "not part of this study" message.
+        off_study = client.get("/patient/synth_001/timepoint/0")
+        assert off_study.status_code == 404
+        assert "not part of this study" in off_study.text
+
+        # In-study patient still works.
+        in_study = client.get("/patient/synth_002/timepoint/0")
+        assert in_study.status_code == 200
+
+
+def test_app_from_study_config_preserves_patient_id_order(
+    study_fixture_dir: Path, tmp_log_dir: Path
+) -> None:
+    """Spec §2: 'Order is meaningful — the simulator walks patients in this
+    sequence per clinician session.' The index must render in declared
+    order, not sorted."""
+    custom_dir = tmp_log_dir.parent / "study_order"
+    custom_dir.mkdir(parents=True, exist_ok=True)
+    study_path = custom_dir / "study.yaml"
+    study_path.write_text(
+        """schema_version: "1"
+dataset: synthetic
+patient_ids: [synth_003, synth_001, synth_002]
+time_unit: minutes
+timepoints: [0, 60]
+""",
+        encoding="utf-8",
+    )
+
+    app = app_from_study_config(
+        study_path,
+        study_fixture_dir / "questions.yaml",
+        log_dir=tmp_log_dir,
+    )
+    with TestClient(app) as client:
+        index = client.get("/")
+        # Order check: synth_003 appears before synth_001 in the rendered HTML.
+        idx_003 = index.text.find("synth_003")
+        idx_001 = index.text.find("synth_001")
+        idx_002 = index.text.find("synth_002")
+        assert idx_003 < idx_001 < idx_002, (
+            f"expected declared order [003, 001, 002] but got "
+            f"positions: 003={idx_003}, 001={idx_001}, 002={idx_002}"
+        )
+
+
+def test_serve_no_config_path_does_not_set_study_patient_ids(tmp_log_dir: Path) -> None:
+    """Without a study config, the index falls back to the full dataset's
+    patient list (S2 behavior). Locks the no-config path."""
+    from ehr_simulator.web.app import create_app
+
+    app = create_app(log_dir=tmp_log_dir)
+    assert not hasattr(app.state, "study_patient_ids") or app.state.study_patient_ids is None

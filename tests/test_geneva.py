@@ -636,3 +636,59 @@ def test_read_features_csv_emits_issue_for_unrecognized_source_geneva_fixture(
     assert warning_events[0]["source_value"] == "notes"
     # (c) The IngestionIssue surfaces in the issues list.
     assert any(i.dataset == "geneva" and "notes" in i.reason for i in issues)
+
+
+# ---------------------------------------------------------------------------
+# S5 follow-up: variable renames so the panel layer's canonical short-name
+# filter (hr/sbp/dbp/rr/spo2/temp + hgb/na/cr/glucose/wbc/plt) actually
+# matches Geneva's per-hour-aggregate names.
+# ---------------------------------------------------------------------------
+
+
+def test_load_geneva_renames_median_vitals_and_french_labs_to_canonical(
+    geneva_fixture_dir: Path, tmp_path: Path
+) -> None:
+    """Geneva ships median/min/max triplets per vital and French names for
+    most labs. The panel layer (web/panels.py) filters on canonical short
+    codes (hr, sbp, …, hgb, na, cr, …) shared with the synthetic adapter,
+    so without translation the vitals + labs panels render empty against
+    Geneva data. The fix: rename in load_geneva post-validate.
+
+    The committed fixture only has `creatinine` and `max_heart_rate` as EHR
+    vars, so we extend it inline with synthetic median/lab rows to exercise
+    every key in the rename map.
+    """
+    from ehr_simulator.ingestion.geneva import _VARIABLE_RENAMES
+
+    base = pd.read_csv(geneva_fixture_dir / "geneva_sample.csv")
+    extra_rows = []
+    for src_label in _VARIABLE_RENAMES:
+        extra_rows.append(
+            {
+                "relative_sample_date_hourly_cat": 0,
+                "case_admission_id": "geneva_fixture_001",
+                "sample_label": src_label,
+                "source": "EHR",
+                "value": 0.0,
+            }
+        )
+    extended = pd.concat([base, pd.DataFrame(extra_rows)], ignore_index=True)
+    extended_csv = tmp_path / "geneva_extended.csv"
+    extended.to_csv(extended_csv, index=False)
+
+    dataset = load_geneva(extended_csv, geneva_fixture_dir, strict=False)
+
+    variables = set(dataset.scalar_ts["variable"].astype(str).tolist())
+    # Every source label is GONE from scalar_ts ...
+    for src_label in _VARIABLE_RENAMES:
+        assert src_label not in variables, (
+            f"expected {src_label!r} to be renamed but it survived in scalar_ts"
+        )
+    # ... and every canonical target is PRESENT.
+    for canonical in _VARIABLE_RENAMES.values():
+        assert canonical in variables, (
+            f"expected canonical {canonical!r} after rename, missing from scalar_ts"
+        )
+    # min_* and max_* aggregates pass through unchanged (they're real data
+    # the panel layer just doesn't render today; S8 band rendering TODO).
+    assert "max_heart_rate" in variables  # baseline fixture row, untouched
