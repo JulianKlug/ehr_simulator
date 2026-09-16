@@ -163,6 +163,11 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
     app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    # Study mode is opt-in via app_from_study_config; bare create_app() has
+    # no questions to ask, so the pane stays hidden and /answer returns 409.
+    app.state.study = None
+    app.state.questions = None
+    app.state.config_hash = None
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
     from ehr_simulator.web.routes import router
@@ -183,6 +188,10 @@ def app_from_study_config(
 ) -> FastAPI:
     """Build a FastAPI app whose dataset_loader and timepoints come from the study config.
 
+    Also binds ``app.state.study`` / ``questions`` / ``config_hash`` (S9a):
+    the questions pane renders from the parsed model and every ``answers``
+    row carries the hash computed once here.
+
     Sets ``app.state.study_timepoints`` to ``study.timepoints_minutes`` so
     ``routes.patient_timepoint`` resolves the URL ordinal ``t_index`` against
     the **study-defined** timepoints, not against dataset-derived ones (per
@@ -196,9 +205,10 @@ def app_from_study_config(
     """
     from ehr_simulator.cli_support import build_dataset_loader
     from ehr_simulator.config import load_questions, load_study_config
+    from ehr_simulator.config.loader import compute_config_hash_from_models
 
     study = load_study_config(study_path)
-    load_questions(questions_path)  # validate shape; the parsed model isn't wired up until S9
+    questions = load_questions(questions_path)
     loader = build_dataset_loader(study)
     resolved_db_path = db_path if db_path is not None else resolve_db_path(study)
     app = create_app(
@@ -209,6 +219,9 @@ def app_from_study_config(
     )
     app.state.study_timepoints = list(study.timepoints_minutes)
     app.state.study_patient_ids = list(study.patient_ids)
+    app.state.study = study
+    app.state.questions = questions
+    app.state.config_hash = compute_config_hash_from_models(study, questions)
     return app
 
 

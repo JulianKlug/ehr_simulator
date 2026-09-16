@@ -1,0 +1,85 @@
+{#- Questions pane (S9a). One <form> per question so htmx submits exactly
+    that question's named inputs; auto-saves on change (free-text also on a
+    typing pause). No submit button by design. Validator constants arrive
+    through the render context, never as literals here. -#}
+<aside id="questions-pane" class="questions-pane" aria-label="Questions for this timepoint">
+    <h2 class="questions-title">
+        Questions <small>t = {{ "%.0f"|format(t_minutes) }} min</small>
+    </h2>
+    {% for q in questions %}
+    {% set saved = prefill.get(q.question_id) %}
+    {% if q.response_type == "free-text" %}
+        {% set trigger = "change, submit, input changed delay:" ~ free_text_autosave_delay_ms ~ "ms" %}
+    {% else %}
+        {% set trigger = "change, submit" %}
+    {% endif %}
+    <form class="question"
+          data-question-id="{{ q.question_id }}"
+          data-response-type="{{ q.response_type }}"
+          hx-post="/patient/{{ patient_id }}/timepoint/{{ t_index }}/answer"
+          hx-trigger="{{ trigger }}"
+          hx-target="find .answer-status"
+          hx-swap="outerHTML"
+          hx-sync="this:queue last">
+        <input type="hidden" name="question_id" value="{{ q.question_id }}">
+        <fieldset>
+            <legend><span class="q-index">{{ loop.index }}.</span> {{ q.prompt }}</legend>
+
+            {% if q.response_type == "categorical" %}
+            <div class="choices">
+                {% for opt in q.options %}
+                <label class="choice">
+                    <input type="radio" name="value" value="{{ opt }}"{% if saved == opt %} checked{% endif %}>
+                    {{ opt }}
+                </label>
+                {% endfor %}
+            </div>
+
+            {% elif q.response_type == "likert" %}
+            <div class="choices choices-likert">
+                {% for point in range(q.scale_min, q.scale_max + 1) %}
+                <label class="choice">
+                    <input type="radio" name="value" value="{{ point }}"{% if saved == point|string %} checked{% endif %}>
+                    {{ point }}
+                </label>
+                {% endfor %}
+            </div>
+            {% if q.scale_min_label or q.scale_max_label %}
+            <div class="likert-anchors" aria-hidden="true">
+                <span>{{ q.scale_min_label or "" }}</span>
+                <span>{{ q.scale_max_label or "" }}</span>
+            </div>
+            {% endif %}
+
+            {% elif q.response_type == "multi-select" %}
+            <div class="choices">
+                {% for opt in q.options %}
+                <label class="choice">
+                    <input type="checkbox" name="value" value="{{ opt }}"{% if saved and opt in saved %} checked{% endif %}>
+                    {{ opt }}
+                </label>
+                {% endfor %}
+            </div>
+
+            {% elif q.response_type == "probability-0-100" %}
+            <label class="choice choice-number">
+                <span class="visually-hidden">Probability in percent</span>
+                <input type="number" name="value"
+                       min="{{ probability_min }}" max="{{ probability_max }}" step="1"
+                       inputmode="numeric" value="{{ saved or '' }}">
+                <span aria-hidden="true">%</span>
+            </label>
+
+            {% elif q.response_type == "free-text" %}
+            <label class="choice choice-text">
+                <span class="visually-hidden">Answer</span>
+                <textarea name="value" rows="3" maxlength="{{ free_text_max_chars }}">{{ saved or "" }}</textarea>
+            </label>
+            {% endif %}
+        </fieldset>
+        {% with state=("saved" if saved else "blank"), question_id=q.question_id, error=None %}
+        {% include "_answer_status.html" %}
+        {% endwith %}
+    </form>
+    {% endfor %}
+</aside>

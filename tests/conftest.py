@@ -17,6 +17,11 @@ The pre-seed step also primes the lifespan ``known_clinicians`` cache
 ``anonymous_client`` is the rare bare client (no cookie, no seed) for
 tests that need to exercise the unauthenticated path explicitly. Used by
 ``test_login.py``.
+
+``study_client`` (S9a+) is ``client`` built through ``app_from_study_config``
+on the synthetic study + questions fixtures, so the questions pane renders
+and ``POST …/answer`` has a config to validate against.
+``study_clinician_id`` is the seeded id for row assertions.
 """
 
 from __future__ import annotations
@@ -154,4 +159,33 @@ def anonymous_client(
         backup_dir=tmp_backup_dir,
     )
     with TestClient(app) as test_client:
+        yield test_client
+
+
+@pytest.fixture
+def study_clinician_id(tmp_db_path: Path) -> str:
+    return _seed_clinician(tmp_db_path)
+
+
+@pytest.fixture
+def study_client(
+    tmp_log_dir: Path,
+    tmp_db_path: Path,
+    tmp_backup_dir: Path,
+    study_fixture_dir: Path,
+    study_clinician_id: str,
+) -> Iterator[object]:
+    from fastapi.testclient import TestClient
+
+    from ehr_simulator.web.app import app_from_study_config
+
+    app = app_from_study_config(
+        study_fixture_dir / "study_synthetic.yaml",
+        study_fixture_dir / "questions.yaml",
+        log_dir=tmp_log_dir,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
+    with TestClient(app) as test_client:
+        test_client.cookies.set("ehrsim_clinician_id", study_clinician_id)
         yield test_client

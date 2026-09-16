@@ -362,3 +362,27 @@ def test_lifespan_handles_non_adapter_exceptions(
     assert boot_failed, "expected app.boot.failed event in log"
     assert "FileNotFoundError" in boot_failed[0]["error"]
     assert not tmp_db_path.exists()
+
+
+def test_app_from_study_config_sets_questions_and_config_hash(
+    study_fixture_dir: Path, tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
+) -> None:
+    from ehr_simulator.config import compute_config_hash
+    from ehr_simulator.config.questions import Questions
+
+    study_path = study_fixture_dir / "study_synthetic.yaml"
+    questions_path = study_fixture_dir / "questions.yaml"
+    app = app_from_study_config(
+        study_path,
+        questions_path,
+        log_dir=tmp_log_dir,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
+    assert isinstance(app.state.questions, Questions)
+    assert len(app.state.questions.questions) == 7
+    assert app.state.study is not None
+    assert app.state.config_hash == compute_config_hash(study_path, questions_path)
+
+    bare = create_app(log_dir=tmp_log_dir, db_path=tmp_db_path, backup_dir=tmp_backup_dir)
+    assert (bare.state.study, bare.state.questions, bare.state.config_hash) == (None, None, None)

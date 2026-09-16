@@ -1,0 +1,6 @@
+{#- The one response shape of POST …/answer and the initial badge.
+    state ∈ blank | saved | cleared | error. Swapped outerHTML by htmx,
+    so it carries its own id/role/aria-live. -#}
+<span {% if question_id %}id="answer-status-{{ question_id }}" {% endif %}class="answer-status is-{{ state }}" data-state="{{ state }}" role="status" aria-live="polite">
+    {%- if state == "saved" %}Saved ✓{% elif state == "cleared" %}Cleared{% elif state == "error" %}{{ error }}{% endif -%}
+</span>

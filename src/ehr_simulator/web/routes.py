@@ -12,25 +12,47 @@ S6 protected-route preamble (``_require_clinician``): every clinician-
 facing route resolves the cookie against ``app.state.known_clinicians``
 (zero-DB-cost cache, review-fix R11) and HTMX-aware-redirects to
 ``/login`` on miss (review-fix R10).
+
+S9a answer capture: ``POST /patient/{pid}/timepoint/{t}/answer`` shares
+``_require_clinician`` + ``_resolve_timepoint`` with the GET route and
+always answers with the ``_answer_status.html`` fragment. Both patient
+routes are ``async def`` on purpose — the app owns one shared
+``sqlite3.Connection`` and event-loop serialization is what keeps its
+writes ordered. New code goes routes → ``answer_capture`` /
+``study_session`` → DAOs; the S6 ``/login`` DAO calls are left as they are.
 """
 
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Literal
 
-from fastapi import APIRouter, Form, Request, Response
+from fastapi import APIRouter, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ehr_simulator.db import clinicians, cookies, events
 from ehr_simulator.logging import get_logger, update_request_context
+from ehr_simulator.web.answer_capture import (
+    FREE_TEXT_AUTOSAVE_DELAY_MS,
+    FREE_TEXT_MAX_CHARS,
+    PROBABILITY_MAX,
+    PROBABILITY_MIN,
+    AnswerValidationError,
+    record_answer,
+    saved_answers,
+)
 from ehr_simulator.web.panels import (
     PatientSlice,
     patient_timepoints,
     slice_to_timepoint,
 )
+from ehr_simulator.web.study_session import bootstrap_session
 
 router = APIRouter()
+
+_NO_QUESTIONS_MSG = "No questions configured (start with --config/--questions)"
+_MISSING_QUESTION_ID_MSG = "Missing question_id"
 
 
 def _require_clinician(request: Request) -> tuple[str | None, Response | None]:
@@ -81,6 +103,97 @@ def _logged_in_name(request: Request) -> str | None:
     if row is None:
         return None
     return row[0]
+
+
+@dataclass(frozen=True)
+class ResolvedTimepoint:
+    timepoints: tuple[float, ...]
+    t_minutes: float
+
+
+def _resolve_timepoint(
+    request: Request, patient_id: str, t_index: int
+) -> tuple[ResolvedTimepoint | None, str | None]:
+    """Study-membership → dataset-membership → ``t_index`` range.
+
+    Returns ``(resolved, None)`` or ``(None, message)``. Callers render the
+    message in their own shape: GET wraps it in the S2 ``error-flash`` div,
+    POST routes it through ``_answer_status.html``.
+    """
+    dataset = request.app.state.dataset
+    study_patient_ids = getattr(request.app.state, "study_patient_ids", None)
+    if study_patient_ids is not None and patient_id not in study_patient_ids:
+        return None, f"Patient '{patient_id}' is not part of this study"
+
+    known_pids = set(dataset.admission["patient_id"].unique().tolist())
+    if patient_id not in known_pids:
+        return None, f"Patient '{patient_id}' not found"
+
+    study_tps = getattr(request.app.state, "study_timepoints", None)
+    timepoints = (
+        tuple(float(t) for t in study_tps)
+        if study_tps is not None
+        else patient_timepoints(dataset, patient_id)
+    )
+    if t_index < 0 or t_index >= len(timepoints):
+        return None, (f"Timepoint t_index={t_index} out of range (valid: 0…{len(timepoints) - 1})")
+
+    return ResolvedTimepoint(timepoints=timepoints, t_minutes=timepoints[t_index]), None
+
+
+def _error_flash(message: str) -> str:
+    return f'<div class="error-flash" role="alert">{message}</div>'
+
+
+def _answer_status(
+    request: Request,
+    *,
+    state: str,
+    question_id: str | None = None,
+    error: str | None = None,
+    status_code: int = status.HTTP_200_OK,
+) -> HTMLResponse:
+    """The one response shape of ``POST …/answer``: the badge fragment."""
+    html = request.app.state.templates.get_template("_answer_status.html").render(
+        request=request, state=state, question_id=question_id, error=error
+    )
+    return HTMLResponse(content=html, status_code=status_code)
+
+
+def _render_questions_pane(
+    request: Request, *, clinician_id: str, patient_id: str, t_index: int, t_minutes: float
+) -> str:
+    """Bootstrap the study session, bind ``arm``, render the pre-filled pane.
+
+    Returns ``""`` outside study mode (bare ``serve``): no questions, no pane,
+    no session row.
+    """
+    state = request.app.state
+    if state.study is None:
+        return ""
+
+    ctx = bootstrap_session(state.db, state, clinician_id=clinician_id, patient_id=patient_id)
+    update_request_context(arm=ctx.arm)
+    prefill = saved_answers(
+        state.db,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        t_minutes=t_minutes,
+        questions=state.questions,
+        config_hash=ctx.config_hash,
+    )
+    return state.templates.get_template("_questions_pane.html").render(
+        request=request,
+        patient_id=patient_id,
+        t_index=t_index,
+        t_minutes=t_minutes,
+        questions=state.questions.questions,
+        prefill=prefill,
+        free_text_max_chars=FREE_TEXT_MAX_CHARS,
+        free_text_autosave_delay_ms=FREE_TEXT_AUTOSAVE_DELAY_MS,
+        probability_min=PROBABILITY_MIN,
+        probability_max=PROBABILITY_MAX,
+    )
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -194,35 +307,11 @@ async def patient_timepoint(
     templates = request.app.state.templates
     is_htmx = request.headers.get("hx-request", "").lower() == "true"
 
-    study_patient_ids = getattr(request.app.state, "study_patient_ids", None)
-    if study_patient_ids is not None and patient_id not in study_patient_ids:
-        body = (
-            f'<div class="error-flash" role="alert">'
-            f"Patient '{patient_id}' is not part of this study"
-            f"</div>"
-        )
-        return HTMLResponse(content=body, status_code=404)
-    known_pids = set(dataset.admission["patient_id"].unique().tolist())
-    if patient_id not in known_pids:
-        body = f'<div class="error-flash" role="alert">Patient \'{patient_id}\' not found</div>'
-        return HTMLResponse(content=body, status_code=404)
+    resolved, message = _resolve_timepoint(request, patient_id, t_index)
+    if resolved is None:
+        return HTMLResponse(content=_error_flash(message or ""), status_code=404)
 
-    study_tps = getattr(request.app.state, "study_timepoints", None)
-    timepoints = (
-        tuple(float(t) for t in study_tps)
-        if study_tps is not None
-        else patient_timepoints(dataset, patient_id)
-    )
-    if t_index < 0 or t_index >= len(timepoints):
-        body = (
-            f'<div class="error-flash" role="alert">'
-            f"Timepoint t_index={t_index} out of range "
-            f"(valid: 0…{len(timepoints) - 1})"
-            f"</div>"
-        )
-        return HTMLResponse(content=body, status_code=404)
-
-    t_minutes = timepoints[t_index]
+    t_minutes = resolved.t_minutes
     update_request_context(
         patient_id=patient_id,
         timepoint=float(t_minutes),
@@ -244,12 +333,21 @@ async def patient_timepoint(
         logged_in_name=logged_in_name,
     )
 
+    questions_html = _render_questions_pane(
+        request,
+        clinician_id=clinician_id or "",
+        patient_id=patient_id,
+        t_index=t_index,
+        t_minutes=float(t_minutes),
+    )
+
     inner = templates.get_template("_patient_view.html").render(
         request=request,
         patient_slice=patient_slice,
         chrome=chrome,
         chrome_html=chrome_html,
         summary_html=summary_html,
+        questions_html=questions_html,
         logged_in_name=logged_in_name,
     )
     if is_htmx:
@@ -266,6 +364,90 @@ async def patient_timepoint(
             "logged_in_name": logged_in_name,
         },
     )
+
+
+@router.post(
+    "/patient/{patient_id}/timepoint/{t_index}/answer",
+    response_class=HTMLResponse,
+)
+async def patient_answer(request: Request, patient_id: str, t_index: int) -> Response:
+    """Auto-save one answer; always reply with the badge fragment."""
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect
+    update_request_context(clinician_id=clinician_id)
+
+    state = request.app.state
+    if state.questions is None:
+        return _answer_status(
+            request,
+            state="error",
+            error=_NO_QUESTIONS_MSG,
+            status_code=status.HTTP_409_CONFLICT,
+        )
+
+    resolved, message = _resolve_timepoint(request, patient_id, t_index)
+    if resolved is None:
+        return _answer_status(
+            request, state="error", error=message, status_code=status.HTTP_404_NOT_FOUND
+        )
+
+    form = await request.form()
+    # First wins if a malformed client sends question_id twice (FormData.get
+    # would return the last one).
+    question_ids = [v for v in form.getlist("question_id") if isinstance(v, str)]
+    question_id = question_ids[0].strip() if question_ids else ""
+    if not question_id:
+        return _answer_status(
+            request,
+            state="error",
+            error=_MISSING_QUESTION_ID_MSG,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+    question = next((q for q in state.questions.questions if q.question_id == question_id), None)
+    if question is None:
+        return _answer_status(
+            request,
+            state="error",
+            question_id=question_id,
+            error=f"Unknown question '{question_id}'",
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+
+    update_request_context(
+        patient_id=patient_id, timepoint=float(resolved.t_minutes), timepoint_index=t_index
+    )
+    ctx = bootstrap_session(state.db, state, clinician_id=clinician_id, patient_id=patient_id)
+    update_request_context(arm=ctx.arm)
+
+    raw_values = [v for v in form.getlist("value") if isinstance(v, str)]
+    try:
+        outcome = record_answer(
+            state.db,
+            state,
+            ctx=ctx,
+            clinician_id=clinician_id or "",
+            patient_id=patient_id,
+            t_minutes=float(resolved.t_minutes),
+            question=question,
+            raw_values=raw_values,
+            client_ts=_form_str(form.get("client_ts")),
+            client_seq=_form_str(form.get("client_seq")),
+        )
+    except AnswerValidationError as exc:
+        return _answer_status(
+            request,
+            state="error",
+            question_id=question_id,
+            error=str(exc),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+
+    return _answer_status(request, state=outcome, question_id=question_id)
+
+
+def _form_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
 
 
 def _render_summary(patient_slice: PatientSlice, request: Request, *, chrome: str) -> str:
