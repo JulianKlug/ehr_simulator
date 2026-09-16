@@ -159,7 +159,7 @@ Originally one session; split per /plan-eng-review (working agreement: scope bal
 #### Session 9a — Answer capture
 
 Scope:
-- POST `/answer` upserts to `answers` table (uses unique constraint from S6).
+- POST `/answer` upserts to `answers` table (uses unique constraint from S6). Shipped as `POST /patient/{pid}/timepoint/{t_index}/answer` — see `session-09a-answer-capture.md` §5.1 for why the route is nested.
 - Auto-save on blur emits an `event` row.
 - `clinicians` lookup-or-create on first POST.
 - `config_hash` captured per row.

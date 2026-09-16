@@ -342,7 +342,9 @@ def preview(
     study_path: Path = typer.Argument(..., exists=True, dir_okay=False),
     patient: str = typer.Option(..., "--patient", help="Patient ID to render."),
     questions_path: Path | None = typer.Option(
-        None, "--questions", help="Optional questions.yaml; reserved for S9."
+        None,
+        "--questions",
+        help="Optional questions.yaml; renders the questions pane with --html-out.",
     ),
     html_out: Path | None = typer.Option(
         None,

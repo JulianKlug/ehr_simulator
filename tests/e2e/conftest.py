@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from collections.abc import Iterator
+from pathlib import Path
 
 import httpx
 import pytest
@@ -22,11 +23,15 @@ def _free_port() -> int:
         return s.getsockname()[1]
 
 
-@pytest.fixture(scope="session")
-def live_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+_FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "study"
+
+
+def _boot_server(
+    tmp_path_factory: pytest.TempPathFactory, *, label: str, extra_args: list[str]
+) -> Iterator[str]:
     port = _free_port()
-    log_dir = tmp_path_factory.mktemp("e2e-logs")
-    work_dir = tmp_path_factory.mktemp("e2e-work")
+    log_dir = tmp_path_factory.mktemp(f"{label}-logs")
+    work_dir = tmp_path_factory.mktemp(f"{label}-work")
     db_path = work_dir / "e2e.db"
     backup_dir = work_dir / "backups"
     env = {
@@ -52,6 +57,7 @@ def live_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
             str(db_path),
             "--backup-dir",
             str(backup_dir),
+            *extra_args,
         ],
         env=env,
         cwd=str(work_dir),
@@ -86,3 +92,28 @@ def live_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+
+
+@pytest.fixture(scope="session")
+def live_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """Bare ``serve``: synthetic data, no study config, no questions pane."""
+    yield from _boot_server(tmp_path_factory, label="e2e", extra_args=[])
+
+
+@pytest.fixture(scope="session")
+def live_study_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """``serve --config … --questions …`` on the synthetic study fixture.
+
+    Paths are absolute: the subprocess runs with ``cwd`` set to a tmp dir,
+    so repo-relative argv would resolve against the wrong directory.
+    """
+    yield from _boot_server(
+        tmp_path_factory,
+        label="e2e-study",
+        extra_args=[
+            "--config",
+            str(_FIXTURES_DIR / "study_synthetic.yaml"),
+            "--questions",
+            str(_FIXTURES_DIR / "questions.yaml"),
+        ],
+    )

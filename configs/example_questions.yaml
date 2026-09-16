@@ -1,10 +1,8 @@
 # Example questions configuration.
 #
 # Five response-type primitives (likert, categorical, multi-select,
-# probability-0-100, free-text). Per-timepoint clinician answers are not
-# yet wired into the UI (that lands in S9a/b); validate-config + the
-# CLI commands accept this file today so the pilot can lock the question
-# set early.
+# probability-0-100, free-text). The simulator renders these as the
+# per-timepoint questions pane; every change auto-saves to SQLite.
 #
 # question_id must match ^[a-z0-9_]+$ — lowercase, digits, underscore
 # only (it becomes a CSV column suffix in S9c export, so no spaces or

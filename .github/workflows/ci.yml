@@ -49,6 +49,7 @@ jobs:
             --questions tests/fixtures/study/questions.yaml \
             --html-out /tmp/preview_smoke
           test -s /tmp/preview_smoke/synth_001_t0.html
+          grep -q 'id="questions-pane"' /tmp/preview_smoke/synth_001_t0.html
       - name: DB smoke
         run: |
           rm -rf /tmp/ci_db_smoke /tmp/ci_db_backups
