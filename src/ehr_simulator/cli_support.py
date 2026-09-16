@@ -266,11 +266,9 @@ def render_html_for_preview(
     at runtime — including the study-bound t_index → t_minutes mapping
     (per /plan-eng-review issue 1.2).
     """
-    import hashlib
-
     from fastapi.testclient import TestClient
 
-    from ehr_simulator.db import apply_migrations, clinicians, connect
+    from ehr_simulator.db import apply_migrations, clinicians, connect, progress
     from ehr_simulator.web.app import app_from_study_config
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -282,7 +280,6 @@ def render_html_for_preview(
     apply_migrations(seed_conn)
     clinician_id = clinicians.lookup_or_create(seed_conn, "Dr. Preview")
     seed_conn.close()
-    clinician_id = hashlib.sha256(b"dr. preview").hexdigest()[:16]
 
     app = app_from_study_config(
         study_path,
@@ -292,10 +289,23 @@ def render_html_for_preview(
         backup_dir=out_dir / "_preview_backups",
     )
     written: list[Path] = []
-    with TestClient(app) as client:
+    # follow_redirects off: a gate redirect must fail loudly here instead of
+    # silently writing the t=0 body into every file.
+    with TestClient(app, follow_redirects=False) as client:
         client.cookies.set("ehrsim_clinician_id", clinician_id)
         study = _load_study_for_app(study_path)
         for idx, _ in enumerate(study.timepoints_minutes):
+            # S9b: walk the frontier step-wise so each file shows the OPEN
+            # pane a clinician would see at that timepoint.
+            if idx > 0:
+                progress.unlock(
+                    app.state.db,
+                    clinician_id=clinician_id,
+                    patient_id=patient_id,
+                    from_t_index=idx - 1,
+                    to_t_index=idx,
+                    config_hash=app.state.config_hash,
+                )
             response = client.get(f"/patient/{patient_id}/timepoint/{idx}")
             response.raise_for_status()
             target = out_dir / f"{patient_id}_t{idx}.html"
@@ -324,3 +334,80 @@ def walk_preflight_report(study: StudyConfig, questions: Questions) -> tuple[Pre
     dataset = loader()
     report = walk_preflight(study, questions, dataset)
     return report, dataset
+
+
+# ---------------------------------------------------------------------------
+# reset-progress (S9b, owner decision b)
+# ---------------------------------------------------------------------------
+
+
+class ResetError(ValueError):
+    """The operator asked for a reset that cannot be applied; nothing was written."""
+
+
+@dataclass(frozen=True)
+class ResetReport:
+    clinician_id: str
+    previous_unlocked_t_index: int
+    was_completed: bool
+    to_t_index: int
+    deleted_answers: int
+
+
+def reset_progress(
+    conn: Any,
+    *,
+    clinician_name: str,
+    patient_id: str,
+    to_t_index: int,
+    timepoints: list[float],
+) -> ResetReport:
+    """Rewind one clinician's walk of one patient to ``to_t_index``.
+
+    Answers strictly after the target timepoint are deleted (the re-opened
+    pane pre-fills from what survives); a completed walk is re-opened; one
+    ``progress.reset`` event records the intervention. Raises
+    :class:`ResetError` — before any write — when the clinician is unknown,
+    the pair has no walk, or the index is outside the study.
+    """
+    from ehr_simulator.db import answers, clinicians, events, progress
+
+    if not 0 <= to_t_index < len(timepoints):
+        raise ResetError(
+            f"--to-t-index {to_t_index} outside the study (valid: 0…{len(timepoints) - 1})"
+        )
+    clinician_id = clinicians.lookup(conn, clinician_name)
+    if clinician_id is None:
+        raise ResetError(f"unknown clinician {clinician_name!r}")
+    row = progress.fetch(conn, clinician_id=clinician_id, patient_id=patient_id)
+    if row is None:
+        raise ResetError(f"{clinician_name!r} has not started patient {patient_id!r}")
+
+    progress.reset(conn, clinician_id=clinician_id, patient_id=patient_id, to_t_index=to_t_index)
+    deleted = answers.delete_after(
+        conn,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        min_timepoint_exclusive=timepoints[to_t_index],
+    )
+    events.append(
+        conn,
+        session_id=None,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        timepoint=timepoints[to_t_index],
+        kind="progress.reset",
+        payload={
+            "from_t_index": row.unlocked_t_index,
+            "to_t_index": to_t_index,
+            "was_completed": row.completed_at is not None,
+            "deleted_answers": deleted,
+        },
+    )
+    return ResetReport(
+        clinician_id=clinician_id,
+        previous_unlocked_t_index=row.unlocked_t_index,
+        was_completed=row.completed_at is not None,
+        to_t_index=to_t_index,
+        deleted_answers=deleted,
+    )

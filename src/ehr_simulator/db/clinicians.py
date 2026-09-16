@@ -1,6 +1,7 @@
 """clinicians DAO: case-folded name → pseudonymizable ``clinician_id``.
 
-``lookup_or_create`` is the only write path. It normalizes the raw name
+``lookup_or_create`` is the only write path; ``lookup`` (S9b) is its read-only
+sibling for operator commands. It normalizes the raw name
 (``" ".join(raw.casefold().split())`` — case-fold + collapse whitespace),
 truncates SHA256 to 16 hex chars for the ``clinician_id``, and INSERT-OR-IGNOREs
 into ``clinicians``. The function is called from the ``/login`` POST handler;
@@ -43,3 +44,18 @@ def lookup_or_create(
     if known_clinicians is not None:
         known_clinicians.add(clinician_id)
     return clinician_id
+
+
+def lookup(conn: sqlite3.Connection, raw_name: str) -> str | None:
+    """Return the ``clinician_id`` for ``raw_name`` if the clinician exists; never writes.
+
+    Operator paths (S9b ``reset-progress``) must not create a clinician by
+    mistyping a name.
+    """
+    name_normalized = _normalize(raw_name)
+    if not name_normalized:
+        return None
+    row = conn.execute(
+        "SELECT clinician_id FROM clinicians WHERE name_normalized = ?", (name_normalized,)
+    ).fetchone()
+    return None if row is None else row[0]

@@ -12,6 +12,7 @@ from playwright.sync_api import Page
 
 PATIENT_URL = "/patient/synth_001/timepoint/0?chrome=epic"
 ANSWER_URL_FRAGMENT = "/patient/synth_001/timepoint/0/answer"
+ADVANCE_URL_FRAGMENT = "/patient/synth_001/timepoint/0/advance"
 FREE_TEXT_AUTOSAVE_WAIT_MS = 4000
 
 
@@ -38,10 +39,13 @@ def test_answer_autosave_and_prefill(page: Page, live_study_server: str) -> None
         page.click(radio)
     page.wait_for_selector(_badge("deterioration_6h", "saved"))
 
-    # Review-fix R19: the radio still has focus; ] must still navigate.
-    page.keyboard.press("]")
-    page.wait_for_selector("#patient-view[data-t-index='1']")
-    page.keyboard.press("[")
+    # S9a R19 re-expressed under the S9b gate: the radio still has focus and
+    # ] must not be swallowed — it now reaches the advance CTA, which the
+    # server refuses (5 required questions still open).
+    with page.expect_response(lambda res: ADVANCE_URL_FRAGMENT in res.url) as blocked:
+        page.keyboard.press("]")
+    assert blocked.value.status == 409
+    page.wait_for_selector('#advance-form[data-remaining="5"]')
     page.wait_for_selector("#patient-view[data-t-index='0']")
     assert page.is_checked(radio)
 

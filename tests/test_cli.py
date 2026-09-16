@@ -362,8 +362,151 @@ def test_cli_preview_text_summary_and_html_out(
     assert result_html.exit_code == 0, result_html.stderr
     written = sorted(out_dir.glob("synth_001_t*.html"))
     assert len(written) == 3
-    for path in written:
+    for idx, path in enumerate(written):
         text = path.read_text(encoding="utf-8")
         assert "synth_001" in text
         # plotnine SVG output; locked by S2 chart tests.
         assert "<svg" in text
+        # S9b: each file is ITS OWN timepoint (not a followed gate redirect to
+        # t=0) and shows the open pane with the advance CTA.
+        assert f'data-t-index="{idx}"' in text
+        assert 'id="advance-form"' in text
+        assert 'data-remaining="6"' in text
+
+
+# ---------------------------------------------------------------------------
+# reset-progress (S9b, spec §9 #10d-#10e)
+# ---------------------------------------------------------------------------
+
+
+def _walked_db(db_path: Path, *, unlocked: int, completed: bool) -> str:
+    """``Dr. Test`` walked synth_001 to ``unlocked``; answers exist at every timepoint."""
+    from ehr_simulator.db import answers, apply_migrations, clinicians, connect, progress
+
+    conn = connect(db_path)
+    apply_migrations(conn)
+    cid = clinicians.lookup_or_create(conn, "Dr. Test")
+    progress.unlock(
+        conn,
+        clinician_id=cid,
+        patient_id="synth_001",
+        from_t_index=0,
+        to_t_index=unlocked,
+        config_hash="h",
+    )
+    if completed:
+        progress.mark_complete(
+            conn,
+            clinician_id=cid,
+            patient_id="synth_001",
+            unlocked_t_index=unlocked,
+            config_hash="h",
+        )
+    for t in (0.0, 60.0, 180.0):
+        answers.upsert(
+            conn,
+            clinician_id=cid,
+            patient_id="synth_001",
+            timepoint=t,
+            question_id="confidence",
+            value="3",
+            arm="no_ai",
+            config_hash="h",
+        )
+    conn.close()
+    return cid
+
+
+def test_cli_reset_progress_rewinds_walk(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path
+) -> None:
+    import json
+
+    from ehr_simulator.db import connect, progress
+
+    db_path = tmp_path / "walk.db"
+    cid = _walked_db(db_path, unlocked=2, completed=True)
+
+    result = runner.invoke(
+        cli.app_typer,
+        [
+            "reset-progress",
+            str(study_fixture_dir / "study_synthetic.yaml"),
+            "--clinician",
+            "Dr. Test",
+            "--patient",
+            "synth_001",
+            "--to-t-index",
+            "1",
+            "--db-path",
+            str(db_path),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "frontier 2 (was complete) → 1" in result.stdout
+    assert "1 answer(s) deleted" in result.stdout
+
+    conn = connect(db_path)
+    row = progress.fetch(conn, clinician_id=cid, patient_id="synth_001")
+    assert (row.unlocked_t_index, row.completed_at) == (1, None)
+    left = sorted(r[0] for r in conn.execute("SELECT timepoint FROM answers"))
+    assert left == [0.0, 60.0]
+    payload = json.loads(
+        conn.execute("SELECT payload_json FROM events WHERE kind = 'progress.reset'").fetchone()[0]
+    )
+    assert payload == {
+        "from_t_index": 2,
+        "to_t_index": 1,
+        "was_completed": True,
+        "deleted_answers": 1,
+    }
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("clinician", "patient", "to_t_index", "fragment"),
+    [
+        ("Dr. Nobody", "synth_001", 0, "unknown clinician"),
+        ("Dr. Test", "synth_002", 0, "has not started"),
+        ("Dr. Test", "synth_001", 7, "outside the study"),
+    ],
+    ids=["unknown_clinician", "no_progress_row", "index_out_of_range"],
+)
+def test_cli_reset_progress_errors(
+    runner: CliRunner,
+    study_fixture_dir: Path,
+    tmp_path: Path,
+    clinician: str,
+    patient: str,
+    to_t_index: int,
+    fragment: str,
+) -> None:
+    from ehr_simulator.db import connect
+
+    db_path = tmp_path / "walk.db"
+    _walked_db(db_path, unlocked=1, completed=False)
+
+    result = runner.invoke(
+        cli.app_typer,
+        [
+            "reset-progress",
+            str(study_fixture_dir / "study_synthetic.yaml"),
+            "--clinician",
+            clinician,
+            "--patient",
+            patient,
+            "--to-t-index",
+            str(to_t_index),
+            "--db-path",
+            str(db_path),
+        ],
+    )
+    assert result.exit_code == 1
+    assert fragment in result.stderr
+
+    conn = connect(db_path)
+    assert conn.execute("SELECT unlocked_t_index FROM progress").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 3
+    assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM clinicians").fetchone()[0] == 1
+    conn.close()

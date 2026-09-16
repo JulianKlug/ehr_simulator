@@ -1,6 +1,6 @@
 """Command-line entry point for ``ehr-simulator``.
 
-Seven commands after S6:
+Eight commands after S9b:
 
 - ``serve`` — boot uvicorn against the FastAPI app. ``--config STUDY``
   + ``--questions Q`` wires a study-driven loader; without ``--config`` the
@@ -20,6 +20,9 @@ Seven commands after S6:
   wal_checkpoint(TRUNCATE)`` so the bare ``.db`` file is a complete
   snapshot. Idempotent.
 - ``backup`` (S6) — snapshot the SQLite DB to a backup directory.
+- ``reset-progress`` (S9b) — operator recovery for a mis-advanced walk:
+  rewind one clinician's frontier on one patient, drop the answers past
+  it, record a ``progress.reset`` event.
 
 The ``main(argv: list[str] | None = None) -> None`` signature is preserved
 from the S2 argparse skeleton so ``test_cli.py``'s monkeypatch idiom carries
@@ -399,6 +402,67 @@ def preview(
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(code=1) from exc
         typer.echo(f"Wrote {len(written)} HTML files under {html_out}")
+
+
+# ---------------------------------------------------------------------------
+# reset-progress
+# ---------------------------------------------------------------------------
+
+
+@app_typer.command("reset-progress")
+def reset_progress_cmd(
+    study_path: Path = typer.Argument(..., exists=True, dir_okay=False),
+    clinician: str = typer.Option(..., "--clinician", help="Clinician name as typed at login."),
+    patient: str = typer.Option(..., "--patient", help="Patient ID whose walk to rewind."),
+    to_t_index: int = typer.Option(
+        0, "--to-t-index", help="Timepoint index to re-open (answers after it are deleted)."
+    ),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite DB; defaults to the study's db_path / data/ehr_simulator.db.",
+    ),
+) -> None:
+    """Rewind a clinician's walk of one patient (recovery for a mis-click on Next)."""
+    from ehr_simulator.cli_support import ResetError, reset_progress
+    from ehr_simulator.config import load_study_config
+    from ehr_simulator.db import apply_migrations, connect, resolve_db_path
+    from ehr_simulator.logging import setup_logging
+
+    setup_logging(Path("logs"))
+    try:
+        study = load_study_config(study_path)
+    except ConfigError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    resolved_db = db_path if db_path is not None else resolve_db_path(study)
+    if not resolved_db.exists():
+        typer.echo(f"Error: db_path does not exist: {resolved_db}", err=True)
+        raise typer.Exit(code=1)
+
+    conn = connect(resolved_db)
+    try:
+        apply_migrations(conn)
+        report = reset_progress(
+            conn,
+            clinician_name=clinician,
+            patient_id=patient,
+            to_t_index=to_t_index,
+            timepoints=list(study.timepoints_minutes),
+        )
+    except ResetError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+    state = " (was complete)" if report.was_completed else ""
+    typer.echo(
+        f"Reset {patient} for clinician {report.clinician_id}: "
+        f"frontier {report.previous_unlocked_t_index}{state} → {report.to_t_index}, "
+        f"{report.deleted_answers} answer(s) deleted."
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover - manual smoke

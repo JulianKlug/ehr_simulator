@@ -168,11 +168,14 @@ Scope:
 
 #### Session 9b — Question gating
 
+Spec: `session-09b-question-gating.md` (reviewed 2026-09-16, 29 fixes folded).
+
 Scope:
-- `/advance` endpoint with optimistic `expected_timepoint` query param.
-- All-questions-answered requirement enforced server-side; UI button disabled-unless-complete.
+- `/advance` endpoint with optimistic `expected_timepoint` query param. Shipped as `POST /patient/{pid}/timepoint/{t_index}/advance` — `t_index` in the path *is* the expected timepoint; see spec §5.1.
+- All-questions-answered requirement enforced server-side; UI button disabled-unless-complete. Only `required: true` questions (new per-question flag, default true) gate.
 - Click-when-disabled scrolls to first unanswered + emits an event.
 - Advance CTA label includes remaining-count.
+- **Scope growth, by design (spec §1, §6):** the GET route is gated too (a timepoint past the clinician's frontier redirects back; no data is sliced), answers freeze once the clinician has advanced past their timepoint, progress lives in a `progress` table (migration 3), the index shows per-patient walk state, HTMX partials push their URL, and an operator `reset-progress` CLI is the recovery path for a mis-advance. Owner decisions recorded in the spec's review report.
 
 **Test inventory:** ≥5 tests. `/advance` rejects mismatched `expected_timepoint`; cannot advance with unanswered question; click-when-disabled emits event; remaining-count label correctness.
 
