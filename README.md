@@ -7,14 +7,15 @@ AI model predicted, and asks you a short set of questions at each timepoint.
 The point isn't the chart. The point is to measure how AI assistance changes
 the assessments and decisions you'd make.
 
-> **Status — September 2026.** Sessions 1–6 + 9a. You sign in with your name,
-> walk three synthetic patients across three timepoints with vitals, labs,
-> admission, imaging, and AI panels visible, and answer the configured
-> questions at each timepoint — answers auto-save to a local SQLite file.
-> **Answer gating, CSV export, and AI-on/AI-off randomization are not in this
-> build yet** — they ship in Sessions 9b–11. If a teammate has asked you to use
-> this for an actual study session, you are an early reviewer, not an end user.
-> See *What this build is for* below.
+> **Status — September 2026.** Sessions 1–6, 9a + 9b. You sign in with your
+> name, walk three synthetic patients across three timepoints with vitals,
+> labs, admission, imaging, and AI panels visible, and answer the configured
+> questions at each timepoint — answers auto-save to a local SQLite file, and
+> the next timepoint stays locked until the current one is answered.
+> **CSV export and AI-on/AI-off randomization are not in this build yet** —
+> they ship in Sessions 9c and 11. If a teammate has asked you to use this for
+> an actual study session, you are an early reviewer, not an end user. See
+> *What this build is for* below.
 
 ---
 
@@ -51,13 +52,13 @@ You'll see the patient view at **timepoint 0** (the moment of first contact).
 
 | Key | Action |
 |---|---|
-| <kbd>]</kbd> | Next timepoint |
+| <kbd>]</kbd> | Next timepoint (presses the advance button when you're at the newest one) |
 | <kbd>[</kbd> | Previous timepoint |
 | <kbd>?</kbd> | Show keyboard shortcuts overlay |
 
-Pressing past the first or last timepoint **does nothing** and shows a small
-"already at first/last timepoint" notice in the summary header. There is no
-wraparound.
+Pressing past the first timepoint — or past the last one with nothing left to
+advance to — **does nothing** and shows a small "already at first/last
+timepoint" notice in the summary header. There is no wraparound.
 
 The summary card at the top always shows: patient ID, age, sex, the current
 clinical time `t = N min`, and how many rows of each kind have been revealed
@@ -113,8 +114,42 @@ characters; a probability must be a whole number from 0 to 100.
 `[` and `]` still work while a radio or checkbox has focus, but not from
 inside the free-text box — click out of it first.
 
-You can still move to the next timepoint with questions unanswered — the gate
-that blocks it ships in Session 9b.
+Questions are required by default. `required: false` in your `--questions` file
+opts one out — that's how a free-text "anything else?" box stays optional. A
+required multi-select has to offer an explicit opt-out (the example config uses
+`None of these`), because an empty multi-select stores nothing and the gate
+reads nothing as unanswered.
+
+### Advancing
+
+The button at the foot of the pane is the only way forward. It stays muted
+until every required question is answered, and its label counts what's left —
+`Next timepoint · 3 unanswered`. Clicking it while blocked doesn't move you: it
+scrolls to the first unanswered question and focuses it. Once you're done the
+label becomes `Next timepoint ›`, or `Finish patient ✓` on the last timepoint,
+which takes you back to the patient list. <kbd>]</kbd> presses the same button.
+
+**Advancing freezes what's behind you.** Earlier timepoints stay readable with
+your answers pre-filled, but every field is disabled and the pane says
+`Locked — answered before you advanced.` That's the point of the study: an
+answer at t=60 has to reflect what you knew at t=60, not what t=180 told you.
+A URL for a timepoint you haven't unlocked bounces you back to the one you're
+on, and no patient data is rendered on the way.
+
+The patient list marks each patient `not started`, `in progress · t 2/3` or
+`complete ✓`, and every link resumes where you left off.
+
+There is no undo. If you press Next by mistake, whoever runs the study can
+rewind it for you:
+
+```bash
+uv run ehr-simulator reset-progress configs/example_config.yaml \
+  --clinician "Your Name" --patient synth_001 --to-t-index 0
+```
+
+`--to-t-index` defaults to 0. Answers *after* the target timepoint are deleted;
+answers at it survive and pre-fill the re-opened pane. `--db-path` points it at
+a database other than the study config's.
 
 ---
 
@@ -182,8 +217,6 @@ working directory; `--db-path` is taken at face value.
 These are scheduled for later sessions. If you're missing one of these, you
 are not missing it because of a bug:
 
-- **Answer gating** — nothing stops you advancing with questions unanswered.
-  (Session 9b.)
 - **CSV export of answers** — they live in SQLite only for now. (Session 9c.)
 - **AI on/off randomization** — the AI panel is always shown for now.
   (Session 11.)
