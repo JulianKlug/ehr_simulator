@@ -47,7 +47,7 @@ from ehr_simulator.web.panels import (
     patient_timepoints,
     slice_to_timepoint,
 )
-from ehr_simulator.web.study_session import bootstrap_session
+from ehr_simulator.web.study_session import bootstrap_session, read_frontier
 
 router = APIRouter()
 
@@ -172,7 +172,10 @@ def _render_questions_pane(
     if state.study is None:
         return ""
 
-    ctx = bootstrap_session(state.db, state, clinician_id=clinician_id, patient_id=patient_id)
+    frontier = read_frontier(state.db, state, clinician_id=clinician_id, patient_id=patient_id)
+    ctx = bootstrap_session(
+        state.db, state, clinician_id=clinician_id, patient_id=patient_id, frontier=frontier
+    )
     update_request_context(arm=ctx.arm)
     prefill = saved_answers(
         state.db,
@@ -417,7 +420,12 @@ async def patient_answer(request: Request, patient_id: str, t_index: int) -> Res
     update_request_context(
         patient_id=patient_id, timepoint=float(resolved.t_minutes), timepoint_index=t_index
     )
-    ctx = bootstrap_session(state.db, state, clinician_id=clinician_id, patient_id=patient_id)
+    frontier = read_frontier(
+        state.db, state, clinician_id=clinician_id or "", patient_id=patient_id
+    )
+    ctx = bootstrap_session(
+        state.db, state, clinician_id=clinician_id or "", patient_id=patient_id, frontier=frontier
+    )
     update_request_context(arm=ctx.arm)
 
     raw_values = [v for v in form.getlist("value") if isinstance(v, str)]

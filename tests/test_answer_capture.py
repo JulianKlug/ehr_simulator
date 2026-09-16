@@ -25,7 +25,7 @@ from ehr_simulator.web.answer_capture import (
     saved_answers,
     serialize_answer,
 )
-from ehr_simulator.web.study_session import bootstrap_session
+from ehr_simulator.web.study_session import Frontier, bootstrap_session
 
 _T = 60.0
 
@@ -142,7 +142,9 @@ def _record(
     client_seq: str | None = None,
 ) -> tuple[str, str]:
     cid = clinicians.lookup_or_create(db, "Dr. Smith")
-    ctx = bootstrap_session(db, state, clinician_id=cid, patient_id="p1")
+    ctx = bootstrap_session(
+        db, state, clinician_id=cid, patient_id="p1", frontier=Frontier(0, False)
+    )
     outcome = record_answer(
         db,
         state,
