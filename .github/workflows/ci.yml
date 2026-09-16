@@ -49,6 +49,16 @@ jobs:
             --questions tests/fixtures/study/questions.yaml \
             --html-out /tmp/preview_smoke
           test -s /tmp/preview_smoke/synth_001_t0.html
+      - name: DB smoke
+        run: |
+          rm -rf /tmp/ci_db_smoke /tmp/ci_db_backups
+          mkdir -p /tmp/ci_db_smoke
+          uv run ehr-simulator migrate --db-path /tmp/ci_db_smoke/test.db
+          uv run ehr-simulator migrate --db-path /tmp/ci_db_smoke/test.db
+          uv run ehr-simulator backup \
+            --db-path /tmp/ci_db_smoke/test.db \
+            --backup-dir /tmp/ci_db_backups
+          test "$(ls /tmp/ci_db_backups/*.db | wc -l)" -ge 1
 
   e2e:
     runs-on: ubuntu-latest
