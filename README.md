@@ -2,18 +2,19 @@
 
 A browser-based simulated electronic health record. It replays a real patient's
 timeline to you at a few discrete moments in time, optionally shows you what an
-AI model predicted, and (in later versions) asks you a short set of questions
-at each timepoint.
+AI model predicted, and asks you a short set of questions at each timepoint.
 
 The point isn't the chart. The point is to measure how AI assistance changes
 the assessments and decisions you'd make.
 
-> **Status — May 2026.** Session 02 build. You can walk three synthetic patients
-> across three timepoints with vitals, labs, admission, imaging, and AI panels
-> visible. **Login, question-answering, CSV export, and AI-on/AI-off
-> randomization are not in this build yet** — they ship in Sessions 5–11.
-> If a teammate has asked you to use this for an actual study session, you
-> are an early reviewer, not an end user. See *What this build is for* below.
+> **Status — September 2026.** Sessions 1–6 + 9a. You sign in with your name,
+> walk three synthetic patients across three timepoints with vitals, labs,
+> admission, imaging, and AI panels visible, and answer the configured
+> questions at each timepoint — answers auto-save to a local SQLite file.
+> **Answer gating, CSV export, and AI-on/AI-off randomization are not in this
+> build yet** — they ship in Sessions 9b–11. If a teammate has asked you to use
+> this for an actual study session, you are an early reviewer, not an end user.
+> See *What this build is for* below.
 
 ---
 
@@ -23,14 +24,24 @@ Requires [`uv`](https://docs.astral.sh/uv/) on the machine.
 
 ```bash
 uv sync
-uv run ehr-simulator serve
+uv run ehr-simulator serve \
+  --config configs/example_config.yaml \
+  --questions configs/example_questions.yaml
 ```
 
-Then open http://localhost:8000 in any modern browser. Pick a patient, pick a
-chrome variant (see below), and you're in.
+`--config` and `--questions` go together. Pass neither and you get the same
+three synthetic patients without a questions pane — sign-in and the database
+are there either way.
+
+Then open http://localhost:8000 in any modern browser. Type your name on the
+sign-in page, pick a patient, pick a chrome variant (see below), and you're in.
+The name is all the login is — no password, no account. It is case-folded and
+hashed into a short `clinician_id` that every stored answer is keyed by. You
+stay signed in for 30 days; **Logout** in the header stripe switches clinician.
 
 The server stays in your terminal — `Ctrl-C` to stop. Logs go to
-`./logs/current.jsonl` (one JSON record per request, rolled at UTC midnight).
+`./logs/current.jsonl` (one JSON record per request, rolled at UTC midnight);
+answers and interaction events go to `./data/ehr_simulator.db`.
 
 ---
 
@@ -89,6 +100,24 @@ CT), that's not a bug — that patient really has no data of that kind.
 
 ---
 
+## Answering the questions
+
+In study mode a questions pane sits beside the panels, one form per question
+from your `--questions` file. There is no save button: every choice saves as
+you make it, free text 1.5 seconds after you stop typing. The badge under each
+question reads `Saved ✓`, `Cleared`, the reason the save was rejected, or
+`Save failed — retry` if the request never reached the server. Clearing every
+field of a question deletes that answer. Free text is capped at 4000
+characters; a probability must be a whole number from 0 to 100.
+
+`[` and `]` still work while a radio or checkbox has focus, but not from
+inside the free-text box — click out of it first.
+
+You can still move to the next timepoint with questions unanswered — the gate
+that blocks it ships in Session 9b.
+
+---
+
 ## Two chrome variants
 
 The same data, two different layouts. Pick whichever feels more natural —
@@ -108,9 +137,8 @@ view you want a colleague to look at.
 
 ## What this build is for
 
-This is the build used in the **first chrome A/B session with the embedded
-neurologist**. The goal of that session is to lock layout, density, and
-discoverability — not to validate clinical accuracy.
+Reviewer sessions with the embedded neurologist target layout, density, and
+discoverability — not clinical accuracy.
 
 A note on the data: **the patient values are synthetic and not clinically
 realistic.** They're physiologically plausible noise, not real cases. Don't
@@ -127,16 +155,25 @@ If you have feedback during the session, we're particularly interested in:
 - Anything in the chrome that felt "wrong" relative to a real EHR — even
   small things.
 
-We'll write up findings in `specs/session-02-validation-findings.md` after.
+Findings from earlier sessions: `specs/feedback/session-02-feedback.md`.
 
 ---
 
 ## Privacy
 
 The simulator runs entirely on your local machine. Nothing leaves your laptop.
-No accounts, no cloud, no telemetry. The only thing written to disk is the
-local JSONL log under `logs/`, which records request paths and timepoint
-indices — never any free-text input.
+No cloud, no telemetry. Three things are written to disk:
+
+- `logs/current.jsonl` — request paths, timepoint indices, and your
+  `clinician_id`. Never any free-text input.
+- `data/ehr_simulator.db` — your name (case-folded), your answers including
+  free text, and one row per interaction event.
+- `data/backups/` — a copy of that database, made when a server that wrote
+  something shuts down. `serve --backup-dir` moves it.
+
+Move the database with `serve --db-path`, the `EHR_SIM_DB_PATH` environment
+variable, or `db_path:` in the study config. The last two must point inside the
+working directory; `--db-path` is taken at face value.
 
 ---
 
@@ -145,13 +182,12 @@ indices — never any free-text input.
 These are scheduled for later sessions. If you're missing one of these, you
 are not missing it because of a bug:
 
-- **Login** — there is no `clinician_name` field yet. (Session 5.)
-- **Questions to answer** — no answer-capture form, no per-timepoint gating.
-  (Session 9.)
-- **CSV export of answers** — depends on the above. (Session 9.)
+- **Answer gating** — nothing stops you advancing with questions unanswered.
+  (Session 9b.)
+- **CSV export of answers** — they live in SQLite only for now. (Session 9c.)
 - **AI on/off randomization** — the AI panel is always shown for now.
   (Session 11.)
-- **MIMIC / Geneva real-data** — only synthetic patients today. (Sessions 4
+- **MIMIC / Geneva real-data** — only synthetic patients today. (Sessions 7
   and 8.)
 - **DICOM image rendering** — the imaging panel shows the report text, not
   the images. (Out of scope for v1.)
@@ -160,10 +196,11 @@ are not missing it because of a bug:
 
 ## Reporting issues
 
-If something breaks or feels wrong, please grab two things and send them along:
+If something breaks or feels wrong, please grab these and send them along:
 
 1. The URL in the address bar at the moment it broke.
 2. The last few lines of `logs/current.jsonl` (one JSON object per line — easy
    to copy).
+3. If it happened while answering a question, the badge text you saw.
 
 That's enough to reconstruct what happened on our end.
