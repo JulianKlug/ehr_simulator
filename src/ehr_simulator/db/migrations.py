@@ -98,7 +98,19 @@ CREATE INDEX IF NOT EXISTS ix_ingestion_issues_boot_id ON ingestion_issues (boot
 """
 
 
-MIGRATIONS: tuple[Migration, ...] = (Migration(version=1, name="initial", up_sql=_INITIAL_DDL),)
+# S9a: the service layer makes ``sessions.start_or_resume`` a per-request
+# check-then-insert. The partial unique index turns "one open session per
+# (clinician, patient)" from reviewer discipline into a schema invariant.
+_SESSIONS_OPEN_UNIQUE_DDL = """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_sessions_open
+    ON sessions (clinician_id, patient_id) WHERE ended_at IS NULL;
+"""
+
+
+MIGRATIONS: tuple[Migration, ...] = (
+    Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
+    Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
+)
 
 
 def apply_migrations(conn: sqlite3.Connection) -> list[int]:

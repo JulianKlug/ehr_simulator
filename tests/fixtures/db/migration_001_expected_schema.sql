@@ -1,9 +1,10 @@
--- Frozen expected schema after migration 001 ("initial"). The drift-check
+-- Frozen expected schema after ALL migrations (001 "initial" + 002
+-- "sessions_open_unique"; the filename predates 002). The drift-check
 -- test in tests/test_db.py reads sqlite_master.sql (the exact DDL text
 -- SQLite stored) sorted by name, joins with ";\n\n", and asserts it equals
 -- the contents of this file. Updating this fixture is a deliberate review
 -- step — it must move in lockstep with any DDL change in
--- src/ehr_simulator/db/migrations.py::_INITIAL_DDL.
+-- src/ehr_simulator/db/migrations.py (any ``_*_DDL`` string).
 
 CREATE TABLE answers (
     clinician_id  TEXT NOT NULL REFERENCES clinicians(clinician_id),
@@ -78,3 +79,6 @@ CREATE TABLE sessions (
     arm           TEXT NOT NULL,
     config_hash   TEXT NOT NULL
 );
+
+CREATE UNIQUE INDEX ux_sessions_open
+    ON sessions (clinician_id, patient_id) WHERE ended_at IS NULL;

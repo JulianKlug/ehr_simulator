@@ -4,6 +4,11 @@ Numbering and section headers track ``specs/session-06-sqlite-persistence.md``
 §9; tests in this file build up across commits 1 → 2. Commit 1 owns the
 connection + migrations slice (tests #1-#7 + #4b); commit 2 layers the
 per-table DAOs.
+
+S9a additions (``specs/session-09a-answer-capture.md`` §9 #13-#16c) sit at
+the bottom: the ``EventKind`` guard, ``answers.fetch_for_cell`` /
+``delete_one``, ``sessions.find_open`` and migration 2's open-session
+unique index.
 """
 
 from __future__ import annotations
@@ -145,8 +150,8 @@ def test_apply_migrations_forward(tmp_db_path: Path) -> None:
         ).fetchall()
     finally:
         conn.close()
-    assert versions == [1]
-    assert [(r[0], r[1]) for r in rows] == [(1, "initial")]
+    assert versions == [1, 2]
+    assert [(r[0], r[1]) for r in rows] == [(1, "initial"), (2, "sessions_open_unique")]
 
 
 def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None:
@@ -176,7 +181,7 @@ def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None
         migration_rows = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
     finally:
         conn.close()
-    assert versions == [1]
+    assert versions == [1, 2]
     expected = {
         "clinicians",
         "sessions",
@@ -187,7 +192,7 @@ def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None
         "schema_migrations",
     }
     assert expected.issubset(tables)
-    assert migration_rows == 1
+    assert migration_rows == len(MIGRATIONS)
 
 
 def test_apply_migrations_idempotent(tmp_db_path: Path) -> None:
@@ -201,7 +206,7 @@ def test_apply_migrations_idempotent(tmp_db_path: Path) -> None:
     finally:
         conn.close()
     assert versions == []
-    assert rows == 1
+    assert rows == len(MIGRATIONS)
     assert any(entry.get("event_kind") == "db.migrate.noop" for entry in cap)
 
 
@@ -393,7 +398,7 @@ def test_events_append_returns_autoincrement_id(db: sqlite3.Connection) -> None:
             clinician_id=cid,
             patient_id="p1",
             timepoint=0.0,
-            kind="panel.swap",
+            kind="session.start",
             payload={"b": 2, "a": 1},
         )
         for _ in range(3)
@@ -492,7 +497,7 @@ def test_foreign_key_constraint_enforced_for_events_session_id(
             clinician_id=cid,
             patient_id="p1",
             timepoint=0.0,
-            kind="panel.swap",
+            kind="session.start",
         )
 
 
@@ -526,3 +531,113 @@ def test_compute_config_hash_round_trips_through_db(
     )
     stored = db.execute("SELECT config_hash FROM answers").fetchone()[0]
     assert stored == h
+
+
+# ---------------------------------------------------------------------------
+# S9a additions (spec §9 tests #13, #14, #15, #16, #16b, #16c)
+# ---------------------------------------------------------------------------
+
+
+def _cell(**overrides: object) -> dict[str, object]:
+    base: dict[str, object] = {
+        "patient_id": "p1",
+        "timepoint": 60.0,
+        "question_id": "q1",
+    }
+    base.update(overrides)
+    return base
+
+
+def test_events_append_rejects_unknown_kind(db: sqlite3.Connection) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    with pytest.raises(ValueError, match="unknown event kind"):
+        events.append(
+            db,
+            session_id=None,
+            clinician_id=cid,
+            patient_id=None,
+            timepoint=None,
+            kind="panel.swap",  # type: ignore[arg-type]  (a structlog event_kind, not an events row)
+        )
+    assert db.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
+    assert "answer.upsert" in events.EVENT_KINDS
+
+
+def test_answers_fetch_for_cell_returns_mapping(db: sqlite3.Connection) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    other = clinicians.lookup_or_create(db, "Dr. Other")
+    common = {"arm": "no_ai", "config_hash": "h"}
+    answers.upsert(db, clinician_id=cid, value="Yes", **_cell(), **common)
+    answers.upsert(db, clinician_id=cid, value="42", **_cell(question_id="q2"), **common)
+    # Excluded: other timepoint, other clinician.
+    answers.upsert(db, clinician_id=cid, value="No", **_cell(timepoint=180.0), **common)
+    answers.upsert(db, clinician_id=other, value="No", **_cell(), **common)
+
+    got = answers.fetch_for_cell(db, clinician_id=cid, patient_id="p1", timepoint=60.0)
+    assert {qid: value for qid, (value, _hash) in got.items()} == {"q1": "Yes", "q2": "42"}
+
+
+def test_answers_fetch_for_cell_returns_config_hash(db: sqlite3.Connection) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    answers.upsert(db, clinician_id=cid, value="Yes", arm="no_ai", config_hash="old", **_cell())
+    got = answers.fetch_for_cell(db, clinician_id=cid, patient_id="p1", timepoint=60.0)
+    assert got == {"q1": ("Yes", "old")}
+
+
+def test_answers_delete_one_rowcount_and_write_counter(db: sqlite3.Connection) -> None:
+    class _State:
+        write_counter = 0
+
+    state = _State()
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    answers.upsert(db, clinician_id=cid, value="Yes", arm="no_ai", config_hash="h", **_cell())
+
+    first = answers.delete_one(db, clinician_id=cid, app_state=state, **_cell())
+    second = answers.delete_one(db, clinician_id=cid, app_state=state, **_cell())
+    assert (first, second) == (1, 0)
+    assert state.write_counter == 1
+    assert db.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 0
+
+
+def test_sessions_find_open(db: sqlite3.Connection) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    assert sessions.find_open(db, cid, "p1") is None
+
+    sid = sessions.start_or_resume(db, cid, "p1", arm="no_ai", config_hash="h")
+    assert sessions.find_open(db, cid, "p1") == sid
+
+    db.execute("UPDATE sessions SET ended_at = CURRENT_TIMESTAMP WHERE session_id = ?", (sid,))
+    db.commit()
+    assert sessions.find_open(db, cid, "p1") is None
+
+
+def test_migration_2_rejects_second_open_session(tmp_db_path: Path) -> None:
+    """Migration 2's partial unique index makes "one open session per pair"
+    structural. Also covers the v1 → v2 forward path + idempotency."""
+    v1 = connect(tmp_db_path)
+    v1.executescript(MIGRATIONS[0].up_sql)
+    v1.execute(
+        "CREATE TABLE schema_migrations ("
+        " version INTEGER PRIMARY KEY, name TEXT NOT NULL,"
+        " applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    v1.execute("INSERT INTO schema_migrations (version, name) VALUES (1, 'initial')")
+    v1.commit()
+    assert apply_migrations(v1) == [2]
+    assert apply_migrations(v1) == []
+
+    cid = clinicians.lookup_or_create(v1, "Dr. Smith")
+    insert = (
+        "INSERT INTO sessions (session_id, clinician_id, patient_id, arm, config_hash) "
+        "VALUES (?, ?, 'p1', 'no_ai', 'h')"
+    )
+    v1.execute(insert, ("s1", cid))
+    with pytest.raises(sqlite3.IntegrityError):
+        v1.execute(insert, ("s2", cid))
+
+    v1.execute("UPDATE sessions SET ended_at = CURRENT_TIMESTAMP WHERE session_id = 's1'")
+    v1.execute(insert, ("s3", cid))
+    v1.commit()
+    open_rows = v1.execute("SELECT COUNT(*) FROM sessions WHERE ended_at IS NULL").fetchone()[0]
+    v1.close()
+    assert open_rows == 1

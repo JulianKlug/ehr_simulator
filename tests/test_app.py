@@ -22,6 +22,7 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from ehr_simulator.db import MIGRATIONS
 from ehr_simulator.web.app import app_from_study_config, create_app
 
 
@@ -256,7 +257,7 @@ def test_lifespan_wires_db_and_runs_migrations(
     with TestClient(app):
         assert isinstance(app.state.db, sqlite3.Connection)
         rows = app.state.db.execute("SELECT version, name FROM schema_migrations").fetchall()
-        assert len(rows) == 1
+        assert len(rows) == len(MIGRATIONS)
         assert rows[0][0] == 1
 
 

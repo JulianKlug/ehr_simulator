@@ -284,7 +284,7 @@ def test_cli_migrate_forward_then_idempotent(runner: CliRunner, tmp_path: Path) 
     db_path = tmp_path / "x.db"
     first = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
     assert first.exit_code == 0, first.stderr
-    assert "Applied migrations: [1]" in first.stdout
+    assert "Applied migrations: [1, 2]" in first.stdout
 
     second = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
     assert second.exit_code == 0, second.stderr

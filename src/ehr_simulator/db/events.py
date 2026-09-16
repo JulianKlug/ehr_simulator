@@ -13,15 +13,29 @@ Increments ``app_state.write_counter`` after every successful append so the
 shutdown-time backup gate trips (review-fix R8). FK violations on
 ``session_id`` are wrapped as :class:`DbError`; the ``session_id=None``
 path bypasses the FK check entirely.
+
+``kind`` is closed over :data:`EventKind` (S9a). To add a producer, append
+its kind to the ``Literal``; ``append`` raises :class:`ValueError` on
+anything else *before* touching the DB, so a typo fails the producer's
+first test instead of silently forking the taxonomy.
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any
+from typing import Any, Literal, get_args
 
 from ehr_simulator.db.exceptions import DbError
+
+EventKind = Literal[
+    "clinician.login",
+    "clinician.logout",
+    "session.start",
+    "answer.upsert",
+    "answer.clear",
+]
+EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 
 
 def append(
@@ -31,13 +45,16 @@ def append(
     clinician_id: str,
     patient_id: str | None,
     timepoint: float | None,
-    kind: str,
+    kind: EventKind,
     payload: dict[str, Any] | None = None,
     client_ts: str | None = None,
     client_seq: int | None = None,
     app_state: Any = None,
 ) -> int:
     """Insert one ``events`` row; return its autoincrement ``event_id``."""
+    if kind not in EVENT_KINDS:
+        raise ValueError(f"unknown event kind {kind!r}")
+
     payload_json = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"))
     try:
         cursor = conn.execute(

@@ -5,8 +5,10 @@ timepoint, question_id)`` is the load-bearing invariant: a network-retry
 double-submit from the S9a auto-save path must NOT produce two rows.
 ``upsert`` is the only write API.
 
-S6 ships the upsert + the regression test (test #12). No S6 route writes
-to ``answers`` yet; S9a wires the POST endpoint.
+S9a adds the two siblings the answer-capture service needs:
+``fetch_for_cell`` (pre-fill of one ``(clinician, patient, timepoint)``
+cell) and ``delete_one`` (an empty submission clears the cell — no row is
+how S9b reads "unanswered").
 """
 
 from __future__ import annotations
@@ -47,3 +49,50 @@ def upsert(
     conn.commit()
     if app_state is not None:
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
+
+
+def fetch_for_cell(
+    conn: sqlite3.Connection,
+    *,
+    clinician_id: str,
+    patient_id: str,
+    timepoint: float,
+) -> dict[str, tuple[str, str]]:
+    """Return ``{question_id: (value, config_hash)}`` for one cell.
+
+    Served by the implicit index behind ``ux_answers_cell`` — its
+    ``(clinician_id, patient_id, timepoint)`` prefix matches the WHERE.
+    ``config_hash`` rides along so the caller can detect rows recorded under
+    a different study config (S9a §8.5).
+    """
+    rows = conn.execute(
+        "SELECT question_id, value, config_hash FROM answers "
+        "WHERE clinician_id = ? AND patient_id = ? AND timepoint = ?",
+        (clinician_id, patient_id, timepoint),
+    ).fetchall()
+    return {row[0]: (row[1], row[2]) for row in rows}
+
+
+def delete_one(
+    conn: sqlite3.Connection,
+    *,
+    clinician_id: str,
+    patient_id: str,
+    timepoint: float,
+    question_id: str,
+    app_state: Any = None,
+) -> int:
+    """Delete one cell; return the rowcount (0 or 1).
+
+    Bumps ``write_counter`` only when a row was actually removed.
+    """
+    cursor = conn.execute(
+        "DELETE FROM answers "
+        "WHERE clinician_id = ? AND patient_id = ? AND timepoint = ? AND question_id = ?",
+        (clinician_id, patient_id, timepoint, question_id),
+    )
+    conn.commit()
+    deleted = cursor.rowcount
+    if deleted > 0 and app_state is not None:
+        app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
+    return deleted
