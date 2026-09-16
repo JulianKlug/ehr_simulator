@@ -239,14 +239,18 @@ def seed_progress(
     db = client.app.state.db  # type: ignore[attr-defined]
     clinician_id = client.cookies.get("ehrsim_clinician_id")  # type: ignore[attr-defined]
     config_hash = client.app.state.config_hash  # type: ignore[attr-defined]
-    progress.unlock(
-        db,
-        clinician_id=clinician_id,
-        patient_id=patient_id,
-        from_t_index=0,
-        to_t_index=unlocked_t_index,
-        config_hash=config_hash,
-    )
+    if unlocked_t_index > 0:
+        # A second seed for the same pair would miss the compare-and-set and
+        # silently write nothing; fail loudly instead.
+        moved = progress.unlock(
+            db,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            from_t_index=0,
+            to_t_index=unlocked_t_index,
+            config_hash=config_hash,
+        )
+        assert moved, "seed_progress: frontier already moved for this pair"
     if completed:
         progress.mark_complete(
             db,

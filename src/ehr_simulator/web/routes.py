@@ -783,8 +783,12 @@ def _advance_response(
         return RedirectResponse(target_url, status_code=status.HTTP_303_SEE_OTHER)
 
     target_ctx = replace(ctx, frontier=Frontier(target_t_index, ctx.frontier.completed))
-    target_resolved, _ = _resolve_timepoint(request, patient_id, target_t_index)
-    assert target_resolved is not None  # the frontier is always within range
+    target_resolved, message = _resolve_timepoint(request, patient_id, target_t_index)
+    if target_resolved is None:  # unreachable: read_frontier clamps to the study range
+        return HTMLResponse(
+            content=_error_flash(message or ""),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
     inner = _render_patient_view(
         request,
         clinician_id=clinician_id,

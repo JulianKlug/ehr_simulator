@@ -1,5 +1,5 @@
--- Frozen expected schema after ALL migrations (001 "initial" + 002
--- "sessions_open_unique" + 003 "progress"; the filename predates 002). The drift-check
+-- Frozen expected schema after ALL migrations (001 "initial", 002
+-- "sessions_open_unique", 003 "progress"); the filename predates 002. The drift-check
 -- test in tests/test_db.py reads sqlite_master.sql (the exact DDL text
 -- SQLite stored) sorted by name, joins with ";\n\n", and asserts it equals
 -- the contents of this file. Updating this fixture is a deliberate review

@@ -24,7 +24,7 @@
           data-response-type="{{ q.response_type }}"
           data-required="{{ 'true' if q.required else 'false' }}"
           {% if mode == "open" %}
-          hx-post="/patient/{{ patient_id }}/timepoint/{{ t_index }}/answer"
+          hx-post="/patient/{{ patient_id }}/timepoint/{{ t_index }}/answer?chrome={{ chrome }}"
           hx-trigger="{{ trigger }}"
           hx-target="find .answer-status"
           hx-swap="outerHTML"

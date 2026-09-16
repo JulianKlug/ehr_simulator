@@ -424,9 +424,9 @@ def reset_progress_cmd(
     ),
 ) -> None:
     """Rewind a clinician's walk of one patient (recovery for a mis-click on Next)."""
-    from ehr_simulator.cli_support import ResetError, reset_progress
+    from ehr_simulator.cli_support import ResetError, assert_schema_current, reset_progress
     from ehr_simulator.config import load_study_config
-    from ehr_simulator.db import apply_migrations, connect, resolve_db_path
+    from ehr_simulator.db import connect, resolve_db_path
     from ehr_simulator.logging import setup_logging
 
     setup_logging(Path("logs"))
@@ -443,7 +443,7 @@ def reset_progress_cmd(
 
     conn = connect(resolved_db)
     try:
-        apply_migrations(conn)
+        assert_schema_current(conn)
         report = reset_progress(
             conn,
             clinician_name=clinician,

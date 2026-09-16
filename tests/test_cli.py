@@ -469,8 +469,9 @@ def test_cli_reset_progress_rewinds_walk(
         ("Dr. Nobody", "synth_001", 0, "unknown clinician"),
         ("Dr. Test", "synth_002", 0, "has not started"),
         ("Dr. Test", "synth_001", 7, "outside the study"),
+        ("Dr. Test", "synth_001", 2, "ahead of the current frontier"),
     ],
-    ids=["unknown_clinician", "no_progress_row", "index_out_of_range"],
+    ids=["unknown_clinician", "no_progress_row", "index_out_of_range", "forward_reset"],
 )
 def test_cli_reset_progress_errors(
     runner: CliRunner,
@@ -509,4 +510,41 @@ def test_cli_reset_progress_errors(
     assert conn.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 3
     assert conn.execute("SELECT COUNT(*) FROM events").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM clinicians").fetchone()[0] == 1
+    conn.close()
+
+
+def test_cli_reset_progress_refuses_stale_schema(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path
+) -> None:
+    """review #6: the recovery command never applies DDL under a live server."""
+    from ehr_simulator.db import MIGRATIONS, connect
+
+    db_path = tmp_path / "old.db"
+    conn = connect(db_path)
+    conn.executescript(MIGRATIONS[0].up_sql)
+    conn.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL,"
+        " applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    conn.execute("INSERT INTO schema_migrations (version, name) VALUES (1, 'initial')")
+    conn.commit()
+    conn.close()
+
+    result = runner.invoke(
+        cli.app_typer,
+        [
+            "reset-progress",
+            str(study_fixture_dir / "study_synthetic.yaml"),
+            "--clinician",
+            "Dr. Test",
+            "--patient",
+            "synth_001",
+            "--db-path",
+            str(db_path),
+        ],
+    )
+    assert result.exit_code == 1
+    assert "pending migrations [2, 3]" in result.stderr
+    conn = connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
     conn.close()

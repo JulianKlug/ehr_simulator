@@ -250,7 +250,12 @@ def test_advance_stale_412_renders_frontier_view(study_client: TestClient) -> No
 
 
 def test_advance_concurrent_frontier_move_is_stale(study_client: TestClient) -> None:
-    """review-fix R29: the storage-level compare-and-set, through the route."""
+    """The frontier moved between the clinician's render and their click.
+
+    Through the route this takes the plain stale path (the handler re-reads
+    the frontier before advancing); the SQL compare-and-set itself is locked
+    at service level by ``test_gating.py::test_advance_lost_cas_race_is_stale``.
+    """
     answer_all_required(study_client, PID, 0)
     # Someone moves the frontier out from under the next request.
     seed_progress(study_client, PID, 1)

@@ -2,8 +2,8 @@
 //
 // Client side of the S9b advance CTA (#advance-form). Four jobs:
 //
-//   1. Stamp every /advance POST with client_ts + client_seq, sharing the
-//      per-tab counter answers.js keeps in sessionStorage.
+//   1. Stamp every /advance POST with client_ts + client_seq from the
+//      shared per-tab counter in client_seq.js.
 //   2. Let the server's 409 (blocked → CTA fragment, retargeted onto itself)
 //      and 412 (stale → the frontier's #patient-view) swap in; htmx 2 skips
 //      4xx swaps by default. Anything else ≥400, or a dead network, gets a
@@ -29,14 +29,14 @@
     const FIRST_CONTROL_SELECTOR = "input:not([type=hidden]), textarea";
     const HIGHLIGHT_CLASS = "is-highlighted";
     const HIGHLIGHT_MS = 1500;
-    const SEQ_STORAGE_KEY = "ehrsim:client-seq"; // shared with answers.js
     const HTTP_CONFLICT = 409; // blocked → CTA fragment
     const HTTP_PRECONDITION_FAILED = 412; // stale → frontier view
     const HTTP_ERROR_MIN = 400;
     const CTA_MARKER = 'id="' + ADVANCE_FORM_ID + '"';
     const VIEW_MARKER = 'id="patient-view"';
+    // Keeps id="advance-hint": the blocked button's aria-describedby points at it.
     const FAILED_HINT_HTML =
-        '<p class="advance-hint is-error" role="alert">Could not advance — retry</p>';
+        '<p id="advance-hint" class="advance-hint is-error" role="alert">Could not advance — retry</p>';
 
     function isAdvanceForm(el) {
         return !!(el && el.id === ADVANCE_FORM_ID);
@@ -44,22 +44,6 @@
 
     function requester(e) {
         return e.detail && e.detail.requestConfig && e.detail.requestConfig.elt;
-    }
-
-    function nextSeq() {
-        let seq = 0;
-        try {
-            seq = parseInt(sessionStorage.getItem(SEQ_STORAGE_KEY) || "0", 10) || 0;
-        } catch (err) {
-            seq = nextSeq.memory || 0;
-        }
-        seq += 1;
-        try {
-            sessionStorage.setItem(SEQ_STORAGE_KEY, String(seq));
-        } catch (err) {
-            nextSeq.memory = seq;
-        }
-        return seq;
     }
 
     function writeFailedHint() {
@@ -106,7 +90,7 @@
     document.body.addEventListener("htmx:configRequest", function (e) {
         if (!isAdvanceForm(e.detail.elt)) return;
         e.detail.parameters.client_ts = new Date().toISOString();
-        e.detail.parameters.client_seq = nextSeq();
+        e.detail.parameters.client_seq = window.ehrsim.nextClientSeq();
     });
 
     document.body.addEventListener("htmx:beforeSwap", function (e) {

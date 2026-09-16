@@ -288,7 +288,7 @@ def test_get_patient_renders_questions_pane(study_client: TestClient) -> None:
         "free_notes": "free-text",
     }
     for form in forms:
-        assert form["hx-post"] == _url(T_INDEX)
+        assert form["hx-post"] == _url(T_INDEX) + "?chrome=epic"
         qid = form["data-question-id"]
         if qid in expected_types:
             assert form["data-response-type"] == expected_types[qid]
@@ -477,3 +477,22 @@ def test_get_patient_pane_locked_renders_disabled_fieldsets(study_client: TestCl
     link = pane.select_one(".resume-link")
     assert link["href"].endswith("/timepoint/1?chrome=epic")
     assert pane.select_one("#advance-form") is None
+
+
+def test_post_answer_oob_cta_keeps_chrome_variant(study_client: TestClient) -> None:
+    """REGRESSION (review #1): the answer form carries ?chrome, so the OOB CTA it
+    gets back targets the same chrome; a dense clinician must not flip to epic."""
+    pane = BeautifulSoup(
+        study_client.get(f"/patient/{PID}/timepoint/0?chrome=dense").text, "html.parser"
+    )
+    form = pane.select_one("form.question")
+    assert form["hx-post"].endswith("/answer?chrome=dense")
+    assert pane.select_one("#advance-form")["hx-post"].endswith("/advance?chrome=dense")
+
+    r = study_client.post(
+        f"/patient/{PID}/timepoint/0/answer?chrome=dense",
+        data={"question_id": "deterioration_6h", "value": "No"},
+    )
+    assert r.status_code == 200
+    assert _cta(r.text)["hx-post"].endswith("/advance?chrome=dense")
+    assert _cta(r.text)["action"].endswith("/advance?chrome=dense")

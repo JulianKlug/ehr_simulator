@@ -103,3 +103,9 @@ def test_advance_js_served_and_gated_fragments_csp_clean(study_client) -> None:
     assert js.status_code == 200
     assert "javascript" in js.headers["content-type"]
     assert "htmx:beforeSwap" in js.text and "htmx:afterSwap" in js.text
+    # review #10: one shared per-tab counter, loaded before both consumers.
+    assert BeautifulSoup(page.text, "html.parser").select_one('script[src="/static/client_seq.js"]')
+    shared = study_client.get("/static/client_seq.js")
+    assert shared.status_code == 200 and "nextClientSeq" in shared.text
+    assert "nextClientSeq" in js.text
+    assert "nextClientSeq" in study_client.get("/static/answers.js").text

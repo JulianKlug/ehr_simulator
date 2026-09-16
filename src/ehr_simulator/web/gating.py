@@ -28,6 +28,7 @@ from typing import Any, Literal
 
 from ehr_simulator.config.questions import Questions
 from ehr_simulator.db import events, progress, sessions
+from ehr_simulator.db.events import EventKind
 from ehr_simulator.logging import get_logger
 from ehr_simulator.web.answer_capture import (
     normalize_client_seq,
@@ -175,18 +176,26 @@ def advance(
         "client_seq": normalize_client_seq(client_seq),
     }
 
-    def _event(kind: str, timepoint: float | None, payload: dict[str, Any]) -> None:
-        events.append(
-            conn,
-            session_id=ctx.session_id,
-            clinician_id=clinician_id,
-            patient_id=patient_id,
-            timepoint=timepoint,
-            kind=kind,  # type: ignore[arg-type]
-            payload=payload,
-            app_state=app_state,
-            **clock,
-        )
+    def _event(kind: EventKind, timepoint: float | None, payload: dict[str, Any]) -> None:
+        try:
+            events.append(
+                conn,
+                session_id=ctx.session_id,
+                clinician_id=clinician_id,
+                patient_id=patient_id,
+                timepoint=timepoint,
+                kind=kind,
+                payload=payload,
+                app_state=app_state,
+                **clock,
+            )
+        except Exception:
+            # State was already written (state first, events after); make the
+            # hole in the event stream visible instead of silent, then re-raise.
+            get_logger().exception(
+                "event append failed after state write", event_kind="advance.event_lost", kind=kind
+            )
+            raise
 
     if not comp.complete:
         _event("advance.blocked", t_minutes, {**base_payload, "remaining": list(comp.remaining)})
@@ -208,7 +217,9 @@ def advance(
         return AdvanceResult("finished", t_index, ())
 
     # Compare-and-set: a racing second request finds the row already moved
-    # and degrades to "stale" here instead of unlocking twice.
+    # and degrades to "stale" here instead of unlocking twice. mark_complete
+    # above has no CAS: it is guarded by frontier.completed and by the single
+    # shared connection; a multi-connection refactor must revisit it.
     moved = progress.unlock(
         conn,
         clinician_id=clinician_id,

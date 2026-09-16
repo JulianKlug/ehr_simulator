@@ -3,7 +3,7 @@
 // Client side of the S9a questions pane. Two jobs:
 //
 //   1. Stamp every answer POST with client_ts (ISO-8601) and client_seq
-//      (per-tab monotonic counter, survives reloads via sessionStorage).
+//      (per-tab monotonic counter from client_seq.js, shared with advance.js).
 //   2. Let the badge fragment swap in on 4xx. htmx 2 skips swaps for
 //      error statuses; the server always answers with the badge, so we
 //      opt back in — but only when the body really is our fragment. A
@@ -17,7 +17,6 @@
 
     const QUESTION_FORM_SELECTOR = "form.question";
     const BADGE_SELECTOR = ".answer-status";
-    const SEQ_STORAGE_KEY = "ehrsim:client-seq";
     const FRAGMENT_MARKER = "data-state=";
     const HTTP_ERROR_MIN = 400;
     const FAILED_BADGE_HTML =
@@ -26,23 +25,6 @@
 
     function isQuestionForm(el) {
         return !!(el && el.matches && el.matches(QUESTION_FORM_SELECTOR));
-    }
-
-    function nextSeq() {
-        let seq = 0;
-        try {
-            seq = parseInt(sessionStorage.getItem(SEQ_STORAGE_KEY) || "0", 10) || 0;
-        } catch (err) {
-            // sessionStorage unavailable — fall back to an in-memory counter.
-            seq = nextSeq.memory || 0;
-        }
-        seq += 1;
-        try {
-            sessionStorage.setItem(SEQ_STORAGE_KEY, String(seq));
-        } catch (err) {
-            nextSeq.memory = seq;
-        }
-        return seq;
     }
 
     function writeFailedBadge(form) {
@@ -54,7 +36,7 @@
     document.body.addEventListener("htmx:configRequest", function (e) {
         if (!isQuestionForm(e.detail.elt)) return;
         e.detail.parameters.client_ts = new Date().toISOString();
-        e.detail.parameters.client_seq = nextSeq();
+        e.detail.parameters.client_seq = window.ehrsim.nextClientSeq();
     });
 
     document.body.addEventListener("htmx:beforeSwap", function (e) {

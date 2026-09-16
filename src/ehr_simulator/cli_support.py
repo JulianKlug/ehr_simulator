@@ -368,7 +368,8 @@ def reset_progress(
     pane pre-fills from what survives); a completed walk is re-opened; one
     ``progress.reset`` event records the intervention. Raises
     :class:`ResetError` — before any write — when the clinician is unknown,
-    the pair has no walk, or the index is outside the study.
+    the pair has no walk, the index is outside the study, or the index is
+    ahead of the current frontier (a reset only rewinds).
     """
     from ehr_simulator.db import answers, clinicians, events, progress
 
@@ -382,14 +383,22 @@ def reset_progress(
     row = progress.fetch(conn, clinician_id=clinician_id, patient_id=patient_id)
     if row is None:
         raise ResetError(f"{clinician_name!r} has not started patient {patient_id!r}")
+    if to_t_index > row.unlocked_t_index:
+        raise ResetError(
+            f"--to-t-index {to_t_index} is ahead of the current frontier "
+            f"{row.unlocked_t_index}; reset only rewinds"
+        )
 
-    progress.reset(conn, clinician_id=clinician_id, patient_id=patient_id, to_t_index=to_t_index)
+    # Delete first, rewind second: a failure between the two leaves the walk
+    # intact for a retry instead of a rewound frontier over orphaned answers
+    # that would pre-fill the re-walk as already complete.
     deleted = answers.delete_after(
         conn,
         clinician_id=clinician_id,
         patient_id=patient_id,
         min_timepoint_exclusive=timepoints[to_t_index],
     )
+    progress.reset(conn, clinician_id=clinician_id, patient_id=patient_id, to_t_index=to_t_index)
     events.append(
         conn,
         session_id=None,
@@ -411,3 +420,34 @@ def reset_progress(
         to_t_index=to_t_index,
         deleted_answers=deleted,
     )
+
+
+def assert_schema_current(conn: Any) -> None:
+    """Refuse to touch a DB whose schema is behind this build.
+
+    Operator commands must not apply DDL under a running server; that is
+    ``ehr-simulator migrate``'s job, run with the server stopped.
+    """
+    from ehr_simulator.db import MIGRATIONS
+
+    applied = {
+        row[0]
+        for row in conn.execute(
+            "SELECT version FROM schema_migrations"
+            if _has_migrations_table(conn)
+            else "SELECT 0 WHERE 0"
+        )
+    }
+    pending = [m.version for m in MIGRATIONS if m.version not in applied]
+    if pending:
+        raise ResetError(
+            f"database schema is behind (pending migrations {pending}); "
+            "stop the server and run `ehr-simulator migrate` first"
+        )
+
+
+def _has_migrations_table(conn: Any) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+    ).fetchone()
+    return row is not None
