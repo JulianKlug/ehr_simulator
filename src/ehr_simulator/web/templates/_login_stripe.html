@@ -1,0 +1,9 @@
+{% if logged_in_name %}
+<div class="login-stripe" aria-label="Clinician session">
+    Logged in as {{ logged_in_name }}
+    <span aria-hidden="true">·</span>
+    <form method="post" action="/logout" class="logout-form">
+        <button type="submit" class="link-button">Logout</button>
+    </form>
+</div>
+{% endif %}

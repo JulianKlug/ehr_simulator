@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>EHR simulator — sign in</title>
+    <link rel="stylesheet" href="/static/theme.css" />
+</head>
+<body>
+    <main class="login-page">
+        <h1>EHR simulator</h1>
+        <p>Enter your name to begin a clinician session.</p>
+        {% if error %}
+        <p class="error-flash" role="alert">{{ error }}</p>
+        {% endif %}
+        <form method="post" action="/login">
+            <label for="clinician_name">Clinician name</label>
+            <input
+                id="clinician_name"
+                name="clinician_name"
+                type="text"
+                required
+                autofocus
+                autocomplete="name"
+            />
+            <button type="submit">Sign in</button>
+        </form>
+    </main>
+</body>
+</html>

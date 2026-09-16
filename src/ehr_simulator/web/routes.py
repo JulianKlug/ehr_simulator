@@ -1,4 +1,4 @@
-"""HTTP routes: index + ``/patient/{id}/timepoint/{t}``.
+"""HTTP routes: index + ``/patient/{id}/timepoint/{t}`` + ``/login``/``/logout``.
 
 The HX-Request header switches between the full ``<html>`` document and the
 inner partial. Out-of-range / unknown patient renders an HTML error body
@@ -7,6 +7,11 @@ shaped for the swap target (Decisions **D6**, **D10**).
 Per-panel renderer exceptions are contained inside the route handler
 (Decision **D9**): a failed panel renders with the error visual treatment;
 the per-request log line stays ``page.render``/``panel.swap``.
+
+S6 protected-route preamble (``_require_clinician``): every clinician-
+facing route resolves the cookie against ``app.state.known_clinicians``
+(zero-DB-cost cache, review-fix R11) and HTMX-aware-redirects to
+``/login`` on miss (review-fix R10).
 """
 
 from __future__ import annotations
@@ -14,9 +19,10 @@ from __future__ import annotations
 import json
 from typing import Literal
 
-from fastapi import APIRouter, Request
-from fastapi.responses import HTMLResponse
+from fastapi import APIRouter, Form, Request, Response
+from fastapi.responses import HTMLResponse, RedirectResponse
 
+from ehr_simulator.db import clinicians, cookies, events
 from ehr_simulator.logging import get_logger, update_request_context
 from ehr_simulator.web.panels import (
     PatientSlice,
@@ -27,8 +33,128 @@ from ehr_simulator.web.panels import (
 router = APIRouter()
 
 
+def _require_clinician(request: Request) -> tuple[str | None, Response | None]:
+    """Resolve the clinician cookie or build an HTMX-aware redirect.
+
+    Returns ``(clinician_id, None)`` on success or ``(None, redirect)`` on
+    failure. The redirect is HTMX-aware:
+
+    - ``HX-Request: true`` → 200 + ``HX-Redirect: /login`` header (so HTMX
+      swaps the full page rather than dropping a 303 into the swap target).
+    - else → 303 → ``/login`` (browser follows).
+
+    Cookie validation runs against ``app.state.known_clinicians`` —
+    populated at lifespan boot, mutated by :func:`clinicians.lookup_or_create`.
+    A tampered cookie (16-hex string not in the set) misses the cache and
+    redirects to ``/login`` without touching the DB.
+    """
+    clinician_id = cookies.read_clinician_id(request)
+    known = getattr(request.app.state, "known_clinicians", set())
+    if clinician_id is None or clinician_id not in known:
+        if request.headers.get("hx-request", "").lower() == "true":
+            return None, Response(
+                status_code=200,
+                headers={"HX-Redirect": "/login"},
+            )
+        return None, RedirectResponse("/login", status_code=303)
+    return clinician_id, None
+
+
+def _logged_in_name(request: Request) -> str | None:
+    """Best-effort display name for the logged-in clinician.
+
+    The cookie carries the pseudonymized ``clinician_id``; the chrome
+    stripe wants the case-folded display name. One row lookup per page
+    render — pilot scale (≤1000 clinicians per DB) makes the cost
+    negligible.
+    """
+    clinician_id = cookies.read_clinician_id(request)
+    if clinician_id is None:
+        return None
+    db = getattr(request.app.state, "db", None)
+    if db is None:
+        return None
+    row = db.execute(
+        "SELECT name_normalized FROM clinicians WHERE clinician_id = ?",
+        (clinician_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return row[0]
+
+
+@router.get("/login", response_class=HTMLResponse)
+async def login_get(request: Request) -> HTMLResponse:
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {"error": None},
+    )
+
+
+@router.post("/login")
+async def login_post(
+    request: Request,
+    clinician_name: str = Form(""),
+) -> Response:
+    raw_name = clinician_name.strip()
+    if not raw_name:
+        templates = request.app.state.templates
+        return templates.TemplateResponse(
+            request,
+            "login.html",
+            {"error": "Name required."},
+            status_code=400,
+        )
+    clinician_id = clinicians.lookup_or_create(
+        request.app.state.db,
+        raw_name,
+        known_clinicians=request.app.state.known_clinicians,
+    )
+    update_request_context(clinician_id=clinician_id)
+    events.append(
+        request.app.state.db,
+        session_id=None,
+        clinician_id=clinician_id,
+        patient_id=None,
+        timepoint=None,
+        kind="clinician.login",
+        payload={"name_normalized": " ".join(raw_name.casefold().split())},
+        app_state=request.app.state,
+    )
+    response: Response = RedirectResponse("/", status_code=303)
+    cookies.set_clinician_cookie(response, clinician_id)
+    return response
+
+
+@router.post("/logout")
+async def logout_post(request: Request) -> Response:
+    clinician_id = cookies.read_clinician_id(request)
+    if clinician_id is not None and clinician_id in getattr(
+        request.app.state, "known_clinicians", set()
+    ):
+        events.append(
+            request.app.state.db,
+            session_id=None,
+            clinician_id=clinician_id,
+            patient_id=None,
+            timepoint=None,
+            kind="clinician.logout",
+            payload={},
+            app_state=request.app.state,
+        )
+    response: Response = RedirectResponse("/login", status_code=303)
+    cookies.clear_clinician_cookie(response)
+    return response
+
+
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect  # type: ignore[return-value]
+    update_request_context(clinician_id=clinician_id)
     dataset = request.app.state.dataset
     # Study config (when loaded via `serve --config`) is the authoritative
     # patient list — order is preserved, off-study patients are hidden.
@@ -42,7 +168,10 @@ async def index(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(
         request,
         "index.html",
-        {"patient_ids": patient_ids},
+        {
+            "patient_ids": patient_ids,
+            "logged_in_name": _logged_in_name(request),
+        },
     )
 
 
@@ -55,7 +184,12 @@ async def patient_timepoint(
     patient_id: str,
     t_index: int,
     chrome: Literal["dense", "epic"] = "epic",
-) -> HTMLResponse:
+) -> Response:
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect
+    update_request_context(clinician_id=clinician_id)
+
     dataset = request.app.state.dataset
     templates = request.app.state.templates
     is_htmx = request.headers.get("hx-request", "").lower() == "true"
@@ -100,12 +234,14 @@ async def patient_timepoint(
     panels_html = _render_panels(patient_slice, request)
     summary_html = _render_summary(patient_slice, request, chrome=chrome)
 
+    logged_in_name = _logged_in_name(request)
     template_name = "_chrome_dense.html" if chrome == "dense" else "_chrome_epic.html"
     chrome_html = templates.get_template(template_name).render(
         request=request,
         patient_slice=patient_slice,
         panels=panels_html,
         chrome=chrome,
+        logged_in_name=logged_in_name,
     )
 
     inner = templates.get_template("_patient_view.html").render(
@@ -114,6 +250,7 @@ async def patient_timepoint(
         chrome=chrome,
         chrome_html=chrome_html,
         summary_html=summary_html,
+        logged_in_name=logged_in_name,
     )
     if is_htmx:
         return HTMLResponse(content=inner, status_code=200)
@@ -126,6 +263,7 @@ async def patient_timepoint(
             "inner": inner,
             "patient_id": patient_id,
             "t_index": t_index,
+            "logged_in_name": logged_in_name,
         },
     )
 
