@@ -26,19 +26,35 @@ def _free_port() -> int:
 def live_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     port = _free_port()
     log_dir = tmp_path_factory.mktemp("e2e-logs")
-    env = {**os.environ, "EHR_LOG_DIR": str(log_dir)}
+    work_dir = tmp_path_factory.mktemp("e2e-work")
+    db_path = work_dir / "e2e.db"
+    backup_dir = work_dir / "backups"
+    env = {
+        **os.environ,
+        "EHR_LOG_DIR": str(log_dir),
+        # The uvicorn invocation below uses the module-level ``app`` whose
+        # lifespan resolves ``data/ehr_simulator.db`` by default. Set the
+        # CWD to the tmp work-dir so the lifespan writes the e2e DB +
+        # backups there rather than polluting the repo.
+        "PWD": str(work_dir),
+    }
     proc = subprocess.Popen(
         [
             sys.executable,
             "-m",
-            "uvicorn",
-            "ehr_simulator.web.app:app",
+            "ehr_simulator.cli",
+            "serve",
             "--host",
             "127.0.0.1",
             "--port",
             str(port),
+            "--db-path",
+            str(db_path),
+            "--backup-dir",
+            str(backup_dir),
         ],
         env=env,
+        cwd=str(work_dir),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
     )
@@ -50,7 +66,9 @@ def live_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
             output = proc.stdout.read().decode() if proc.stdout else ""
             raise RuntimeError(f"uvicorn exited early:\n{output}")
         try:
-            r = httpx.get(base_url + "/", timeout=1.0)
+            # /login is the unauthenticated landing page; it returns 200
+            # without a cookie. Use it as the readiness probe.
+            r = httpx.get(base_url + "/login", timeout=1.0)
             if r.status_code == 200:
                 break
         except Exception as exc:  # noqa: BLE001

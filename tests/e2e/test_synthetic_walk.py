@@ -12,8 +12,16 @@ from playwright.sync_api import Page
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 
+def _login(page: Page, live_server: str) -> None:
+    page.goto(f"{live_server}/login")
+    page.fill('input[name="clinician_name"]', "Dr. E2E")
+    page.click('button[type="submit"]')
+    page.wait_for_url(f"{live_server}/")
+
+
 @pytest.mark.e2e
 def test_e2e_walk_synth_001_via_keyboard(page: Page, live_server: str) -> None:
+    _login(page, live_server)
     page.goto(f"{live_server}/patient/synth_001/timepoint/0?chrome=dense")
     page.wait_for_selector("#patient-view[data-t-index='0']")
 
@@ -78,6 +86,7 @@ def test_e2e_active_tab_survives_timepoint_navigation(page: Page, live_server: s
     Admission selected (template default), bouncing the clinician off
     whatever panel they were reading.
     """
+    _login(page, live_server)
     page.goto(f"{live_server}/patient/synth_001/timepoint/0?chrome=epic")
     page.wait_for_selector("#patient-view[data-t-index='0']")
     # Default tab is Admission.

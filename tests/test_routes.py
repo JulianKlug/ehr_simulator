@@ -22,6 +22,30 @@ from ehr_simulator.ingestion.exceptions import AdapterError, IngestionIssue
 from ehr_simulator.web.app import create_app
 
 
+def _pre_seed_clinician(tmp_db_path: Path) -> str:
+    """Insert a ``Dr. Test`` clinician into the DB *before* the app boots so
+    the lifespan-time ``known_clinicians`` cache (review-fix R11) picks it
+    up. Returns the canonical id; callers pass it to
+    ``client.cookies.set("ehrsim_clinician_id", ...)``.
+    """
+    import hashlib
+
+    from ehr_simulator.db import apply_migrations, connect
+
+    name_normalized = " ".join("Dr. Test".casefold().split())
+    clinician_id = hashlib.sha256(name_normalized.encode("utf-8")).hexdigest()[:16]
+    tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(tmp_db_path)
+    apply_migrations(conn)
+    conn.execute(
+        "INSERT OR IGNORE INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
+        (clinician_id, name_normalized),
+    )
+    conn.commit()
+    conn.close()
+    return clinician_id
+
+
 def _find_in_exception_chain(exc: BaseException, target: type[BaseException]) -> bool:
     seen: set[int] = set()
     pending: list[BaseException] = [exc]
@@ -207,7 +231,10 @@ def test_lifespan_boot_failure_logs_and_exits(tmp_log_dir: Path) -> None:
 
 @pytest.fixture
 def broken_render_client(
-    tmp_log_dir: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_log_dir: Path,
+    tmp_db_path: Path,
+    tmp_backup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> Iterator[TestClient]:
     """Force the chart renderer to raise so we can verify per-panel containment."""
     from ehr_simulator.ingestion.synthetic import load_synthetic
@@ -223,9 +250,16 @@ def broken_render_client(
     monkeypatch.setattr(charts_module, "render_timeline_svg", boom)
     monkeypatch.setattr(routes_module, "_render_vitals", vitals_boom)
 
+    clinician_id = _pre_seed_clinician(tmp_db_path)
     dataset = load_synthetic()
-    app = create_app(log_dir=tmp_log_dir, dataset_loader=lambda: dataset)
+    app = create_app(
+        log_dir=tmp_log_dir,
+        dataset_loader=lambda: dataset,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
     with TestClient(app) as c:
+        c.cookies.set("ehrsim_clinician_id", clinician_id)
         yield c
 
 
@@ -302,7 +336,9 @@ def test_vitals_panel_round_03_layout(client: TestClient) -> None:
     ], f"values-table column order mismatch: {cell_order}"
 
 
-def test_vitals_panel_partial_dbp_renders_panel_note(tmp_log_dir: Path) -> None:
+def test_vitals_panel_partial_dbp_renders_panel_note(
+    tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
+) -> None:
     """When DBP is missing from the slice but SBP is present, the BP panel
     SVG carries ``data-bp-missing="dbp"`` and a panel-level note ('DBP
     missing at this timepoint.') renders below the BP SVG. This is the
@@ -316,8 +352,15 @@ def test_vitals_panel_partial_dbp_renders_panel_note(tmp_log_dir: Path) -> None:
     keep = ~((base.scalar_ts["patient_id"] == "synth_001") & (base.scalar_ts["variable"] == "dbp"))
     base.scalar_ts = base.scalar_ts.loc[keep].reset_index(drop=True)
 
-    app = create_app(log_dir=tmp_log_dir, dataset_loader=lambda: base)
+    clinician_id = _pre_seed_clinician(tmp_db_path)
+    app = create_app(
+        log_dir=tmp_log_dir,
+        dataset_loader=lambda: base,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
     with TestClient(app) as c:
+        c.cookies.set("ehrsim_clinician_id", clinician_id)
         r = c.get("/patient/synth_001/timepoint/0")
     assert r.status_code == 200
     soup = BeautifulSoup(r.text, "html.parser")
