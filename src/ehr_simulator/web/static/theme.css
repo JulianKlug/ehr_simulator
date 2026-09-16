@@ -401,3 +401,135 @@ body.chrome-epic [role="tabpanel"][hidden] {
     min-width: 8em;
     text-align: center;
 }
+
+/* Questions pane (S9a).
+ *
+ *   ≥1200px   ┌────────────────────────────┬──────────────┐
+ *             │ .patient-chrome            │ aside        │  sticky
+ *             │ (epic tabs | dense grid)   │ #questions-  │  column
+ *             │                            │  pane        │
+ *             └────────────────────────────┴──────────────┘
+ *   <1200px   chrome, then the pane stacked below.
+ */
+.patient-layout.has-questions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+    align-items: start;
+}
+
+@media (min-width: 1200px) {
+    .patient-layout.has-questions {
+        grid-template-columns: minmax(0, 1fr) minmax(20rem, 26rem);
+    }
+
+    .patient-layout.has-questions .questions-pane {
+        position: sticky;
+        top: 0.5rem;
+        max-height: calc(100vh - 1rem);
+        overflow-y: auto;
+    }
+}
+
+.questions-pane {
+    border: 1px solid var(--color-panel-border);
+    background: var(--color-panel-bg);
+    border-radius: 4px;
+    padding: 0.75rem;
+}
+
+.questions-title {
+    font-size: 1.05em;
+    margin: 0 0 0.5rem 0;
+}
+
+.questions-title small {
+    color: var(--color-muted);
+    font-weight: 400;
+    margin-left: 0.5rem;
+}
+
+.question {
+    border-top: 1px solid var(--color-border);
+    padding: 0.6rem 0;
+    margin: 0;
+}
+
+.question fieldset {
+    border: 0;
+    padding: 0;
+    margin: 0;
+}
+
+.question legend {
+    font-weight: 600;
+    padding: 0;
+    margin-bottom: 0.35rem;
+}
+
+.question .q-index {
+    color: var(--color-muted);
+    margin-right: 0.25rem;
+}
+
+.choices {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.9rem;
+}
+
+.choice {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    cursor: pointer;
+}
+
+.choice-number input {
+    width: 5em;
+    font: inherit;
+    padding: 0.2rem 0.3rem;
+}
+
+.choice-text {
+    display: block;
+}
+
+.choice-text textarea {
+    display: block;
+    width: 100%;
+    box-sizing: border-box;
+    font: inherit;
+    padding: 0.3rem 0.4rem;
+    resize: vertical;
+}
+
+.likert-anchors {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.8em;
+    color: var(--color-muted);
+    margin-top: 0.15rem;
+}
+
+/* Badge: the one response shape of POST …/answer. */
+.answer-status {
+    display: block;
+    min-height: 1.2em;
+    margin-top: 0.3rem;
+    font-size: 0.85em;
+    text-align: right;
+}
+
+.answer-status.is-saved {
+    color: var(--color-focus-ring);
+}
+
+.answer-status.is-cleared {
+    color: var(--color-muted);
+    font-style: italic;
+}
+
+.answer-status.is-error {
+    color: var(--color-error);
+}

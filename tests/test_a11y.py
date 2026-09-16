@@ -22,3 +22,29 @@ def test_a11y_fallback_table_present_for_every_chart(client: TestClient) -> None
         assert any(cell.get_text(strip=True) for cell in cells), (
             "a11y-fallback table must contain at least one numeric cell"
         )
+
+
+def test_every_question_control_has_label_and_legend(study_client: TestClient) -> None:
+    """S9a questions pane: every control is labelled, every question is a
+    fieldset with one legend, every badge is a live status region."""
+    r = study_client.get("/patient/synth_001/timepoint/0")
+    assert r.status_code == 200
+    pane = BeautifulSoup(r.text, "html.parser").select_one("#questions-pane")
+    assert pane is not None
+    assert pane.get("aria-label")
+
+    forms = pane.select("form.question")
+    assert forms
+    for form in forms:
+        assert len(form.select("fieldset > legend")) == 1
+        badge = form.select_one(".answer-status")
+        assert badge is not None and badge.get("role") == "status"
+
+        controls = [c for c in form.select("input, textarea") if c.get("type") != "hidden"]
+        assert controls, f"no controls in {form['data-question-id']}"
+        for control in controls:
+            wrapped = control.find_parent("label") is not None
+            referenced = bool(control.get("id")) and (
+                pane.select_one(f'label[for="{control.get("id")}"]') is not None
+            )
+            assert wrapped or referenced, f"unlabelled control: {control}"

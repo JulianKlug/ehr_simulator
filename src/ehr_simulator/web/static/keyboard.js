@@ -5,17 +5,29 @@
 //   [ = previous timepoint
 //   ? = toggle the shortcuts overlay
 //
-// Shortcuts are ignored when focus is in an input/textarea/select/contenteditable.
+// Shortcuts are ignored when focus is in a text-entry input/textarea/select/contenteditable.
 // Out-of-range presses do NOT make the network request; they populate the
 // summary-card flash slot instead.
 
 (function () {
     "use strict";
 
+    // Only text-entry controls swallow shortcuts. Radios/checkboxes in the
+    // questions pane keep focus after a click; without this narrowing,
+    // [ / ] / ? would go dead after answering (S9a review-fix R19).
+    const TEXT_ENTRY_INPUT_TYPES = [
+        "text", "search", "url", "tel", "email", "password", "number",
+        "date", "time", "datetime-local", "month", "week",
+    ];
+
     function isEditable(el) {
         if (!el) return false;
         const tag = (el.tagName || "").toLowerCase();
-        if (tag === "input" || tag === "textarea" || tag === "select") return true;
+        if (tag === "textarea" || tag === "select") return true;
+        if (tag === "input") {
+            const type = (el.getAttribute("type") || "text").toLowerCase();
+            return TEXT_ENTRY_INPUT_TYPES.indexOf(type) !== -1;
+        }
         if (el.isContentEditable) return true;
         return false;
     }

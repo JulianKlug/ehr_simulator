@@ -41,3 +41,24 @@ def test_csp_header_present(
         if part.strip().startswith("script-src")
     )
     assert "'unsafe-inline'" not in script_directive
+
+
+def test_questions_pane_is_csp_clean_and_answers_js_served(study_client) -> None:
+    """S9a: the pane adds no inline script / on*= handlers; answers.js is a
+    same-origin file, so the locked CSP needs no change."""
+    from bs4 import BeautifulSoup
+
+    page = study_client.get("/patient/synth_001/timepoint/0")
+    assert page.status_code == 200
+    soup = BeautifulSoup(page.text, "html.parser")
+    pane = soup.select_one("#questions-pane")
+    assert pane is not None
+    assert not pane.select("script")
+    for el in pane.find_all(True):
+        assert not [a for a in el.attrs if a.lower().startswith("on")], el
+    assert soup.select_one('script[src="/static/answers.js"]') is not None
+
+    js = study_client.get("/static/answers.js")
+    assert js.status_code == 200
+    assert "javascript" in js.headers["content-type"]
+    assert "htmx:configRequest" in js.text
