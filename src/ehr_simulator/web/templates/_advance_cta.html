@@ -1,0 +1,30 @@
+{#- Advance CTA (S9b). Rendered three ways: inline in the open pane, out-of-
+    band (hx-swap-oob) behind every POST …/answer 200, and as the 409 body of
+    POST …/advance. `remaining` is the server's list of unanswered required
+    question ids; the first one is the scroll target. aria-disabled (not
+    disabled) keeps the blocked button clickable so the click reaches the
+    server, which records advance.blocked. action+method make the no-JS
+    submit a real POST. -#}
+<form id="advance-form"
+      class="advance-cta{% if remaining %} is-blocked{% endif %}"
+      data-remaining="{{ remaining|length }}"
+      {% if remaining %}data-first-unanswered="{{ remaining[0] }}"{% endif %}
+      {% if oob %}hx-swap-oob="true"{% endif %}
+      method="post"
+      action="/patient/{{ patient_id }}/timepoint/{{ t_index }}/advance?chrome={{ chrome }}"
+      hx-post="/patient/{{ patient_id }}/timepoint/{{ t_index }}/advance?chrome={{ chrome }}"
+      hx-target="#patient-view"
+      hx-swap="outerHTML"
+      hx-sync="this:drop">
+    <button type="submit" id="advance-btn" class="advance-btn"
+            {% if remaining %}aria-disabled="true" aria-describedby="advance-hint"{% endif %}>
+        {%- if remaining %}Next timepoint · {{ remaining|length }} unanswered
+        {%- elif is_last %}Finish patient ✓
+        {%- else %}Next timepoint ›{% endif -%}
+    </button>
+    {% if remaining %}
+    <p id="advance-hint" class="advance-hint">
+        Answer the {{ remaining|length }} remaining required question{{ "s" if remaining|length != 1 }} to continue.
+    </p>
+    {% endif %}
+</form>

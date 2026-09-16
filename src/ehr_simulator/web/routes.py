@@ -20,12 +20,19 @@ routes are ``async def`` on purpose — the app owns one shared
 ``sqlite3.Connection`` and event-loop serialization is what keeps its
 writes ordered. New code goes routes → ``answer_capture`` /
 ``study_session`` → DAOs; the S6 ``/login`` DAO calls are left as they are.
+
+S9b gating: the GET route reads the walk frontier (``read_frontier``, a pure
+read) and bounces any ``t_index`` past it **before** slicing or writing
+anything; ``POST …/advance`` is the one forward path; ``POST …/answer``
+refuses timepoints that are not the open one. HTMX partials carry
+``HX-Push-Url`` so the address bar tracks the timepoint; a history-restore
+request gets the full document back.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from fastapi import APIRouter, Form, Request, Response, status
@@ -42,17 +49,56 @@ from ehr_simulator.web.answer_capture import (
     record_answer,
     saved_answers,
 )
+from ehr_simulator.web.gating import (
+    AdvanceResult,
+    PatientProgress,
+    advance,
+    completeness,
+    is_viewable,
+    pane_mode,
+    progress_overview,
+)
 from ehr_simulator.web.panels import (
     PatientSlice,
     patient_timepoints,
     slice_to_timepoint,
 )
-from ehr_simulator.web.study_session import bootstrap_session, read_frontier
+from ehr_simulator.web.study_session import (
+    Frontier,
+    SessionContext,
+    bootstrap_session,
+    read_frontier,
+)
 
 router = APIRouter()
 
 _NO_QUESTIONS_MSG = "No questions configured (start with --config/--questions)"
 _MISSING_QUESTION_ID_MSG = "Missing question_id"
+_TIMEPOINT_LOCKED_MSG = "Timepoint locked"
+_HX_REQUEST_HEADER = "hx-request"
+_HX_HISTORY_RESTORE_HEADER = "hx-history-restore-request"
+_INDEX_URL = "/"
+
+Chrome = Literal["dense", "epic"]
+
+
+def _is_htmx(request: Request) -> bool:
+    return request.headers.get(_HX_REQUEST_HEADER, "").lower() == "true"
+
+
+def _is_history_restore(request: Request) -> bool:
+    return request.headers.get(_HX_HISTORY_RESTORE_HEADER, "").lower() == "true"
+
+
+def _timepoint_url(patient_id: str, t_index: int, chrome: str) -> str:
+    return f"/patient/{patient_id}/timepoint/{t_index}?chrome={chrome}"
+
+
+def _htmx_aware_redirect(request: Request, url: str) -> Response:
+    """303 for browsers; 200 + ``HX-Redirect`` so htmx swaps the whole page."""
+    if _is_htmx(request):
+        return Response(status_code=status.HTTP_200_OK, headers={"HX-Redirect": url})
+    return RedirectResponse(url, status_code=status.HTTP_303_SEE_OTHER)
 
 
 def _require_clinician(request: Request) -> tuple[str | None, Response | None]:
@@ -73,12 +119,7 @@ def _require_clinician(request: Request) -> tuple[str | None, Response | None]:
     clinician_id = cookies.read_clinician_id(request)
     known = getattr(request.app.state, "known_clinicians", set())
     if clinician_id is None or clinician_id not in known:
-        if request.headers.get("hx-request", "").lower() == "true":
-            return None, Response(
-                status_code=200,
-                headers={"HX-Redirect": "/login"},
-            )
-        return None, RedirectResponse("/login", status_code=303)
+        return None, _htmx_aware_redirect(request, "/login")
     return clinician_id, None
 
 
@@ -152,31 +193,64 @@ def _answer_status(
     question_id: str | None = None,
     error: str | None = None,
     status_code: int = status.HTTP_200_OK,
+    trailing_html: str = "",
 ) -> HTMLResponse:
-    """The one response shape of ``POST …/answer``: the badge fragment."""
+    """The one response shape of ``POST …/answer``: the badge fragment.
+
+    ``trailing_html`` rides behind the badge — the out-of-band advance CTA
+    on a 200, nothing on an error.
+    """
     html = request.app.state.templates.get_template("_answer_status.html").render(
         request=request, state=state, question_id=question_id, error=error
     )
-    return HTMLResponse(content=html, status_code=status_code)
+    return HTMLResponse(content=html + trailing_html, status_code=status_code)
 
 
-def _render_questions_pane(
-    request: Request, *, clinician_id: str, patient_id: str, t_index: int, t_minutes: float
+def _render_advance_cta(
+    request: Request,
+    *,
+    patient_id: str,
+    t_index: int,
+    chrome: str,
+    remaining: tuple[str, ...],
+    is_last: bool,
+    oob: bool,
 ) -> str:
-    """Bootstrap the study session, bind ``arm``, render the pre-filled pane.
+    return request.app.state.templates.get_template("_advance_cta.html").render(
+        request=request,
+        patient_id=patient_id,
+        t_index=t_index,
+        chrome=chrome,
+        remaining=remaining,
+        is_last=is_last,
+        oob=oob,
+    )
 
-    Returns ``""`` outside study mode (bare ``serve``): no questions, no pane,
-    no session row.
-    """
+
+def _study_bootstrap(
+    request: Request, *, clinician_id: str, patient_id: str, frontier: Frontier
+) -> SessionContext:
     state = request.app.state
-    if state.study is None:
-        return ""
-
-    frontier = read_frontier(state.db, state, clinician_id=clinician_id, patient_id=patient_id)
     ctx = bootstrap_session(
         state.db, state, clinician_id=clinician_id, patient_id=patient_id, frontier=frontier
     )
     update_request_context(arm=ctx.arm)
+    return ctx
+
+
+def _render_questions_pane(
+    request: Request,
+    *,
+    ctx: SessionContext,
+    clinician_id: str,
+    patient_id: str,
+    t_index: int,
+    t_minutes: float,
+    chrome: str,
+    timepoint_count: int,
+) -> str:
+    """Render the pre-filled pane in ``open`` or ``locked`` mode (study mode only)."""
+    state = request.app.state
     prefill = saved_answers(
         state.db,
         clinician_id=clinician_id,
@@ -185,17 +259,132 @@ def _render_questions_pane(
         questions=state.questions,
         config_hash=ctx.config_hash,
     )
+    mode = pane_mode(ctx.frontier, t_index)
+    is_last = t_index == timepoint_count - 1
+    cta_html = ""
+    if mode == "open":
+        comp = completeness(state.questions, prefill)
+        cta_html = _render_advance_cta(
+            request,
+            patient_id=patient_id,
+            t_index=t_index,
+            chrome=chrome,
+            remaining=comp.remaining,
+            is_last=is_last,
+            oob=False,
+        )
     return state.templates.get_template("_questions_pane.html").render(
         request=request,
         patient_id=patient_id,
         t_index=t_index,
         t_minutes=t_minutes,
+        chrome=chrome,
         questions=state.questions.questions,
         prefill=prefill,
+        mode=mode,
+        completed=ctx.frontier.completed,
+        unlocked_t_index=ctx.frontier.unlocked_t_index,
+        timepoint_count=timepoint_count,
+        cta_html=cta_html,
         free_text_max_chars=FREE_TEXT_MAX_CHARS,
         free_text_autosave_delay_ms=FREE_TEXT_AUTOSAVE_DELAY_MS,
         probability_min=PROBABILITY_MIN,
         probability_max=PROBABILITY_MAX,
+    )
+
+
+def _render_patient_view(
+    request: Request,
+    *,
+    clinician_id: str,
+    patient_id: str,
+    t_index: int,
+    chrome: str,
+    resolved: ResolvedTimepoint,
+    ctx: SessionContext | None,
+) -> str:
+    """Slice → panels → summary → chrome → pane → ``_patient_view.html``.
+
+    Shared by the GET route and ``/advance``. ``ctx is None`` outside study
+    mode: no gate, no pane, S2 navigation.
+    """
+    state = request.app.state
+    templates = state.templates
+    t_minutes = float(resolved.t_minutes)
+    timepoint_count = len(resolved.timepoints)
+    at_last = t_index == timepoint_count - 1
+
+    patient_slice = slice_to_timepoint(state.dataset, patient_id, t_minutes, t_index)
+    panels_html = _render_panels(patient_slice, request)
+
+    # Forward navigation by plain hx-get is allowed only into already
+    # unlocked timepoints; at the frontier the pane CTA is the one path.
+    show_next = not at_last
+    resume_t_index: dict[str, int] = {}
+    questions_html = ""
+    if ctx is not None:
+        show_next = not at_last and t_index + 1 <= ctx.frontier.unlocked_t_index
+        overview = progress_overview(
+            state.db,
+            clinician_id=clinician_id,
+            patient_ids=state.study_patient_ids,
+            timepoint_count=timepoint_count,
+        )
+        resume_t_index = {pid: p.unlocked_t_index for pid, p in overview.items()}
+        questions_html = _render_questions_pane(
+            request,
+            ctx=ctx,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            t_index=t_index,
+            t_minutes=t_minutes,
+            chrome=chrome,
+            timepoint_count=timepoint_count,
+        )
+
+    summary_html = _render_summary(
+        patient_slice,
+        request,
+        chrome=chrome,
+        timepoint_count=timepoint_count,
+        show_next=show_next,
+        resume_t_index=resume_t_index,
+    )
+    logged_in_name = _logged_in_name(request)
+    template_name = "_chrome_dense.html" if chrome == "dense" else "_chrome_epic.html"
+    chrome_html = templates.get_template(template_name).render(
+        request=request,
+        patient_slice=patient_slice,
+        panels=panels_html,
+        chrome=chrome,
+        logged_in_name=logged_in_name,
+    )
+    return templates.get_template("_patient_view.html").render(
+        request=request,
+        patient_slice=patient_slice,
+        chrome=chrome,
+        chrome_html=chrome_html,
+        summary_html=summary_html,
+        questions_html=questions_html,
+        timepoint_count=timepoint_count,
+        logged_in_name=logged_in_name,
+    )
+
+
+def _full_document(
+    request: Request, *, inner: str, patient_id: str, t_index: int, chrome: str
+) -> Response:
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        request,
+        "base.html",
+        {
+            "chrome": chrome,
+            "inner": inner,
+            "patient_id": patient_id,
+            "t_index": t_index,
+            "logged_in_name": _logged_in_name(request),
+        },
     )
 
 
@@ -271,21 +460,29 @@ async def index(request: Request) -> HTMLResponse:
     if redirect is not None:
         return redirect  # type: ignore[return-value]
     update_request_context(clinician_id=clinician_id)
-    dataset = request.app.state.dataset
+    state = request.app.state
+    dataset = state.dataset
     # Study config (when loaded via `serve --config`) is the authoritative
     # patient list — order is preserved, off-study patients are hidden.
     # Without a study config, fall back to the full dataset list (S2 behavior).
-    study_patient_ids = getattr(request.app.state, "study_patient_ids", None)
+    study_patient_ids = getattr(state, "study_patient_ids", None)
+    patient_progress: dict[str, PatientProgress] | None = None
     if study_patient_ids is not None:
         patient_ids = list(study_patient_ids)
+        patient_progress = progress_overview(
+            state.db,
+            clinician_id=clinician_id or "",
+            patient_ids=patient_ids,
+            timepoint_count=len(state.study_timepoints),
+        )
     else:
         patient_ids = sorted(dataset.admission["patient_id"].unique().tolist())
-    templates = request.app.state.templates
-    return templates.TemplateResponse(
+    return state.templates.TemplateResponse(
         request,
         "index.html",
         {
             "patient_ids": patient_ids,
+            "patient_progress": patient_progress,
             "logged_in_name": _logged_in_name(request),
         },
     )
@@ -299,73 +496,66 @@ async def patient_timepoint(
     request: Request,
     patient_id: str,
     t_index: int,
-    chrome: Literal["dense", "epic"] = "epic",
+    chrome: Chrome = "epic",
 ) -> Response:
     clinician_id, redirect = _require_clinician(request)
     if redirect is not None:
         return redirect
     update_request_context(clinician_id=clinician_id)
-
-    dataset = request.app.state.dataset
-    templates = request.app.state.templates
-    is_htmx = request.headers.get("hx-request", "").lower() == "true"
+    state = request.app.state
 
     resolved, message = _resolve_timepoint(request, patient_id, t_index)
     if resolved is None:
         return HTMLResponse(content=_error_flash(message or ""), status_code=404)
 
-    t_minutes = resolved.t_minutes
+    # Bound before the gate so a redirected request stays attributable.
     update_request_context(
         patient_id=patient_id,
-        timepoint=float(t_minutes),
+        timepoint=float(resolved.t_minutes),
         timepoint_index=t_index,
         chrome=chrome,
     )
 
-    patient_slice = slice_to_timepoint(dataset, patient_id, t_minutes, t_index)
-    panels_html = _render_panels(patient_slice, request)
-    summary_html = _render_summary(patient_slice, request, chrome=chrome)
+    ctx: SessionContext | None = None
+    if state.study is not None:
+        # The gate decides on a pure read: nothing below may run for a
+        # request we are about to bounce (no slice, no arm lock, no session).
+        frontier = read_frontier(
+            state.db, state, clinician_id=clinician_id or "", patient_id=patient_id
+        )
+        if not is_viewable(frontier, t_index):
+            get_logger().warning(
+                "timepoint beyond the frontier; redirecting",
+                event_kind="gate.redirect",
+                requested_t_index=t_index,
+                unlocked_t_index=frontier.unlocked_t_index,
+            )
+            return _htmx_aware_redirect(
+                request, _timepoint_url(patient_id, frontier.unlocked_t_index, chrome)
+            )
+        ctx = _study_bootstrap(
+            request, clinician_id=clinician_id or "", patient_id=patient_id, frontier=frontier
+        )
 
-    logged_in_name = _logged_in_name(request)
-    template_name = "_chrome_dense.html" if chrome == "dense" else "_chrome_epic.html"
-    chrome_html = templates.get_template(template_name).render(
-        request=request,
-        patient_slice=patient_slice,
-        panels=panels_html,
-        chrome=chrome,
-        logged_in_name=logged_in_name,
-    )
-
-    questions_html = _render_questions_pane(
+    inner = _render_patient_view(
         request,
         clinician_id=clinician_id or "",
         patient_id=patient_id,
         t_index=t_index,
-        t_minutes=float(t_minutes),
+        chrome=chrome,
+        resolved=resolved,
+        ctx=ctx,
     )
 
-    inner = templates.get_template("_patient_view.html").render(
-        request=request,
-        patient_slice=patient_slice,
-        chrome=chrome,
-        chrome_html=chrome_html,
-        summary_html=summary_html,
-        questions_html=questions_html,
-        logged_in_name=logged_in_name,
-    )
-    if is_htmx:
-        return HTMLResponse(content=inner, status_code=200)
-    return templates.TemplateResponse(
-        request,
-        "base.html",
-        {
-            "patient_slice": patient_slice,
-            "chrome": chrome,
-            "inner": inner,
-            "patient_id": patient_id,
-            "t_index": t_index,
-            "logged_in_name": logged_in_name,
-        },
+    # A history restore is an HX request that wants the whole document back.
+    if _is_history_restore(request) or not _is_htmx(request):
+        return _full_document(
+            request, inner=inner, patient_id=patient_id, t_index=t_index, chrome=chrome
+        )
+    return HTMLResponse(
+        content=inner,
+        status_code=200,
+        headers={"HX-Push-Url": _timepoint_url(patient_id, t_index, chrome)},
     )
 
 
@@ -373,7 +563,9 @@ async def patient_timepoint(
     "/patient/{patient_id}/timepoint/{t_index}/answer",
     response_class=HTMLResponse,
 )
-async def patient_answer(request: Request, patient_id: str, t_index: int) -> Response:
+async def patient_answer(
+    request: Request, patient_id: str, t_index: int, chrome: Chrome = "epic"
+) -> Response:
     """Auto-save one answer; always reply with the badge fragment."""
     clinician_id, redirect = _require_clinician(request)
     if redirect is not None:
@@ -417,16 +609,24 @@ async def patient_answer(request: Request, patient_id: str, t_index: int) -> Res
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
 
-    update_request_context(
-        patient_id=patient_id, timepoint=float(resolved.t_minutes), timepoint_index=t_index
-    )
+    t_minutes = float(resolved.t_minutes)
+    update_request_context(patient_id=patient_id, timepoint=t_minutes, timepoint_index=t_index)
     frontier = read_frontier(
         state.db, state, clinician_id=clinician_id or "", patient_id=patient_id
     )
-    ctx = bootstrap_session(
-        state.db, state, clinician_id=clinician_id or "", patient_id=patient_id, frontier=frontier
+    ctx = _study_bootstrap(
+        request, clinician_id=clinician_id or "", patient_id=patient_id, frontier=frontier
     )
-    update_request_context(arm=ctx.arm)
+
+    # Only the open timepoint takes answers; disabled fieldsets are a courtesy.
+    if pane_mode(ctx.frontier, t_index) != "open":
+        return _answer_status(
+            request,
+            state="error",
+            question_id=question_id,
+            error=_TIMEPOINT_LOCKED_MSG,
+            status_code=status.HTTP_409_CONFLICT,
+        )
 
     raw_values = [v for v in form.getlist("value") if isinstance(v, str)]
     try:
@@ -436,7 +636,7 @@ async def patient_answer(request: Request, patient_id: str, t_index: int) -> Res
             ctx=ctx,
             clinician_id=clinician_id or "",
             patient_id=patient_id,
-            t_minutes=float(resolved.t_minutes),
+            t_minutes=t_minutes,
             question=question,
             raw_values=raw_values,
             client_ts=_form_str(form.get("client_ts")),
@@ -451,14 +651,168 @@ async def patient_answer(request: Request, patient_id: str, t_index: int) -> Res
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
 
-    return _answer_status(request, state=outcome, question_id=question_id)
+    # The CTA rides out-of-band so its remaining-count is always the server's.
+    saved = saved_answers(
+        state.db,
+        clinician_id=clinician_id or "",
+        patient_id=patient_id,
+        t_minutes=t_minutes,
+        questions=state.questions,
+        config_hash=ctx.config_hash,
+    )
+    cta_html = _render_advance_cta(
+        request,
+        patient_id=patient_id,
+        t_index=t_index,
+        chrome=chrome,
+        remaining=completeness(state.questions, saved).remaining,
+        is_last=t_index == len(resolved.timepoints) - 1,
+        oob=True,
+    )
+    return _answer_status(request, state=outcome, question_id=question_id, trailing_html=cta_html)
+
+
+@router.post(
+    "/patient/{patient_id}/timepoint/{t_index}/advance",
+    response_class=HTMLResponse,
+)
+async def patient_advance(
+    request: Request, patient_id: str, t_index: int, chrome: Chrome = "epic"
+) -> Response:
+    """Leave ``t_index``: unlock the next timepoint, or explain why not.
+
+    ``t_index`` is the client's optimistic "where I am"; a mismatch with the
+    stored frontier is answered with the frontier's view (412), never with a
+    write. Plain-browser (non-HTMX) submits get POST-redirect-GET 303s.
+    """
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect
+    update_request_context(clinician_id=clinician_id)
+
+    state = request.app.state
+    if state.study is None:
+        return HTMLResponse(
+            content=_error_flash(_NO_QUESTIONS_MSG), status_code=status.HTTP_409_CONFLICT
+        )
+
+    resolved, message = _resolve_timepoint(request, patient_id, t_index)
+    if resolved is None:
+        return HTMLResponse(content=_error_flash(message or ""), status_code=404)
+    update_request_context(
+        patient_id=patient_id,
+        timepoint=float(resolved.t_minutes),
+        timepoint_index=t_index,
+        chrome=chrome,
+    )
+
+    # The only await in this handler sits BEFORE the frontier read, so the
+    # read → compare-and-set below runs without yielding to the loop.
+    form = await request.form()
+    frontier = read_frontier(
+        state.db, state, clinician_id=clinician_id or "", patient_id=patient_id
+    )
+    ctx = _study_bootstrap(
+        request, clinician_id=clinician_id or "", patient_id=patient_id, frontier=frontier
+    )
+
+    result = advance(
+        state.db,
+        state,
+        ctx=ctx,
+        clinician_id=clinician_id or "",
+        patient_id=patient_id,
+        t_index=t_index,
+        timepoints=resolved.timepoints,
+        questions=state.questions,
+        client_ts=_form_str(form.get("client_ts")),
+        client_seq=_form_str(form.get("client_seq")),
+    )
+    return _advance_response(
+        request,
+        result=result,
+        ctx=ctx,
+        clinician_id=clinician_id or "",
+        patient_id=patient_id,
+        t_index=t_index,
+        chrome=chrome,
+        timepoint_count=len(resolved.timepoints),
+    )
+
+
+def _advance_response(
+    request: Request,
+    *,
+    result: AdvanceResult,
+    ctx: SessionContext,
+    clinician_id: str,
+    patient_id: str,
+    t_index: int,
+    chrome: str,
+    timepoint_count: int,
+) -> Response:
+    """Map an :class:`AdvanceResult` onto the HTMX / plain-browser contract (spec §5.1)."""
+    if result.outcome == "finished":
+        return _htmx_aware_redirect(request, _INDEX_URL)
+
+    if result.outcome == "blocked":
+        if not _is_htmx(request):
+            return RedirectResponse(
+                _timepoint_url(patient_id, t_index, chrome), status_code=status.HTTP_303_SEE_OTHER
+            )
+        html = _render_advance_cta(
+            request,
+            patient_id=patient_id,
+            t_index=t_index,
+            chrome=chrome,
+            remaining=result.remaining,
+            is_last=t_index == timepoint_count - 1,
+            oob=False,
+        )
+        return HTMLResponse(
+            content=html,
+            status_code=status.HTTP_409_CONFLICT,
+            headers={"HX-Retarget": "#advance-form", "HX-Reswap": "outerHTML"},
+        )
+
+    # "advanced" and "stale" both answer with the frontier's view. The ctx
+    # from bootstrap predates the write, so re-point it at the new frontier.
+    target_t_index = result.unlocked_t_index
+    target_url = _timepoint_url(patient_id, target_t_index, chrome)
+    if not _is_htmx(request):
+        return RedirectResponse(target_url, status_code=status.HTTP_303_SEE_OTHER)
+
+    target_ctx = replace(ctx, frontier=Frontier(target_t_index, ctx.frontier.completed))
+    target_resolved, _ = _resolve_timepoint(request, patient_id, target_t_index)
+    assert target_resolved is not None  # the frontier is always within range
+    inner = _render_patient_view(
+        request,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        t_index=target_t_index,
+        chrome=chrome,
+        resolved=target_resolved,
+        ctx=target_ctx,
+    )
+    status_code = (
+        status.HTTP_200_OK if result.outcome == "advanced" else status.HTTP_412_PRECONDITION_FAILED
+    )
+    return HTMLResponse(content=inner, status_code=status_code, headers={"HX-Push-Url": target_url})
 
 
 def _form_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
 
 
-def _render_summary(patient_slice: PatientSlice, request: Request, *, chrome: str) -> str:
+def _render_summary(
+    patient_slice: PatientSlice,
+    request: Request,
+    *,
+    chrome: str,
+    timepoint_count: int,
+    show_next: bool,
+    resume_t_index: dict[str, int],
+) -> str:
     templates = request.app.state.templates
     dataset = request.app.state.dataset
     admission_facts = {
@@ -485,6 +839,9 @@ def _render_summary(patient_slice: PatientSlice, request: Request, *, chrome: st
         counts=counts,
         chrome=chrome,
         all_patient_ids=all_patient_ids,
+        timepoint_count=timepoint_count,
+        show_next=show_next,
+        resume_t_index=resume_t_index,
     )
 
 

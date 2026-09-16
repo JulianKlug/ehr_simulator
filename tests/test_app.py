@@ -122,11 +122,29 @@ timepoints: [0, 180]
 
     with TestClient(app) as client:
         client.cookies.set("ehrsim_clinician_id", clinician_id)
-        response = client.get("/patient/synth_001/timepoint/1")
-        assert response.status_code == 200
+        # S9b gate: t=1 is behind the frontier of a fresh DB. follow_redirects
+        # is off so the 303 cannot be silently followed to t=0 (review-fix R2).
+        gated = client.get("/patient/synth_001/timepoint/1", follow_redirects=False)
+        assert gated.status_code == 303
+        assert gated.headers["location"] == "/patient/synth_001/timepoint/0?chrome=epic"
         response_t0 = client.get("/patient/synth_001/timepoint/0")
         assert response_t0.status_code == 200
+
+        from ehr_simulator.db import progress
+
+        progress.unlock(
+            app.state.db,
+            clinician_id=clinician_id,
+            patient_id="synth_001",
+            from_t_index=0,
+            to_t_index=1,
+            config_hash=app.state.config_hash,
+        )
+        response = client.get("/patient/synth_001/timepoint/1")
+        assert response.status_code == 200
         assert "synth_001" in response.text
+        assert 'data-t-index="1"' in response.text
+        assert 'data-t-minutes="180.0"' in response.text
 
 
 def test_serve_no_config_path_does_not_set_study_timepoints(
@@ -386,3 +404,40 @@ def test_app_from_study_config_sets_questions_and_config_hash(
 
     bare = create_app(log_dir=tmp_log_dir, db_path=tmp_db_path, backup_dir=tmp_backup_dir)
     assert (bare.state.study, bare.state.questions, bare.state.config_hash) == (None, None, None)
+
+
+def test_app_from_study_config_warns_when_no_question_required(
+    study_fixture_dir: Path, tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
+) -> None:
+    from structlog.testing import capture_logs
+
+    optional = tmp_log_dir.parent / "questions_optional.yaml"
+    optional.write_text(
+        """schema_version: "1"
+questions:
+  - question_id: q1
+    prompt: "Optional only"
+    response_type: free-text
+    required: false
+""",
+        encoding="utf-8",
+    )
+    with capture_logs() as logs:
+        app_from_study_config(
+            study_fixture_dir / "study_synthetic.yaml",
+            optional,
+            log_dir=tmp_log_dir,
+            db_path=tmp_db_path,
+            backup_dir=tmp_backup_dir,
+        )
+    assert any(log.get("event_kind") == "questions.none_required" for log in logs)
+
+    with capture_logs() as quiet:
+        app_from_study_config(
+            study_fixture_dir / "study_synthetic.yaml",
+            study_fixture_dir / "questions.yaml",
+            log_dir=tmp_log_dir,
+            db_path=tmp_db_path,
+            backup_dir=tmp_backup_dir,
+        )
+    assert not any(log.get("event_kind") == "questions.none_required" for log in quiet)

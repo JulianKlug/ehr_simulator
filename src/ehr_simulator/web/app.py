@@ -222,6 +222,13 @@ def app_from_study_config(
     app.state.study = study
     app.state.questions = questions
     app.state.config_hash = compute_config_hash_from_models(study, questions)
+    # S9b: with no required question the advance gate is vacuous — say so.
+    if not any(q.required for q in questions.questions):
+        get_logger().warning(
+            "no question is required; the advance gate never blocks",
+            event_kind="questions.none_required",
+            questions_path=str(questions_path),
+        )
     return app
 
 

@@ -17,10 +17,12 @@ from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 
 from ehr_simulator.db import answers
+from tests.conftest import seed_progress
 
 PID = "synth_001"
-T_INDEX = 1
-T_MINUTES = 60.0
+# S9b: a fresh study DB's frontier is t=0 — the only timepoint that takes answers.
+T_INDEX = 0
+T_MINUTES = 0.0
 FIXTURE_QUESTION_COUNT = 7
 
 
@@ -396,3 +398,82 @@ def test_get_patient_htmx_partial_includes_pane(study_client: TestClient) -> Non
     assert r.status_code == 200
     assert "<html" not in r.text
     assert 'id="questions-pane"' in r.text
+
+
+# ---------------------------------------------------------------------------
+# S9b: gate on /answer + OOB advance CTA + pane modes (spec §9 #21-#25)
+# ---------------------------------------------------------------------------
+
+
+def _cta(html: str):
+    return BeautifulSoup(html, "html.parser").select_one("#advance-form")
+
+
+def test_post_answer_200_includes_oob_advance_cta(study_client: TestClient) -> None:
+    r = study_client.post(_url(), data={"question_id": "deterioration_6h", "value": "No"})
+    assert r.status_code == 200
+    assert _state(r.text) == "saved"
+    cta = _cta(r.text)
+    assert cta is not None
+    assert cta["hx-swap-oob"] == "true"
+    assert cta["data-remaining"] == "5"
+
+    cleared = study_client.post(_url(), data={"question_id": "deterioration_6h", "value": ""})
+    assert _state(cleared.text) == "cleared"
+    assert _cta(cleared.text)["data-remaining"] == "6"
+
+
+@pytest.mark.parametrize(
+    ("unlocked", "completed", "t_index"),
+    [(1, False, 0), (1, False, 2), (2, True, 2)],
+    ids=["past", "future", "completed"],
+)
+def test_post_answer_locked_timepoint_409(
+    study_client: TestClient, unlocked: int, completed: bool, t_index: int
+) -> None:
+    seed_progress(study_client, PID, unlocked, completed=completed)
+    r = study_client.post(_url(t_index), data={"question_id": "deterioration_6h", "value": "No"})
+    assert r.status_code == 409
+    assert _state(r.text) == "error"
+    assert "Timepoint locked" in r.text
+    assert _cta(r.text) is None
+    assert _count(study_client, "answers") == 0
+    assert _count(study_client, "events", "kind LIKE 'answer.%'") == 0
+
+
+def test_post_answer_422_has_no_oob_cta(study_client: TestClient) -> None:
+    r = study_client.post(_url(), data={"question_id": "confidence", "value": "9"})
+    assert r.status_code == 422
+    assert _state(r.text) == "error"
+    assert _cta(r.text) is None
+
+
+def test_get_patient_pane_open_has_advance_cta_with_remaining(study_client: TestClient) -> None:
+    soup = _pane(study_client, 0)
+    assert soup.select_one("#questions-pane")["data-mode"] == "open"
+    cta = soup.select_one("#advance-form")
+    assert cta["data-remaining"] == "6"
+    assert cta["data-first-unanswered"] == "deterioration_6h"
+    assert cta["hx-sync"] == "this:drop"
+    assert not cta.has_attr("hx-swap-oob")
+    btn = soup.select_one("#advance-btn")
+    assert btn["aria-disabled"] == "true"
+    assert btn["aria-describedby"] == "advance-hint"
+    assert "6 unanswered" in btn.get_text()
+    assert soup.select_one("#advance-hint") is not None
+    assert not soup.select("fieldset[disabled]")
+
+
+def test_get_patient_pane_locked_renders_disabled_fieldsets(study_client: TestClient) -> None:
+    seed_progress(study_client, PID, 1)
+    soup = _pane(study_client, 0)
+    pane = soup.select_one("#questions-pane")
+    assert pane["data-mode"] == "locked"
+    forms = pane.select("form.question")
+    assert len(forms) == FIXTURE_QUESTION_COUNT
+    assert all(f.select_one("fieldset").has_attr("disabled") for f in forms)
+    assert all(not f.has_attr("hx-post") and not f.has_attr("hx-trigger") for f in forms)
+    assert pane.select_one(".pane-lock-note")["role"] == "note"
+    link = pane.select_one(".resume-link")
+    assert link["href"].endswith("/timepoint/1?chrome=epic")
+    assert pane.select_one("#advance-form") is None

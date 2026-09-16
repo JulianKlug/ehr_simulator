@@ -189,3 +189,69 @@ def study_client(
     with TestClient(app) as test_client:
         test_client.cookies.set("ehrsim_clinician_id", study_clinician_id)
         yield test_client
+
+
+# ---------------------------------------------------------------------------
+# S9b helpers (spec §2 #24): reach a complete cell / a seeded frontier
+# ---------------------------------------------------------------------------
+
+
+def _valid_value(question: object) -> str:
+    """One accepted value per response type, read off the question model."""
+    response_type = question.response_type  # type: ignore[attr-defined]
+    if response_type in {"categorical", "multi-select"}:
+        return question.options[0]  # type: ignore[attr-defined]
+    if response_type == "likert":
+        return str(question.scale_min)  # type: ignore[attr-defined]
+    if response_type == "probability-0-100":
+        return "50"
+    return "x"
+
+
+def answer_all_required(client: object, patient_id: str, t_index: int) -> list[str]:
+    """POST one valid answer per ``required`` question of the running config.
+
+    Derived from ``app.state.questions`` so a fixture change breaks loudly
+    (review-fix R15). Returns the question ids answered.
+    """
+    questions = client.app.state.questions  # type: ignore[attr-defined]
+    answered: list[str] = []
+    for q in questions.questions:
+        if not q.required:
+            continue
+        r = client.post(  # type: ignore[attr-defined]
+            f"/patient/{patient_id}/timepoint/{t_index}/answer",
+            data={"question_id": q.question_id, "value": _valid_value(q)},
+        )
+        assert r.status_code == 200, (q.question_id, r.status_code, r.text)
+        answered.append(q.question_id)
+    required = [q.question_id for q in questions.questions if q.required]
+    assert answered == required
+    return answered
+
+
+def seed_progress(
+    client: object, patient_id: str, unlocked_t_index: int, *, completed: bool = False
+) -> None:
+    """Write a ``progress`` row for the cookie's clinician without going through ``/advance``."""
+    from ehr_simulator.db import progress
+
+    db = client.app.state.db  # type: ignore[attr-defined]
+    clinician_id = client.cookies.get("ehrsim_clinician_id")  # type: ignore[attr-defined]
+    config_hash = client.app.state.config_hash  # type: ignore[attr-defined]
+    progress.unlock(
+        db,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        from_t_index=0,
+        to_t_index=unlocked_t_index,
+        config_hash=config_hash,
+    )
+    if completed:
+        progress.mark_complete(
+            db,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            unlocked_t_index=unlocked_t_index,
+            config_hash=config_hash,
+        )

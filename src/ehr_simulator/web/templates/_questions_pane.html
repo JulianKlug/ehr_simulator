@@ -1,8 +1,14 @@
-{#- Questions pane (S9a). One <form> per question so htmx submits exactly
+{#- Questions pane (S9a + S9b). One <form> per question so htmx submits exactly
     that question's named inputs; auto-saves on change (free-text also on a
-    typing pause). No submit button by design. Validator constants arrive
-    through the render context, never as literals here. -#}
-<aside id="questions-pane" class="questions-pane" aria-label="Questions for this timepoint">
+    typing pause). No submit button by design.
+
+    mode == "open"   : t_index is the walk frontier; editable; footer = CTA.
+    mode == "locked" : behind the frontier or patient complete; every
+                       fieldset disabled, forms carry no hx-* so nothing can
+                       fire; footer = lock note + resume link.
+    Validator constants arrive through the render context, never as literals. -#}
+<aside id="questions-pane" class="questions-pane pane-{{ mode }}" data-mode="{{ mode }}"
+       aria-label="Questions for this timepoint">
     <h2 class="questions-title">
         Questions <small>t = {{ "%.0f"|format(t_minutes) }} min</small>
     </h2>
@@ -16,14 +22,17 @@
     <form class="question"
           data-question-id="{{ q.question_id }}"
           data-response-type="{{ q.response_type }}"
+          data-required="{{ 'true' if q.required else 'false' }}"
+          {% if mode == "open" %}
           hx-post="/patient/{{ patient_id }}/timepoint/{{ t_index }}/answer"
           hx-trigger="{{ trigger }}"
           hx-target="find .answer-status"
           hx-swap="outerHTML"
-          hx-sync="this:queue last">
+          hx-sync="this:queue last"
+          {% endif %}>
         <input type="hidden" name="question_id" value="{{ q.question_id }}">
-        <fieldset>
-            <legend><span class="q-index">{{ loop.index }}.</span> {{ q.prompt }}</legend>
+        <fieldset{% if mode == "locked" %} disabled{% endif %}>
+            <legend><span class="q-index">{{ loop.index }}.</span> {{ q.prompt }}{% if not q.required %} <small class="q-optional">(optional)</small>{% endif %}</legend>
 
             {% if q.response_type == "categorical" %}
             <div class="choices">
@@ -82,4 +91,21 @@
         {% endwith %}
     </form>
     {% endfor %}
+
+    <footer class="pane-footer">
+        {% if mode == "open" %}
+        {{ cta_html | safe }}
+        {% elif completed %}
+        <p class="pane-lock-note" role="note">Patient complete ✓ — answers are locked.</p>
+        <a class="resume-link" href="/">← All patients</a>
+        {% else %}
+        <p class="pane-lock-note" role="note">Locked — answered before you advanced.</p>
+        <a class="resume-link"
+           href="/patient/{{ patient_id }}/timepoint/{{ unlocked_t_index }}?chrome={{ chrome }}"
+           hx-get="/patient/{{ patient_id }}/timepoint/{{ unlocked_t_index }}?chrome={{ chrome }}"
+           hx-target="#patient-view" hx-swap="outerHTML">
+            Go to current timepoint ({{ unlocked_t_index + 1 }}/{{ timepoint_count }}) →
+        </a>
+        {% endif %}
+    </footer>
 </aside>
