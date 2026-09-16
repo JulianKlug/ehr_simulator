@@ -1,6 +1,7 @@
 .EXAMPLE_DATA_PATHS
 docs/data-contract.md.tmp
 logs/
+data/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
