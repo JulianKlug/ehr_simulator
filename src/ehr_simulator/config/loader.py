@@ -111,27 +111,36 @@ def load_questions(path: Path) -> Questions:
         raise ConfigError.from_validation_error(exc, path=path) from exc
 
 
-def compute_config_hash(study_path: Path, questions_path: Path) -> str:
-    """SHA256 of the canonicalized parsed configs, hex-encoded.
+def compute_config_hash_from_models(study: StudyConfig, questions: Questions) -> str:
+    """SHA256 of the canonicalized already-parsed models, hex-encoded.
 
-    Computed as ``sha256(study.model_dump_json(...) || 0x00 ||
-    questions.model_dump_json(...))``. Pydantic v2's ``model_dump_json``
-    produces a deterministic JSON serialization with sorted keys, normalised
-    value formatting, and stable booleans/numbers — immune to YAML
-    whitespace, key ordering, and editor/OS line-ending differences.
+    Same canonical payload as :func:`compute_config_hash` but accepts the
+    parsed models directly so callers that already hold them (e.g., the
+    FastAPI lifespan) don't re-parse YAML on every restart (review-fix R3).
 
-    ``csv_path`` and ``params_dir`` are excluded from the canonical payload:
-    they are deployment/environment concerns (where the data lives on this
-    machine), not part of the study definition. Two researchers running the
-    same dataset enum + same patients + same questions on different machines
-    get the same hash.
+    ``csv_path``, ``params_dir``, and ``db_path`` are excluded from the
+    canonical payload — they are deployment/environment concerns (where the
+    data + DB live on this machine), not part of the study definition. Two
+    researchers running the same dataset enum + same patients + same
+    questions on different machines get the same hash.
     """
-    study = load_study_config(Path(study_path))
-    questions = load_questions(Path(questions_path))
     study_payload = study.model_dump_json(
         by_alias=True,
-        exclude={"csv_path", "params_dir"},
+        exclude={"csv_path", "params_dir", "db_path"},
     )
     questions_payload = questions.model_dump_json(by_alias=True)
     payload = study_payload.encode("utf-8") + b"\x00" + questions_payload.encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def compute_config_hash(study_path: Path, questions_path: Path) -> str:
+    """SHA256 of the canonicalized parsed configs, hex-encoded.
+
+    Delegates to :func:`compute_config_hash_from_models` after parsing the
+    YAML files. The invariant is "same study definition means same hash",
+    not "same file bytes" — semantic edits change it; whitespace/line-ending
+    edits do not.
+    """
+    study = load_study_config(Path(study_path))
+    questions = load_questions(Path(questions_path))
+    return compute_config_hash_from_models(study, questions)

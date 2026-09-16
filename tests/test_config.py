@@ -214,6 +214,50 @@ unknown_field: 1
     assert "unknown_field" in str(excinfo.value)
 
 
+def test_study_config_resolves_db_path_against_yaml_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S6: ``db_path`` relative to the YAML dir, like ``csv_path`` / ``params_dir``."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "data").mkdir()
+    study_path = tmp_path / "study.yaml"
+    study_path.write_text(
+        """schema_version: "1"
+dataset: synthetic
+db_path: data/local.db
+patient_ids: [synth_001]
+time_unit: minutes
+timepoints: [0]
+""",
+        encoding="utf-8",
+    )
+    study = load_study_config(study_path)
+    assert study.db_path == (tmp_path / "data" / "local.db").resolve()
+
+
+def test_study_config_rejects_db_path_traversal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """review-fix R13: ``..`` in ``db_path`` is rejected at validation time."""
+    monkeypatch.chdir(tmp_path)
+    study_path = tmp_path / "study.yaml"
+    study_path.write_text(
+        """schema_version: "1"
+dataset: synthetic
+db_path: ../../etc/passwd.db
+patient_ids: [synth_001]
+time_unit: minutes
+timepoints: [0]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        load_study_config(study_path)
+    msg = str(excinfo.value)
+    assert "db_path" in msg
+    assert ".." in msg or "working directory" in msg
+
+
 def test_load_study_config_resolves_relative_paths_against_yaml_dir(tmp_path: Path) -> None:
     (tmp_path / "data").mkdir()
     (tmp_path / "data" / "foo.csv").write_text("", encoding="utf-8")

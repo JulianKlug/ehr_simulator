@@ -6,36 +6,45 @@ import ``app`` at module scope — they read ``request.app.state.dataset``
 instead. Every test gets an isolated app, isolated ``logs/`` directory under
 ``tmp_path``, and a controllable dataset.
 
-Lifespan (Decision **D17**):
+Lifespan (Decision **D17** + S6 growth):
 
-1. ``setup_logging(log_dir)``;
+1. ``setup_logging(log_dir)``; init ``app.state.boot_id`` (uuid4 hex) and
+   ``app.state.write_counter = 0`` (the backup-gate counter).
 2. try ``app.state.dataset = dataset_loader()`` (validate-once, cache parsed
    frames);
 3. on :class:`AdapterError`: log ``app.boot.failed`` with the issues list,
    print remediation hint to stderr, raise :class:`SystemExit(1)`;
-4. on success, emit ``app.boot``.
+4. on any other :class:`Exception` (review-fix R9): log ``app.boot.failed``,
+   raise :class:`SystemExit(1)`. No DB file is created.
+5. on success: ``connect(db_path)`` → ``apply_migrations`` →
+   ``known_clinicians`` cache from ``SELECT clinician_id FROM clinicians`` →
+   ``ingestion_issues.record_batch`` (if dataset exposes ``.issues``) →
+   emit ``app.boot``.
+6. on shutdown: if ``app.state.write_counter > 0`` (review-fix R8), call
+   :func:`create_backup`; otherwise emit ``db.backup.skipped``. Close the
+   connection.
 
-Middleware stack (outermost first):
-
-1. Request-ID middleware: generate ``request_id``, bind to context vars,
-   attach ``X-Request-ID`` response header.
-2. Logging middleware: emit one log record per request after handler returns
-   per Decision **D3** (HX-Request → ``panel.swap``; else ``page.render``;
-   exception → ``page.error``).
+Middleware stack (outermost first) unchanged.
 """
 
 from __future__ import annotations
 
+import contextlib
 import sys
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from uuid import uuid4
 
 import matplotlib  # noqa: F401  (eager import so plotnine's first render is fast)
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from ehr_simulator.db.backup import create_backup
+from ehr_simulator.db.connection import connect, resolve_db_path
+from ehr_simulator.db.ingestion_issues import record_batch as record_ingestion_issues
+from ehr_simulator.db.migrations import apply_migrations
 from ehr_simulator.ingestion.exceptions import AdapterError
 from ehr_simulator.ingestion.synthetic import load_synthetic
 from ehr_simulator.logging import (
@@ -57,11 +66,17 @@ def create_app(
     *,
     log_dir: Path = Path("logs"),
     dataset_loader: Callable[[], DatasetLike] = load_synthetic,
+    db_path: Path | None = None,
+    backup_dir: Path | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         setup_logging(log_dir)
         log = get_logger()
+        app.state.boot_id = uuid4().hex
+        app.state.write_counter = 0
+        app.state.known_clinicians = set()
+
         try:
             app.state.dataset = dataset_loader()
         except AdapterError as exc:
@@ -81,11 +96,69 @@ def create_app(
                 file=sys.stderr,
             )
             raise SystemExit(1) from exc
+        except Exception as exc:
+            log.error("boot failed", event_kind="app.boot.failed", error=repr(exc))
+            raise SystemExit(1) from exc
+
+        db_path_resolved = db_path if db_path is not None else resolve_db_path(None)
+        db_path_resolved.parent.mkdir(parents=True, exist_ok=True)
+        app.state.db_path = db_path_resolved
+        app.state.backup_dir = (
+            backup_dir if backup_dir is not None else db_path_resolved.parent / "backups"
+        )
+        app.state.db = connect(db_path_resolved)
+        versions = apply_migrations(app.state.db)
+        log.info(
+            "db ready",
+            event_kind="db.ready",
+            db_path=str(db_path_resolved),
+            migrations=versions,
+        )
+
+        app.state.known_clinicians = {
+            row[0] for row in app.state.db.execute("SELECT clinician_id FROM clinicians")
+        }
+
+        issues = getattr(app.state.dataset, "issues", None) or []
+        if issues:
+            dataset_name = issues[0].dataset
+            n = record_ingestion_issues(
+                app.state.db,
+                dataset_name,
+                app.state.boot_id,
+                issues,
+            )
+            log.info(
+                "ingestion issues recorded",
+                event_kind="db.ingestion_issues.recorded",
+                count=n,
+            )
 
         log.info("boot ok", event_kind="app.boot")
         try:
             yield
         finally:
+            try:
+                if app.state.write_counter > 0:
+                    dest = create_backup(db_path_resolved, app.state.backup_dir)
+                    log.info(
+                        "backup ok",
+                        event_kind="db.backup.ok",
+                        dest=str(dest),
+                    )
+                else:
+                    log.info(
+                        "backup skipped (no writes)",
+                        event_kind="db.backup.skipped",
+                    )
+            except Exception as exc:  # noqa: BLE001
+                log.error(
+                    "backup failed",
+                    event_kind="db.backup.failed",
+                    error=repr(exc),
+                )
+            with contextlib.suppress(Exception):
+                app.state.db.close()
             log.info("shutdown", event_kind="app.shutdown")
 
     app = FastAPI(lifespan=lifespan)
@@ -105,6 +178,8 @@ def app_from_study_config(
     questions_path: Path,
     *,
     log_dir: Path = Path("logs"),
+    db_path: Path | None = None,
+    backup_dir: Path | None = None,
 ) -> FastAPI:
     """Build a FastAPI app whose dataset_loader and timepoints come from the study config.
 
@@ -125,7 +200,13 @@ def app_from_study_config(
     study = load_study_config(study_path)
     load_questions(questions_path)  # validate shape; the parsed model isn't wired up until S9
     loader = build_dataset_loader(study)
-    app = create_app(log_dir=log_dir, dataset_loader=loader)
+    resolved_db_path = db_path if db_path is not None else resolve_db_path(study)
+    app = create_app(
+        log_dir=log_dir,
+        dataset_loader=loader,
+        db_path=resolved_db_path,
+        backup_dir=backup_dir,
+    )
     app.state.study_timepoints = list(study.timepoints_minutes)
     app.state.study_patient_ids = list(study.patient_ids)
     return app

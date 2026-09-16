@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from ehr_simulator.config.exceptions import ConfigError
-from ehr_simulator.config.loader import compute_config_hash, load_questions, load_study_config
+from ehr_simulator.config.loader import (
+    compute_config_hash,
+    compute_config_hash_from_models,
+    load_questions,
+    load_study_config,
+)
 from ehr_simulator.config.questions import (
     CategoricalQuestion,
     FreeTextQuestion,
@@ -28,6 +33,7 @@ __all__ = [
     "ResponseType",
     "StudyConfig",
     "compute_config_hash",
+    "compute_config_hash_from_models",
     "load_questions",
     "load_study_config",
 ]

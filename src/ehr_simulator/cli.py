@@ -1,10 +1,11 @@
 """Command-line entry point for ``ehr-simulator``.
 
-Five commands:
+Seven commands after S6:
 
 - ``serve`` — boot uvicorn against the FastAPI app. ``--config STUDY``
   + ``--questions Q`` wires a study-driven loader; without ``--config`` the
-  synthetic default holds (back-compat with S2).
+  synthetic default holds (back-compat with S2). ``--db-path`` +
+  ``--backup-dir`` (S6) plumb persistence + shutdown-backup destinations.
 - ``validate-config`` — Pydantic-validate study + questions YAML; exit 1
   with the offending field path on failure.
 - ``validate-adapter`` — resolve the study config's dataset and try to
@@ -15,6 +16,10 @@ Five commands:
 - ``preview`` — render a single patient's per-timepoint summary as text;
   ``--html-out`` additionally dumps the rendered HTMX panel HTML for
   design review and bug repro.
+- ``migrate`` (S6) — apply unapplied DB migrations + ``PRAGMA
+  wal_checkpoint(TRUNCATE)`` so the bare ``.db`` file is a complete
+  snapshot. Idempotent.
+- ``backup`` (S6) — snapshot the SQLite DB to a backup directory.
 
 The ``main(argv: list[str] | None = None) -> None`` signature is preserved
 from the S2 argparse skeleton so ``test_cli.py``'s monkeypatch idiom carries
@@ -57,15 +62,42 @@ def serve(
     questions: Path | None = typer.Option(
         None, "--questions", help="Path to questions.yaml (required with --config)."
     ),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="Path to the SQLite DB. Bypasses the traversal guard (explicit operator decision).",
+    ),
+    backup_dir: Path | None = typer.Option(
+        None,
+        "--backup-dir",
+        help="Directory for shutdown-time SQLite backups. Defaults to <db parent>/backups.",
+    ),
 ) -> None:
     """Run the FastAPI server via uvicorn."""
     if config is None and questions is None:
-        uvicorn.run(
-            "ehr_simulator.web.app:app",
-            host=host,
-            port=port,
-            reload=reload,
+        if db_path is None and backup_dir is None:
+            uvicorn.run(
+                "ehr_simulator.web.app:app",
+                host=host,
+                port=port,
+                reload=reload,
+            )
+            return
+        from ehr_simulator.web.app import create_app
+
+        app_instance = create_app(
+            log_dir=Path("logs"),
+            db_path=db_path,
+            backup_dir=backup_dir,
         )
+        if reload:
+            typer.echo(
+                "Warning: --reload disabled when --db-path/--backup-dir is set "
+                "(reload requires the import-string entry point).",
+                err=True,
+            )
+            reload = False
+        uvicorn.run(app_instance, host=host, port=port, reload=reload)
         return
 
     if config is None or questions is None:
@@ -86,12 +118,79 @@ def serve(
     from ehr_simulator.web.app import app_from_study_config
 
     try:
-        app_instance = app_from_study_config(config, questions, log_dir=Path("logs"))
+        app_instance = app_from_study_config(
+            config,
+            questions,
+            log_dir=Path("logs"),
+            db_path=db_path,
+            backup_dir=backup_dir,
+        )
     except ConfigError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
     uvicorn.run(app_instance, host=host, port=port, reload=reload)
+
+
+# ---------------------------------------------------------------------------
+# backup
+# ---------------------------------------------------------------------------
+
+
+@app_typer.command()
+def migrate(
+    db_path: Path = typer.Option(
+        Path("data/ehr_simulator.db"),
+        "--db-path",
+        help="Path to the SQLite DB to migrate.",
+    ),
+) -> None:
+    """Apply all unapplied DB migrations + checkpoint the WAL.
+
+    The post-migration ``PRAGMA wal_checkpoint(TRUNCATE)`` ensures a
+    researcher who ``cp``'s the bare ``.db`` file afterwards doesn't lose
+    un-checkpointed writes (review-fix R14).
+    """
+    from ehr_simulator.db import apply_migrations, connect
+    from ehr_simulator.logging import setup_logging
+
+    setup_logging(Path("logs"))
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(db_path)
+    try:
+        versions = apply_migrations(conn)
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    finally:
+        conn.close()
+    if versions:
+        typer.echo(f"Applied migrations: {versions}")
+    else:
+        typer.echo("No migrations to apply.")
+
+
+@app_typer.command()
+def backup(
+    db_path: Path = typer.Option(
+        Path("data/ehr_simulator.db"),
+        "--db-path",
+        help="Path to the SQLite DB to back up.",
+    ),
+    backup_dir: Path = typer.Option(
+        Path("data/backups"),
+        "--backup-dir",
+        help="Directory the backup snapshot is written into. Auto-created.",
+    ),
+) -> None:
+    """Snapshot the SQLite DB to a timestamped file in --backup-dir."""
+    from ehr_simulator.db.backup import create_backup
+    from ehr_simulator.logging import setup_logging
+
+    setup_logging(Path("logs"))
+    if not db_path.exists():
+        typer.echo(f"Error: db_path does not exist: {db_path}", err=True)
+        raise typer.Exit(code=1)
+    dest = create_backup(db_path, backup_dir)
+    typer.echo(f"Backup written to: {dest}")
 
 
 # ---------------------------------------------------------------------------

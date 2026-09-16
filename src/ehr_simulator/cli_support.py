@@ -266,14 +266,34 @@ def render_html_for_preview(
     at runtime — including the study-bound t_index → t_minutes mapping
     (per /plan-eng-review issue 1.2).
     """
+    import hashlib
+
     from fastapi.testclient import TestClient
 
+    from ehr_simulator.db import apply_migrations, clinicians, connect
     from ehr_simulator.web.app import app_from_study_config
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    app = app_from_study_config(study_path, questions_path, log_dir=log_dir)
+    # Preview is a dev-only rendering tool — write to a scratch DB so the
+    # default ``data/ehr_simulator.db`` is never touched, and seed a
+    # synthetic clinician so the protected-route preamble lets us in.
+    scratch_db = out_dir / "_preview_scratch.db"
+    seed_conn = connect(scratch_db)
+    apply_migrations(seed_conn)
+    clinician_id = clinicians.lookup_or_create(seed_conn, "Dr. Preview")
+    seed_conn.close()
+    clinician_id = hashlib.sha256(b"dr. preview").hexdigest()[:16]
+
+    app = app_from_study_config(
+        study_path,
+        questions_path,
+        log_dir=log_dir,
+        db_path=scratch_db,
+        backup_dir=out_dir / "_preview_backups",
+    )
     written: list[Path] = []
     with TestClient(app) as client:
+        client.cookies.set("ehrsim_clinician_id", clinician_id)
         study = _load_study_for_app(study_path)
         for idx, _ in enumerate(study.timepoints_minutes):
             response = client.get(f"/patient/{patient_id}/timepoint/{idx}")

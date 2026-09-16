@@ -279,6 +279,52 @@ timepoints: [0]
 # ---------------------------------------------------------------------------
 
 
+def test_cli_migrate_forward_then_idempotent(runner: CliRunner, tmp_path: Path) -> None:
+    """S6: migrate applies migrations on a fresh DB; re-running is a no-op."""
+    db_path = tmp_path / "x.db"
+    first = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
+    assert first.exit_code == 0, first.stderr
+    assert "Applied migrations: [1]" in first.stdout
+
+    second = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
+    assert second.exit_code == 0, second.stderr
+    assert "No migrations to apply." in second.stdout
+
+
+def test_cli_backup_creates_file(runner: CliRunner, tmp_path: Path) -> None:
+    """S6: backup writes one snapshot file into --backup-dir."""
+    db_path = tmp_path / "x.db"
+    backup_dir = tmp_path / "backups"
+    runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
+    result = runner.invoke(
+        cli.app_typer,
+        [
+            "backup",
+            "--db-path",
+            str(db_path),
+            "--backup-dir",
+            str(backup_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "Backup written to:" in result.stdout
+    files = list(backup_dir.glob("ehr_simulator_*.db"))
+    assert len(files) == 1
+
+
+def test_cli_serve_db_path_plumbs_through_create_app(
+    captured_calls: list[dict[str, Any]], tmp_path: Path
+) -> None:
+    """S6: ``serve --db-path X`` reaches ``create_app`` via the no-config branch."""
+    db_path = tmp_path / "srv.db"
+    cli.main(["serve", "--db-path", str(db_path)])
+    assert len(captured_calls) == 1
+    # No-config + db-path branch passes a FastAPI instance (not an import string).
+    from fastapi import FastAPI
+
+    assert isinstance(captured_calls[0]["app"], FastAPI)
+
+
 def test_cli_preview_text_summary_and_html_out(
     runner: CliRunner, study_fixture_dir: Path, tmp_path: Path
 ) -> None:

@@ -18,6 +18,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, model_validator
 
+from ehr_simulator.config.exceptions import ConfigError
+
 
 class StudyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -26,6 +28,7 @@ class StudyConfig(BaseModel):
     dataset: Literal["synthetic", "geneva", "mimic"]
     csv_path: Path | None = None
     params_dir: Path | None = None
+    db_path: Path | None = None
     patient_ids: list[str]
     time_unit: Literal["minutes", "hours"]
     timepoints: list[float]
@@ -37,10 +40,20 @@ class StudyConfig(BaseModel):
             return data
         context = info.context or {}
         yaml_dir = context.get("yaml_dir") if isinstance(context, dict) else None
-        if yaml_dir is None:
-            return data
         out = dict(data)
-        for key in ("csv_path", "params_dir"):
+        # Traversal guard runs on the raw (pre-resolution) path so a
+        # ``..`` segment is rejected regardless of yaml_dir presence
+        # (review-fix R13). Applied to db_path only — csv_path/params_dir
+        # are operator-managed deployment paths and stay unguarded for
+        # back-compat.
+        db_raw = out.get("db_path")
+        if db_raw is not None:
+            raw_path = Path(db_raw)
+            if ".." in raw_path.parts:
+                raise ValueError(f"db_path must not contain '..' segments; got {raw_path}")
+        if yaml_dir is None:
+            return out
+        for key in ("csv_path", "params_dir", "db_path"):
             raw = out.get(key)
             if raw is None:
                 continue
@@ -48,6 +61,20 @@ class StudyConfig(BaseModel):
             if not p.is_absolute():
                 out[key] = str((Path(yaml_dir) / p).resolve())
         return out
+
+    @model_validator(mode="after")
+    def _db_path_safe(self) -> StudyConfig:
+        if self.db_path is None:
+            return self
+        resolved = self.db_path.resolve()
+        cwd = Path.cwd().resolve()
+        try:
+            resolved.relative_to(cwd)
+        except ValueError as exc:
+            raise ConfigError(
+                f"db_path must be inside the project working directory; got {resolved}"
+            ) from exc
+        return self
 
     @field_validator("patient_ids")
     @classmethod
