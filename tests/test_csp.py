@@ -62,3 +62,44 @@ def test_questions_pane_is_csp_clean_and_answers_js_served(study_client) -> None
     assert js.status_code == 200
     assert "javascript" in js.headers["content-type"]
     assert "htmx:configRequest" in js.text
+
+
+def test_advance_js_served_and_gated_fragments_csp_clean(study_client) -> None:
+    """S9b: open pane, locked pane, 409 CTA and 412 view add no inline script
+    or on*= handlers; advance.js is same-origin; htmx history caching is off."""
+    from bs4 import BeautifulSoup
+
+    from tests.conftest import answer_all_required
+
+    def assert_clean(html: str) -> None:
+        soup = BeautifulSoup(html, "html.parser")
+        assert not soup.select("script:not([src])")
+        for el in soup.find_all(True):
+            assert not [a for a in el.attrs if a.lower().startswith("on")], el
+
+    hx = {"HX-Request": "true"}
+    page = study_client.get("/patient/synth_001/timepoint/0")
+    assert 'hx-history="false"' in page.text
+    assert BeautifulSoup(page.text, "html.parser").select_one('script[src="/static/advance.js"]')
+    assert_clean(page.text)
+
+    blocked = study_client.post("/patient/synth_001/timepoint/0/advance", headers=hx)
+    assert blocked.status_code == 409
+    assert_clean(blocked.text)
+
+    answer_all_required(study_client, "synth_001", 0)
+    assert (
+        study_client.post("/patient/synth_001/timepoint/0/advance", headers=hx).status_code == 200
+    )
+    stale = study_client.post("/patient/synth_001/timepoint/0/advance", headers=hx)
+    assert stale.status_code == 412
+    assert_clean(stale.text)
+
+    locked = study_client.get("/patient/synth_001/timepoint/0", headers=hx)
+    assert 'data-mode="locked"' in locked.text
+    assert_clean(locked.text)
+
+    js = study_client.get("/static/advance.js")
+    assert js.status_code == 200
+    assert "javascript" in js.headers["content-type"]
+    assert "htmx:beforeSwap" in js.text and "htmx:afterSwap" in js.text

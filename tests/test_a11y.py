@@ -5,6 +5,8 @@ from __future__ import annotations
 from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 
+from tests.conftest import seed_progress
+
 
 def test_a11y_fallback_table_present_for_every_chart(client: TestClient) -> None:
     r = client.get("/patient/synth_001/timepoint/2")
@@ -48,3 +50,41 @@ def test_every_question_control_has_label_and_legend(study_client: TestClient) -
                 pane.select_one(f'label[for="{control.get("id")}"]') is not None
             )
             assert wrapped or referenced, f"unlabelled control: {control}"
+
+
+def _pane(client: TestClient, t_index: int) -> BeautifulSoup:
+    r = client.get(f"/patient/synth_001/timepoint/{t_index}")
+    assert r.status_code == 200
+    return BeautifulSoup(r.text, "html.parser")
+
+
+def _assert_labelled(pane: BeautifulSoup) -> None:
+    for form in pane.select("form.question"):
+        assert len(form.select("fieldset > legend")) == 1
+        for control in (c for c in form.select("input, textarea") if c.get("type") != "hidden"):
+            assert control.find_parent("label") is not None, control
+
+
+def test_advance_cta_and_locked_pane_a11y(study_client: TestClient) -> None:
+    """S9b: blocked CTA is aria-disabled + described; locked pane is a note
+    with every control inside a disabled fieldset; both keep the S9a labels."""
+    open_pane = _pane(study_client, 0).select_one("#questions-pane")
+    btn = open_pane.select_one("#advance-btn")
+    assert btn["aria-disabled"] == "true"
+    hint = open_pane.select_one("#" + btn["aria-describedby"])
+    assert hint is not None
+    assert "6" in hint.get_text()
+    _assert_labelled(open_pane)
+
+    seed_progress(study_client, "synth_001", 1)
+    locked_pane = _pane(study_client, 0).select_one("#questions-pane")
+    note = locked_pane.select_one(".pane-lock-note")
+    assert note["role"] == "note" and note.get_text(strip=True)
+    controls = [c for c in locked_pane.select("input, textarea") if c.get("type") != "hidden"]
+    assert controls
+    for control in controls:
+        fieldset = control.find_parent("fieldset")
+        assert fieldset is not None and fieldset.has_attr("disabled"), control
+    link = locked_pane.select_one(".resume-link")
+    assert link.get_text(strip=True)
+    _assert_labelled(locked_pane)

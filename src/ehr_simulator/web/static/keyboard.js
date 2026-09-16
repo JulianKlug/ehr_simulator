@@ -56,7 +56,19 @@
         }, 2000);
     }
 
+    const ADVANCE_BUTTON_ID = "advance-btn";
+
     function navigate(deltaIndex) {
+        // S9b: at the walk frontier the pane's advance CTA is the forward
+        // path — blocked or not. Checked before the boundary guard: on the
+        // last timepoint next == tCount and "Finish patient" must still fire.
+        if (deltaIndex > 0) {
+            const advanceBtn = document.getElementById(ADVANCE_BUTTON_ID);
+            if (advanceBtn) {
+                advanceBtn.click();
+                return;
+            }
+        }
         const state = readPatientView();
         if (!state) return;
         const next = state.tIndex + deltaIndex;
