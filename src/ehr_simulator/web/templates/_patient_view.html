@@ -7,6 +7,17 @@
     {{ summary_html | safe }}
     <div class="patient-layout{% if questions_html %} has-questions{% endif %}">
         <div class="patient-chrome">{{ chrome_html | safe }}</div>
-        {% if questions_html %}{{ questions_html | safe }}{% endif %}
+        {% if questions_html %}
+        {#- Drawer toggle (S9b feedback R1/F2). Outside the aside so it stays
+            usable while the drawer is collapsed + inert; pane.js fills the
+            count from #advance-form and flips aria-expanded. -#}
+        <button type="button" class="pane-tab" data-action="toggle-pane"
+                aria-controls="questions-pane" aria-expanded="true"
+                title="Toggle questions (keyboard: q)">
+            <span class="pane-tab-label">Questions</span>
+            <span class="pane-tab-count" hidden></span>
+        </button>
+        {{ questions_html | safe }}
+        {% endif %}
     </div>
 </div>

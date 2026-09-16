@@ -109,3 +109,7 @@ def test_advance_js_served_and_gated_fragments_csp_clean(study_client) -> None:
     assert shared.status_code == 200 and "nextClientSeq" in shared.text
     assert "nextClientSeq" in js.text
     assert "nextClientSeq" in study_client.get("/static/answers.js").text
+    # feedback R1/F2: drawer toggle lives in pane.js, no inline handler on the tab.
+    pane_js = study_client.get("/static/pane.js")
+    assert pane_js.status_code == 200 and "toggle-pane" in pane_js.text
+    assert BeautifulSoup(page.text, "html.parser").select_one('script[src="/static/pane.js"]')

@@ -181,6 +181,10 @@
         }
     }
 
+    // pane.js reuses the same "focus is in a text field" rule for `q`.
+    window.ehrsim = window.ehrsim || {};
+    window.ehrsim.isEditable = isEditable;
+
     document.addEventListener("keydown", onKeyDown);
     document.addEventListener("click", onClick);
     // Restore on initial page load.

@@ -402,40 +402,87 @@ body.chrome-epic [role="tabpanel"][hidden] {
     text-align: center;
 }
 
-/* Questions pane (S9a).
+/* Questions pane: a right-hand drawer (S9a, redesigned in S9b feedback R1).
  *
- *   ≥1200px   ┌────────────────────────────┬──────────────┐
- *             │ .patient-chrome            │ aside        │  sticky
- *             │ (epic tabs | dense grid)   │ #questions-  │  column
- *             │                            │  pane        │
- *             └────────────────────────────┴──────────────┘
- *   <1200px   chrome, then the pane stacked below.
+ *   open                                    collapsed
+ *   ┌──────────────────────┬─┬───────────┐  ┌────────────────────────────────┬─┐
+ *   │ .patient-chrome      │Q│ aside     │  │ .patient-chrome                │Q│
+ *   │ (margin-right =      │u│ #questions│  │ (full width)                   │u│
+ *   │  --pane-w at ≥900px) │e│ -pane     │  │                                │e│
+ *   └──────────────────────┴─┴───────────┘  └────────────────────────────────┴─┘
+ *   The tab (Q) hangs off the drawer's left edge and stays at the viewport
+ *   edge when the drawer is off-screen. `#patient-view.pane-collapsed` is
+ *   the one hook pane.js flips.
  */
-.patient-layout.has-questions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr);
-    gap: 1rem;
-    align-items: start;
+:root {
+    --pane-w: min(26rem, 92vw);
+    --pane-tab-top: 4.5rem;
+    --pane-transition: 0.2s ease;
 }
 
-@media (min-width: 1200px) {
-    .patient-layout.has-questions {
-        grid-template-columns: minmax(0, 1fr) minmax(20rem, 26rem);
-    }
+.patient-layout.has-questions {
+    display: block;
+}
 
-    .patient-layout.has-questions .questions-pane {
-        position: sticky;
-        top: 0.5rem;
-        max-height: calc(100vh - 1rem);
-        overflow-y: auto;
+@media (min-width: 900px) {
+    #patient-view:not(.pane-collapsed) .patient-layout.has-questions .patient-chrome {
+        margin-right: var(--pane-w);
     }
 }
 
 .questions-pane {
-    border: 1px solid var(--color-panel-border);
+    position: fixed;
+    top: 0;
+    right: 0;
+    height: 100vh;
+    width: var(--pane-w);
+    box-sizing: border-box;
+    overflow-y: auto;
+    z-index: 20;
+    border-left: 1px solid var(--color-panel-border);
     background: var(--color-panel-bg);
-    border-radius: 4px;
     padding: 0.75rem;
+    transition: transform var(--pane-transition);
+}
+
+#patient-view.pane-collapsed .questions-pane {
+    transform: translateX(100%);
+}
+
+.pane-tab {
+    position: fixed;
+    top: var(--pane-tab-top);
+    right: var(--pane-w);
+    z-index: 21;
+    writing-mode: vertical-rl;
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.6rem 0.35rem;
+    font: inherit;
+    font-size: 0.85em;
+    font-weight: 600;
+    color: var(--color-bg);
+    background: var(--color-focus-ring);
+    border: 1px solid var(--color-focus-ring);
+    border-right: 0;
+    border-radius: 4px 0 0 4px;
+    cursor: pointer;
+    transition: right var(--pane-transition);
+}
+
+#patient-view.pane-collapsed .pane-tab {
+    right: 0;
+}
+
+.pane-tab-count {
+    writing-mode: horizontal-tb;
+    min-width: 1.4em;
+    padding: 0 0.3em;
+    border-radius: 999px;
+    background: var(--color-bg);
+    color: var(--color-focus-ring);
+    text-align: center;
 }
 
 .questions-title {
@@ -515,7 +562,10 @@ body.chrome-epic [role="tabpanel"][hidden] {
 /* Badge: the one response shape of POST …/answer. */
 .answer-status {
     display: block;
-    min-height: 1.2em;
+    /* Blank and "Saved ✓" must occupy the same box, or every question below
+     * shifts on each save (feedback R1/F1): fix the line box explicitly. */
+    line-height: 1.4;
+    min-height: 1.4em;
     margin-top: 0.3rem;
     font-size: 0.85em;
     text-align: right;

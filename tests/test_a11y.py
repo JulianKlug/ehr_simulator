@@ -88,3 +88,15 @@ def test_advance_cta_and_locked_pane_a11y(study_client: TestClient) -> None:
     link = locked_pane.select_one(".resume-link")
     assert link.get_text(strip=True)
     _assert_labelled(locked_pane)
+
+
+def test_pane_tab_controls_the_drawer(study_client: TestClient) -> None:
+    """feedback R1/F2: the toggle is a real button wired to the aside."""
+    soup = _pane(study_client, 0)
+    tab = soup.select_one("button.pane-tab")
+    assert tab is not None
+    assert tab["aria-controls"] == "questions-pane"
+    assert tab["aria-expanded"] == "true"
+    assert tab["data-action"] == "toggle-pane"
+    assert soup.select_one("#questions-pane") is not None
+    assert tab.get_text(strip=True)
