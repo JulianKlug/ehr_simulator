@@ -1,5 +1,5 @@
 -- Frozen expected schema after ALL migrations (001 "initial" + 002
--- "sessions_open_unique"; the filename predates 002). The drift-check
+-- "sessions_open_unique" + 003 "progress"; the filename predates 002). The drift-check
 -- test in tests/test_db.py reads sqlite_master.sql (the exact DDL text
 -- SQLite stored) sorted by name, joins with ";\n\n", and asserts it equals
 -- the contents of this file. Updating this fixture is a deliberate review
@@ -67,6 +67,16 @@ CREATE INDEX ix_events_patient_timepoint ON events (patient_id, timepoint);
 CREATE INDEX ix_events_session_id        ON events (session_id);
 
 CREATE INDEX ix_ingestion_issues_boot_id ON ingestion_issues (boot_id);
+
+CREATE TABLE progress (
+    clinician_id      TEXT NOT NULL REFERENCES clinicians(clinician_id),
+    patient_id        TEXT NOT NULL,
+    unlocked_t_index  INTEGER NOT NULL DEFAULT 0,
+    completed_at      TIMESTAMP,
+    config_hash       TEXT NOT NULL,
+    updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (clinician_id, patient_id)
+);
 
 CREATE TABLE schema_migrations ( version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);
 

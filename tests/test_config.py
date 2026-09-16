@@ -374,6 +374,32 @@ questions:
             "scale_min",
             id="likert_scale_min_eq_max",
         ),
+        pytest.param(
+            """
+schema_version: "1"
+questions:
+  - question_id: q1
+    prompt: hi
+    response_type: free-text
+    required: 1
+""",
+            False,
+            "required",
+            id="required_int_not_coerced",
+        ),
+        pytest.param(
+            """
+schema_version: "1"
+questions:
+  - question_id: q1
+    prompt: hi
+    response_type: free-text
+    required: "yes"
+""",
+            False,
+            "required",
+            id="required_str_not_coerced",
+        ),
     ],
 )
 def test_questions_rejects(
@@ -391,6 +417,57 @@ def test_questions_rejects(
     with pytest.raises(ConfigError) as excinfo:
         load_questions(path)
     assert expected_token in str(excinfo.value)
+
+
+# ---------------------------------------------------------------------------
+# S9b: ``required`` flag (spec §9 #1-#3c)
+# ---------------------------------------------------------------------------
+
+OPT_OUT_OPTIONS = frozenset({"None of these"})
+
+
+def test_question_required_defaults_true(study_fixture_dir: Path) -> None:
+    questions = load_questions(study_fixture_dir / "questions.yaml")
+    by_id = {q.question_id: q.required for q in questions.questions}
+    assert by_id.pop("free_notes") is False
+    assert all(by_id.values())
+
+
+def test_question_required_false_parses(tmp_path: Path) -> None:
+    path = tmp_path / "questions.yaml"
+    path.write_text(
+        """
+schema_version: "1"
+questions:
+  - question_id: q1
+    prompt: hi
+    response_type: categorical
+    options: [Yes, No]
+    required: false
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+    questions = load_questions(path)
+    assert questions.questions[0].required is False
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        pytest.param(Path("tests/fixtures/study/questions.yaml"), id="fixture"),
+        pytest.param(Path("configs/example_questions.yaml"), id="example"),
+    ],
+)
+def test_shipped_questions_required_multiselect_has_opt_out(path: Path) -> None:
+    """S9a R10 / S9b R22: an empty multi-select stores no row and the gate reads
+    that as unanswered, so every *required* multi-select we ship must offer an
+    explicit opt-out."""
+    repo_root = Path(__file__).resolve().parents[1]
+    questions = load_questions(repo_root / path)
+    for q in questions.questions:
+        if isinstance(q, MultiSelectQuestion) and q.required:
+            assert OPT_OUT_OPTIONS & set(q.options), q.question_id
 
 
 def test_questions_extra_forbid_rejects_unknown_keys(tmp_path: Path) -> None:
@@ -491,6 +568,7 @@ schema_version: "1"
         "different_timepoint",
         "edited_question_prompt",
         "different_dataset",
+        "required_flag",
     ],
 )
 def test_compute_config_hash_changes_on(tmp_path: Path, mutation: str) -> None:
@@ -515,6 +593,11 @@ def test_compute_config_hash_changes_on(tmp_path: Path, mutation: str) -> None:
             "dataset: geneva\ncsv_path: ../geneva.csv\nparams_dir: ..\n",
         )
         b_questions = _BASE_QUESTIONS
+    elif mutation == "required_flag":
+        b_study = _BASE_STUDY
+        b_questions = _BASE_QUESTIONS.replace(
+            "response_type: free-text\n", "response_type: free-text\n    required: false\n"
+        )
     else:
         raise AssertionError(f"unknown mutation {mutation}")
 

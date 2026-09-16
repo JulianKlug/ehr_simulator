@@ -14,7 +14,8 @@ shutdown-time backup gate trips (review-fix R8). FK violations on
 ``session_id`` are wrapped as :class:`DbError`; the ``session_id=None``
 path bypasses the FK check entirely.
 
-``kind`` is closed over :data:`EventKind` (S9a). To add a producer, append
+``kind`` is closed over :data:`EventKind` (S9a; S9b adds the ``advance.*``,
+``session.end`` and ``progress.reset`` kinds). To add a producer, append
 its kind to the ``Literal``; ``append`` raises :class:`ValueError` on
 anything else *before* touching the DB, so a typo fails the producer's
 first test instead of silently forking the taxonomy.
@@ -32,8 +33,12 @@ EventKind = Literal[
     "clinician.login",
     "clinician.logout",
     "session.start",
+    "session.end",
     "answer.upsert",
     "answer.clear",
+    "advance.ok",
+    "advance.blocked",
+    "progress.reset",
 ]
 EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 

@@ -107,9 +107,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_sessions_open
 """
 
 
+# S9b: the per-(clinician, patient) walk frontier. ``unlocked_t_index`` is
+# the highest study ``t_index`` the clinician may view (0 = not started);
+# ``completed_at`` is set once by the final advance; ``config_hash`` is the
+# hash the walk *started* under (never overwritten, so drift stays visible).
+# No inline SQL comments: sqlite_master stores the DDL verbatim and the
+# schema-snapshot test compares it byte-for-byte.
+_PROGRESS_DDL = """
+CREATE TABLE IF NOT EXISTS progress (
+    clinician_id      TEXT NOT NULL REFERENCES clinicians(clinician_id),
+    patient_id        TEXT NOT NULL,
+    unlocked_t_index  INTEGER NOT NULL DEFAULT 0,
+    completed_at      TIMESTAMP,
+    config_hash       TEXT NOT NULL,
+    updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (clinician_id, patient_id)
+);
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
+    Migration(version=3, name="progress", up_sql=_PROGRESS_DDL),
 )
 
 

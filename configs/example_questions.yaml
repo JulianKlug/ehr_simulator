@@ -7,6 +7,14 @@
 # question_id must match ^[a-z0-9_]+$ — lowercase, digits, underscore
 # only (it becomes a CSV column suffix in S9c export, so no spaces or
 # special characters).
+#
+# Gating rules (S9b):
+# - Every question is required by default and blocks "Next timepoint"
+#   until answered. Add `required: false` to opt a question out.
+# - An empty multi-select stores no answer, and the gate reads that as
+#   unanswered. A required multi-select must therefore offer an explicit
+#   opt-out option (e.g. `None of these`) whenever "nothing applies" is a
+#   legitimate answer.
 
 schema_version: "1"
 
@@ -41,8 +49,9 @@ questions:
   - question_id: contributing_factors
     prompt: "Which factors contributed most to your decision?"
     response_type: multi-select
-    options: [Imaging, Vitals, Labs, Medical history, AI output]
+    options: [Imaging, Vitals, Labs, Medical history, AI output, None of these]
 
   - question_id: free_notes
     prompt: "Any additional reasoning?"
     response_type: free-text
+    required: false

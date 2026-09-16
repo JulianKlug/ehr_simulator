@@ -9,7 +9,7 @@ Public surface (built up across S6 commits):
 - :func:`apply_migrations`, :data:`MIGRATIONS`, :class:`Migration` — schema.
 - :class:`DbError` — caller-handled integrity errors at DAO boundaries.
 - Per-table DAO modules: ``clinicians``, ``sessions``, ``arm_assignments``,
-  ``answers``, ``events``, ``ingestion_issues``.
+  ``answers``, ``events``, ``ingestion_issues``, ``progress`` (S9b).
 - ``backup`` (commit 3) + ``cookies`` (commit 5a) re-exported once they land.
 """
 
@@ -23,6 +23,7 @@ from ehr_simulator.db import (
     cookies,
     events,
     ingestion_issues,
+    progress,
     sessions,
 )
 from ehr_simulator.db.connection import connect, resolve_db_path
@@ -42,6 +43,7 @@ __all__ = [
     "cookies",
     "events",
     "ingestion_issues",
+    "progress",
     "resolve_db_path",
     "sessions",
 ]

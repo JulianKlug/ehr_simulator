@@ -30,8 +30,9 @@ questions:
   - question_id: contributing_factors
     prompt: "Which factors contributed most to your decision?"
     response_type: multi-select
-    options: [Imaging, Vitals, Labs, Medical history, AI output]
+    options: [Imaging, Vitals, Labs, Medical history, AI output, None of these]
 
   - question_id: free_notes
     prompt: "Any additional reasoning?"
     response_type: free-text
+    required: false

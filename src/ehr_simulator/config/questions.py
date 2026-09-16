@@ -11,6 +11,9 @@ surface as a different error downstream.
 
 ``question_id`` matches ``^[a-z0-9_]+$`` (cell-injection guard for S9c CSV
 export). ``schema_version`` is a string literal ``"1"`` (locks D6).
+
+``required`` (S9b, default ``True``) marks the questions the advance gate
+waits for; ``required: false`` opts a question out.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator, model_validator
 
 ResponseType = Literal[
     "likert",
@@ -36,6 +39,11 @@ class _QuestionBase(BaseModel):
 
     question_id: str
     prompt: str
+    # S9b gating: only ``required`` questions block ``/advance``. StrictBool
+    # so ``required: 1`` / ``"yes"`` are rejected rather than coerced — this
+    # is a study-design switch. Defaulted, so no schema_version bump; it does
+    # enter ``config_hash`` through ``model_dump_json``.
+    required: StrictBool = True
 
     @field_validator("question_id")
     @classmethod

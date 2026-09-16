@@ -8,7 +8,9 @@ per-table DAOs.
 S9a additions (``specs/session-09a-answer-capture.md`` §9 #13-#16c) sit at
 the bottom: the ``EventKind`` guard, ``answers.fetch_for_cell`` /
 ``delete_one``, ``sessions.find_open`` and migration 2's open-session
-unique index.
+unique index. S9b (``specs/session-09b-question-gating.md`` §9 #4-#10c)
+follows: migration 3 + the ``progress`` DAO, ``sessions.close`` /
+``find_latest``, ``answers.delete_after``, the new event kinds.
 """
 
 from __future__ import annotations
@@ -33,6 +35,7 @@ from ehr_simulator.db import (
     connect,
     events,
     ingestion_issues,
+    progress,
     resolve_db_path,
     sessions,
 )
@@ -150,8 +153,12 @@ def test_apply_migrations_forward(tmp_db_path: Path) -> None:
         ).fetchall()
     finally:
         conn.close()
-    assert versions == [1, 2]
-    assert [(r[0], r[1]) for r in rows] == [(1, "initial"), (2, "sessions_open_unique")]
+    assert versions == [1, 2, 3]
+    assert [(r[0], r[1]) for r in rows] == [
+        (1, "initial"),
+        (2, "sessions_open_unique"),
+        (3, "progress"),
+    ]
 
 
 def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None:
@@ -181,7 +188,7 @@ def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None
         migration_rows = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
     finally:
         conn.close()
-    assert versions == [1, 2]
+    assert versions == [1, 2, 3]
     expected = {
         "clinicians",
         "sessions",
@@ -189,6 +196,7 @@ def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None
         "answers",
         "events",
         "ingestion_issues",
+        "progress",
         "schema_migrations",
     }
     assert expected.issubset(tables)
@@ -623,7 +631,7 @@ def test_migration_2_rejects_second_open_session(tmp_db_path: Path) -> None:
     )
     v1.execute("INSERT INTO schema_migrations (version, name) VALUES (1, 'initial')")
     v1.commit()
-    assert apply_migrations(v1) == [2]
+    assert apply_migrations(v1) == [2, 3]
     assert apply_migrations(v1) == []
 
     cid = clinicians.lookup_or_create(v1, "Dr. Smith")
@@ -641,3 +649,266 @@ def test_migration_2_rejects_second_open_session(tmp_db_path: Path) -> None:
     open_rows = v1.execute("SELECT COUNT(*) FROM sessions WHERE ended_at IS NULL").fetchone()[0]
     v1.close()
     assert open_rows == 1
+
+
+# ---------------------------------------------------------------------------
+# S9b: migration 3 + progress DAO + sessions.close/find_latest (#4-#10c)
+# ---------------------------------------------------------------------------
+
+
+class _State:
+    """Minimal ``app_state`` stand-in: the DAOs only touch ``write_counter``."""
+
+    write_counter = 0
+
+
+def _v2_db(tmp_db_path: Path) -> sqlite3.Connection:
+    """A DB at schema version 2 (S9a state) with the runner table in place."""
+    conn = connect(tmp_db_path)
+    conn.executescript(MIGRATIONS[0].up_sql)
+    conn.executescript(MIGRATIONS[1].up_sql)
+    conn.execute(
+        "CREATE TABLE schema_migrations ("
+        " version INTEGER PRIMARY KEY, name TEXT NOT NULL,"
+        " applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    conn.execute("INSERT INTO schema_migrations (version, name) VALUES (1, 'initial')")
+    conn.execute("INSERT INTO schema_migrations (version, name) VALUES (2, 'sessions_open_unique')")
+    conn.commit()
+    return conn
+
+
+def test_migration_3_creates_progress_and_is_idempotent(tmp_db_path: Path) -> None:
+    v2 = _v2_db(tmp_db_path)
+    assert apply_migrations(v2) == [3]
+    assert apply_migrations(v2) == []
+    tables = {r[0] for r in v2.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "progress" in tables
+
+    cid = clinicians.lookup_or_create(v2, "Dr. Smith")
+    insert = (
+        "INSERT INTO progress (clinician_id, patient_id, unlocked_t_index, config_hash) "
+        "VALUES (?, 'p1', 0, 'h')"
+    )
+    v2.execute(insert, (cid,))
+    with pytest.raises(sqlite3.IntegrityError):
+        v2.execute(insert, (cid,))
+    v2.close()
+
+
+def test_progress_fetch_none_when_absent(db: sqlite3.Connection) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    assert progress.fetch(db, clinician_id=cid, patient_id="p1") is None
+    assert progress.list_for_clinician(db, cid) == {}
+
+
+def test_progress_unlock_upserts_and_is_monotonic(db: sqlite3.Connection) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    state = _State()
+
+    assert progress.unlock(
+        db,
+        clinician_id=cid,
+        patient_id="p1",
+        from_t_index=0,
+        to_t_index=1,
+        config_hash="h1",
+        app_state=state,
+    )
+    row = progress.fetch(db, clinician_id=cid, patient_id="p1")
+    assert row is not None
+    assert (row.unlocked_t_index, row.completed_at, row.config_hash) == (1, None, "h1")
+    assert state.write_counter == 1
+
+    assert progress.unlock(
+        db,
+        clinician_id=cid,
+        patient_id="p1",
+        from_t_index=1,
+        to_t_index=2,
+        config_hash="h1",
+        app_state=state,
+    )
+    assert progress.fetch(db, clinician_id=cid, patient_id="p1").unlocked_t_index == 2
+    assert state.write_counter == 2
+
+
+def test_progress_unlock_preserves_original_config_hash(db: sqlite3.Connection) -> None:
+    """review-fix R11: the row records the hash the walk started under."""
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    progress.unlock(
+        db, clinician_id=cid, patient_id="p1", from_t_index=0, to_t_index=1, config_hash="h1"
+    )
+    progress.unlock(
+        db, clinician_id=cid, patient_id="p1", from_t_index=1, to_t_index=2, config_hash="h2"
+    )
+    row = progress.fetch(db, clinician_id=cid, patient_id="p1")
+    assert (row.unlocked_t_index, row.config_hash) == (2, "h1")
+
+
+def test_progress_unlock_compare_and_set_rejects_stale_from_index(db: sqlite3.Connection) -> None:
+    """review-fix R29: the frontier guard lives in SQL."""
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    state = _State()
+    kwargs = {"clinician_id": cid, "patient_id": "p1", "config_hash": "h", "app_state": state}
+
+    assert progress.unlock(db, from_t_index=0, to_t_index=1, **kwargs) is True
+    assert progress.unlock(db, from_t_index=0, to_t_index=1, **kwargs) is False  # replay
+    assert progress.fetch(db, clinician_id=cid, patient_id="p1").unlocked_t_index == 1
+    assert progress.unlock(db, from_t_index=1, to_t_index=2, **kwargs) is True
+    assert progress.unlock(db, from_t_index=0, to_t_index=1, **kwargs) is False  # stale
+    assert progress.fetch(db, clinician_id=cid, patient_id="p1").unlocked_t_index == 2
+    # no row yet + from != 0 → nothing to move
+    assert (
+        progress.unlock(
+            db,
+            from_t_index=1,
+            to_t_index=2,
+            clinician_id=cid,
+            patient_id="p2",
+            config_hash="h",
+            app_state=state,
+        )
+        is False
+    )
+    assert state.write_counter == 2
+
+
+def test_progress_mark_complete_sets_completed_at_once(db: sqlite3.Connection) -> None:
+    from datetime import datetime
+
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    progress.unlock(
+        db, clinician_id=cid, patient_id="p1", from_t_index=0, to_t_index=2, config_hash="h"
+    )
+    progress.mark_complete(
+        db, clinician_id=cid, patient_id="p1", unlocked_t_index=2, config_hash="h"
+    )
+    first = progress.fetch(db, clinician_id=cid, patient_id="p1")
+    assert isinstance(first.completed_at, datetime)
+    assert first.unlocked_t_index == 2
+
+    db.execute("UPDATE progress SET completed_at = '2020-01-01 00:00:00' WHERE patient_id = 'p1'")
+    db.commit()
+    progress.mark_complete(
+        db, clinician_id=cid, patient_id="p1", unlocked_t_index=2, config_hash="h"
+    )
+    second = progress.fetch(db, clinician_id=cid, patient_id="p1")
+    assert second.completed_at == datetime(2020, 1, 1)
+
+    # mark_complete on a pair with no row still inserts one (defensive).
+    progress.mark_complete(
+        db, clinician_id=cid, patient_id="p9", unlocked_t_index=0, config_hash="h"
+    )
+    assert progress.fetch(db, clinician_id=cid, patient_id="p9").completed_at is not None
+
+
+def test_progress_reset_rewinds_and_clears_completed(db: sqlite3.Connection) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    progress.unlock(
+        db, clinician_id=cid, patient_id="p1", from_t_index=0, to_t_index=2, config_hash="h"
+    )
+    progress.mark_complete(
+        db, clinician_id=cid, patient_id="p1", unlocked_t_index=2, config_hash="h"
+    )
+
+    assert progress.reset(db, clinician_id=cid, patient_id="p1", to_t_index=0) == 1
+    row = progress.fetch(db, clinician_id=cid, patient_id="p1")
+    assert (row.unlocked_t_index, row.completed_at) == (0, None)
+    assert progress.reset(db, clinician_id=cid, patient_id="nope", to_t_index=0) == 0
+
+
+def test_progress_list_for_clinician(db: sqlite3.Connection) -> None:
+    a = clinicians.lookup_or_create(db, "Dr. A")
+    b = clinicians.lookup_or_create(db, "Dr. B")
+    progress.unlock(
+        db, clinician_id=a, patient_id="p1", from_t_index=0, to_t_index=1, config_hash="h"
+    )
+    progress.unlock(
+        db, clinician_id=a, patient_id="p2", from_t_index=0, to_t_index=2, config_hash="h"
+    )
+    progress.unlock(
+        db, clinician_id=b, patient_id="p1", from_t_index=0, to_t_index=1, config_hash="h"
+    )
+
+    listed_a = progress.list_for_clinician(db, a)
+    assert set(listed_a) == {"p1", "p2"}
+    assert listed_a["p2"].unlocked_t_index == 2
+    assert set(progress.list_for_clinician(db, b)) == {"p1"}
+
+
+def test_answers_delete_after_keeps_boundary(db: sqlite3.Connection) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    state = _State()
+    for t in (0.0, 60.0, 180.0):
+        answers.upsert(
+            db,
+            clinician_id=cid,
+            patient_id="p1",
+            timepoint=t,
+            question_id="q",
+            value="v",
+            arm="no_ai",
+            config_hash="h",
+        )
+    deleted = answers.delete_after(
+        db, clinician_id=cid, patient_id="p1", min_timepoint_exclusive=60.0, app_state=state
+    )
+    assert deleted == 1
+    left = sorted(r[0] for r in db.execute("SELECT timepoint FROM answers"))
+    assert left == [0.0, 60.0]
+    assert state.write_counter == 1
+    assert (
+        answers.delete_after(
+            db, clinician_id=cid, patient_id="p1", min_timepoint_exclusive=60.0, app_state=state
+        )
+        == 0
+    )
+    assert state.write_counter == 1
+
+
+def test_sessions_close_sets_ended_at_and_frees_pair(db: sqlite3.Connection) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    sid = sessions.start_or_resume(db, cid, "p1", arm="no_ai", config_hash="h")
+
+    assert sessions.close(db, sid) == 1
+    assert sessions.find_open(db, cid, "p1") is None
+    ended = db.execute("SELECT ended_at FROM sessions WHERE session_id = ?", (sid,)).fetchone()[0]
+    assert ended is not None
+
+    new_sid = sessions.start_or_resume(db, cid, "p1", arm="no_ai", config_hash="h")
+    assert new_sid != sid
+    assert sessions.close(db, sid) == 0
+
+
+def test_sessions_find_latest_returns_most_recent_open_or_closed(db: sqlite3.Connection) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    other = clinicians.lookup_or_create(db, "Dr. Other")
+    assert sessions.find_latest(db, cid, "p1") is None
+
+    first = sessions.start_or_resume(db, cid, "p1", arm="no_ai", config_hash="h")
+    assert sessions.find_latest(db, cid, "p1") == first
+    sessions.close(db, first)
+    assert sessions.find_latest(db, cid, "p1") == first
+
+    sessions.start_or_resume(db, other, "p1", arm="no_ai", config_hash="h")
+    second = sessions.start_or_resume(db, cid, "p1", arm="no_ai", config_hash="h")
+    assert sessions.find_latest(db, cid, "p1") == second
+
+
+def test_events_kind_taxonomy_includes_s9b_kinds(db: sqlite3.Connection) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    new_kinds = ("advance.ok", "advance.blocked", "session.end", "progress.reset")
+    assert set(new_kinds) <= events.EVENT_KINDS
+    for kind in new_kinds:
+        events.append(
+            db,
+            session_id=None,
+            clinician_id=cid,
+            patient_id="p1",
+            timepoint=None,
+            kind=kind,
+            payload={},
+        )  # type: ignore[arg-type]
+    n = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
+    assert n == len(new_kinds)

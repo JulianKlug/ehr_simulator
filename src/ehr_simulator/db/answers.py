@@ -96,3 +96,28 @@ def delete_one(
     if deleted > 0 and app_state is not None:
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
     return deleted
+
+
+def delete_after(
+    conn: sqlite3.Connection,
+    *,
+    clinician_id: str,
+    patient_id: str,
+    min_timepoint_exclusive: float,
+    app_state: Any = None,
+) -> int:
+    """Delete every answer of the pair strictly after a timepoint; return the rowcount.
+
+    The S9b ``reset-progress`` CLI rewinds a walk to ``t_index = N`` and
+    drops what was answered past it; answers *at* N survive and pre-fill the
+    re-opened pane.
+    """
+    cursor = conn.execute(
+        "DELETE FROM answers WHERE clinician_id = ? AND patient_id = ? AND timepoint > ?",
+        (clinician_id, patient_id, min_timepoint_exclusive),
+    )
+    conn.commit()
+    deleted = cursor.rowcount
+    if deleted > 0 and app_state is not None:
+        app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
+    return deleted
