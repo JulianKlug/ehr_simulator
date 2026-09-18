@@ -7,6 +7,7 @@ Layering::
     cli.py  →  ehr_simulator.export (this module)
              →  ehr_simulator.db.* (read DAOs)
              →  ehr_simulator.answer_codec (strict decode)
+             →  ehr_simulator.timing (S10 derivation, pure)
              →  ehr_simulator.config (models, hash)
 
 This module **never imports ``ehr_simulator.web``** — the UI layer sits
@@ -36,6 +37,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ehr_simulator import timing
 from ehr_simulator.answer_codec import AnswerValidationError, decode_stored_answer
 from ehr_simulator.config import Question, Questions, StudyConfig
 from ehr_simulator.db import answers, arm_assignments, clinicians, progress
@@ -56,12 +58,16 @@ __all__ = [
 ]
 
 # Static export columns, in order. Question columns follow, in
-# questions.yaml order.
+# questions.yaml order. S10 adds the three timing columns (blank when the
+# pair has no paired enter/exit at that timepoint — never interpolated).
 METADATA_COLUMNS: tuple[str, ...] = (
     "patient_id",
     "clinician_id",
     "t_index",
     "timepoint_minutes",
+    "timepoint_started_at",
+    "timepoint_ended_at",
+    "elapsed_seconds",
     "arm",
     "completed_at",
     "config_hash",
@@ -171,6 +177,10 @@ def build_export(
         answer_rows = tuple(answers.fetch_all(conn))
         progress_rows = tuple(progress.fetch_all(conn).values())
         assignment_rows = tuple(arm_assignments.fetch_all(conn))
+        clinician_ids = set(clinicians.fetch_all_ids(conn))
+        # S10: the enter/exit history must be read in the same snapshot as
+        # the answers it will be paired with (spec §4, rejection list).
+        timing_events = timing.fetch_timing_events(conn)
         return _build_under_snapshot(
             conn,
             study=study,
@@ -182,6 +192,8 @@ def build_export(
             answer_rows=answer_rows,
             progress_rows=progress_rows,
             assignment_rows=assignment_rows,
+            clinician_ids=clinician_ids,
+            timing_events=timing_events,
         )
     finally:
         conn.rollback()
@@ -199,6 +211,8 @@ def _build_under_snapshot(
     answer_rows: tuple[Any, ...],
     progress_rows: tuple[Any, ...],
     assignment_rows: tuple[Any, ...],
+    clinician_ids: set[str],
+    timing_events: tuple[timing.TimingEvent, ...],
 ) -> ExportBundle:
     patient_ids = list(study.patient_ids)
     pid_rank = {pid: i for i, pid in enumerate(patient_ids)}
@@ -239,6 +253,28 @@ def _build_under_snapshot(
                 f"answers row for patient {row.patient_id!r}, clinician {row.clinician_id} "
                 f"references timepoint {row.timepoint} the study config does not know; the DB "
                 "was written under a different study config"
+            )
+    # S10 (spec §4): timing rows for an unknown clinician, patient, or
+    # timepoint refuse the export — a foreign event would otherwise leak
+    # into a derived timing field of a real pair.
+    for ev in timing_events:
+        if ev.clinician_id not in clinician_ids:
+            raise ExportError(
+                f"timepoint enter/exit event for unknown clinician {ev.clinician_id!r} "
+                f"(patient {ev.patient_id!r}, timepoint {ev.timepoint}); the DB was written "
+                "under a different study config"
+            )
+        if ev.patient_id is None or ev.patient_id not in pid_rank:
+            raise ExportError(
+                f"timepoint enter/exit event for patient {ev.patient_id!r} the study config "
+                f"does not know (clinician {ev.clinician_id!r}); the DB was written under a "
+                "different study config"
+            )
+        if ev.timepoint is None or ev.timepoint not in tp_index:
+            raise ExportError(
+                f"timepoint enter/exit event for timepoint {ev.timepoint!r} the study config "
+                f"does not know (patient {ev.patient_id!r}, clinician {ev.clinician_id!r}); "
+                "the DB was written under a different study config"
             )
 
     # -- 3) Group cells per pair; validate progress (spec §6.4) ----------
@@ -335,17 +371,41 @@ def _build_under_snapshot(
     header = METADATA_COLUMNS + question_ids
 
     ordered = sorted(selected, key=lambda p: (pid_rank[p[1]], p[0]))
+
+    # -- 6b) S10 timing (spec §4): derive per pair; never infer ----------
+    # An invalid history (selected exit before the selected enter) raises
+    # TimingError → ExportError: the pair's timing fields stay blank and
+    # the export is refused rather than half-filled. Other pairs' derivations
+    # are unaffected until the error propagates (no rollback needed — the
+    # connection only ever saw reads).
+    timings: dict[tuple[str, str], dict[float, timing.TimepointTiming]] = {}
+    for pair in ordered:
+        try:
+            timings[pair] = timing.derive_timepoint_timings(
+                timing_events, clinician_id=pair[0], patient_id=pair[1]
+            )
+        except timing.TimingError as exc:
+            raise ExportError(f"cannot derive timepoint timing: {exc}") from exc
+
     rows: list[tuple[str, ...]] = []
     for cid, pid in ordered:
         front = frontier[(cid, pid)]
         done = completed.get((cid, pid))
         completed_str = done.strftime("%Y-%m-%d %H:%M:%S") if done is not None else ""
+        pair_timings = timings.get((cid, pid), {})
         for idx in range(0, front + 1):
+            tt = pair_timings.get(float(study.timepoints_minutes[idx]))
+            elapsed_cell = (
+                str(tt.elapsed_seconds) if tt is not None and tt.elapsed_seconds is not None else ""
+            )
             row = [
                 pid,
                 cid,
                 str(idx),
                 repr(float(study.timepoints_minutes[idx])),
+                timing.format_ts(tt.started_at) if tt is not None else "",
+                timing.format_ts(tt.ended_at) if tt is not None else "",
+                elapsed_cell,
                 arms[(cid, pid)],
                 completed_str,
                 live_hash,

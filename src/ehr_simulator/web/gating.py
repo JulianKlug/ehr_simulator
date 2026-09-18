@@ -213,6 +213,9 @@ def advance(
         )
         sessions.close(conn, ctx.session_id)
         _event("advance.ok", t_minutes, {**base_payload, "to_t_index": None, "final": True})
+        # S10: the frontier was left through progression, in the same
+        # successful operation as the state write (spec §3).
+        _event("timepoint.exit", t_minutes, {"t_index": t_index, "reason": "finish"})
         _event("session.end", None, {"reason": SESSION_END_REASON_COMPLETE})
         return AdvanceResult("finished", t_index, ())
 
@@ -236,4 +239,6 @@ def advance(
         return AdvanceResult("stale", t_index + 1, ())
 
     _event("advance.ok", t_minutes, {**base_payload, "to_t_index": t_index + 1, "final": False})
+    # S10: exit for the pane just left (paired with advance.ok above).
+    _event("timepoint.exit", t_minutes, {"t_index": t_index, "reason": "advance"})
     return AdvanceResult("advanced", t_index + 1, ())

@@ -69,6 +69,7 @@ from ehr_simulator.web.study_session import (
     bootstrap_session,
     read_frontier,
 )
+from ehr_simulator.web.timing_events import record_enter
 
 router = APIRouter()
 
@@ -536,6 +537,20 @@ async def patient_timepoint(
         ctx = _study_bootstrap(
             request, clinician_id=clinician_id or "", patient_id=patient_id, frontier=frontier
         )
+        if pane_mode(ctx.frontier, t_index) == "open":
+            # S10: only the current editable frontier is an "enter" — frozen
+            # past panes (locked mode) and bounced future navigation never
+            # emit (spec §3). Refreshes/resumes legitimately duplicate it;
+            # the timing derivation pairs the first valid (enter, exit).
+            record_enter(
+                state.db,
+                state,
+                ctx=ctx,
+                clinician_id=clinician_id or "",
+                patient_id=patient_id,
+                t_index=t_index,
+                t_minutes=float(resolved.t_minutes),
+            )
 
     inner = _render_patient_view(
         request,
@@ -801,6 +816,20 @@ def _advance_response(
     status_code = (
         status.HTTP_200_OK if result.outcome == "advanced" else status.HTTP_412_PRECONDITION_FAILED
     )
+    if result.outcome == "advanced":
+        # S10: the htmx swap shows the next frontier pane without a new GET,
+        # so its enter rides on this response. The 412 "stale" reply keeps
+        # the frontier the clinician is actually on — no enter there (and
+        # the non-HTMX 303 path defers to the GET that follows).
+        record_enter(
+            request.app.state.db,
+            request.app.state,
+            ctx=target_ctx,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            t_index=target_t_index,
+            t_minutes=float(target_resolved.t_minutes),
+        )
     return HTMLResponse(content=inner, status_code=status_code, headers={"HX-Push-Url": target_url})
 
 

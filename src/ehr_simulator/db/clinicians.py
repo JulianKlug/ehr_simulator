@@ -64,6 +64,12 @@ def fetch_by_ids(
     return tuple((row[0], row[1]) for row in rows)
 
 
+def fetch_all_ids(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """Every ``clinician_id`` in the table, id-sorted (S10 integrity check)."""
+    rows = conn.execute("SELECT clinician_id FROM clinicians ORDER BY clinician_id").fetchall()
+    return tuple(row[0] for row in rows)
+
+
 def lookup(conn: sqlite3.Connection, raw_name: str) -> str | None:
     """Return the ``clinician_id`` for ``raw_name`` if the clinician exists; never writes.
 

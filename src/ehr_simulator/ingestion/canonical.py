@@ -52,6 +52,14 @@ class CanonicalShape(StrEnum):
     AI_OUTPUT = "ai_output"
 
 
+#: Canonical ``variable`` names classified as vitals vs. labs on the
+#: SCALAR_TS panel (S2). Public so tooling on both sides of the UI/web
+#: boundary (the patient panels, the S10 divergence annotations) can
+#: classify a canonical observation without importing the other layer.
+VITAL_VAR_SET = frozenset({"hr", "sbp", "dbp", "rr", "spo2", "temp"})
+LAB_VAR_SET = frozenset({"hgb", "na", "cr", "glucose", "wbc", "plt"})
+
+
 def _is_valid_json(val: object) -> bool:
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return False

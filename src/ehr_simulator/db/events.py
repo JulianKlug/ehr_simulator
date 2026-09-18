@@ -39,6 +39,15 @@ EventKind = Literal[
     "advance.ok",
     "advance.blocked",
     "progress.reset",
+    # S10: behavioural timing. ``timepoint.enter`` fires whenever a clinician
+    # is shown a timepoint pane (GET render or the 200 advance that moves to
+    # it — refreshes duplicate the enter, the exporter prefers the first valid
+    # pairing); ``timepoint.exit`` fires exactly once per timepoint, written
+    # by the winning advance (or the completing final advance). ``server_ts``
+    # is the source of truth for the export's timing columns and the
+    # divergence figure.
+    "timepoint.enter",
+    "timepoint.exit",
 ]
 EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 

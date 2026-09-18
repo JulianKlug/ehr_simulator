@@ -191,18 +191,25 @@ Scope (historical draft):
 
 **Test inventory:** ≥6 tests. Wide-pivot shape; CSV-injection guard (regression); pseudonymization; round-trip import; multi-select pipe encoding; UTF-8 header.
 
-### Session 10 — Rough divergence view (Phase 1 dogfood)
+### Session 10 — Behavioral timing + rough divergence view + CLI exit contract [SHIPPED]
 
-Goal: validate the figure's information architecture before real data is collected — design doc P6 update from autoplan.
+**Shipped per `specs/session10.md`** — the spec supersedes the draft scope below (adds behavioral `timepoint.enter`/`timepoint.exit` events with the full derivation rules; three wall-clock timing columns in the `export-answers` CSV; a per-patient rough divergence figure in plotnine-SVG behind the `divergence-view` CLI; a CLI process-exit-code contract with a subprocess regression; no DB migration).
 
-Scope:
+What shipped:
+- **Timing events** (`timing.py`, `web/timing_events.py`): `timepoint.enter` on the editable frontier GET and on HTMX advance-into-next; `timepoint.exit` (`reason: advance|finish`) from `gating.advance()`. Derivation is pure: sort by `(server_ts, event_id)`, first ENTER = start, first EXIT after = end; no-enter → all blank; exit-before-enter ignored; end<start → `TimingError`.
+- **Export timing columns** (`export.py`): `timepoint_started_at`, `timepoint_ended_at`, `elapsed_seconds` (wall-clock) added to the S9c row shape (10 metadata + question columns); `TimingError` → `ExportError`.
+- **Divergence view** (`divergence.py`, no `web/` imports): per-patient plotnine SVG — per-question panels (categorical/multi-select option proportions, numeric median+observations, free-text non-empty counts only), a per-timepoint "newly visible data" annotation panel (counts by canonical category, never raw clinical values, `VITAL_VAR_SET`/`LAB_VAR_SET` live in `ingestion/canonical.py`), a wall-clock elapsed-seconds panel, single-arm note; arm → color, option → line-style constants (no discrete scales, avoids mizani palette limits).
+- **CLI** (`cli.py`): `divergence-view STUDY_CONFIG QUESTIONS --db-path --patient --out`; `main()` now runs with `standalone_mode=True` and translates refusals to `SystemExit(1)`; OS process status 1/0 verified by a **subprocess** regression in `tests/test_cli.py` (CliRunner cannot cover it).
+- **Tests**: `test_timing.py` (13), `test_timing_events.py` (8), `test_divergence.py` (15), 7 export timing-column tests, 2 subprocess CLI regressions — 550 total passing.
+
+Scope (historical draft):
 - Plotly figure or plotnine SVG querying `events` + `answers` + `arm_assignments`.
 - Synthetic + pilot data input.
 - Per-patient timeline showing AI vs no-AI answer differences over time, annotated with what data became visible at each timepoint.
 
 **Test inventory:** ≥3 tests. Query shape; figure renders against synthetic; dogfood smoke test on pilot data.
 
-**Note (TODOS.md):** chart library may be re-evaluated for the divergence view specifically (plotnine + JS scrubber overlay vs small D3 island). Decision deferred to S10 spec authoring time.
+**Note (TODOS.md):** chart library may be re-evaluated for the divergence view specifically (plotnine + JS scrubber overlay vs small D3 island). Decision deferred to S10 spec authoring time. → Plotnine (SVG) shipped; the polished v1.0 view remains S12.
 
 ### Phase-2 policy gate (not a code session)
 
