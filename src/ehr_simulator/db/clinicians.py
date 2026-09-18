@@ -46,6 +46,25 @@ def lookup_or_create(
     return clinician_id
 
 
+def fetch_by_ids(
+    conn: sqlite3.Connection, clinician_ids: tuple[str, ...] | list[str]
+) -> tuple[tuple[str, str], ...]:
+    """``(clinician_id, name_normalized)`` pairs for the given ids, id-sorted.
+
+    S9c keyfile source: only the clinicians present in the exported frame
+    are resolved, and only within the export snapshot transaction.
+    """
+    rows: list[tuple[str, str]] = []
+    for clinician_id in sorted(set(clinician_ids)):
+        row = conn.execute(
+            "SELECT clinician_id, name_normalized FROM clinicians WHERE clinician_id = ?",
+            (clinician_id,),
+        ).fetchone()
+        if row is not None:
+            rows.append((row[0], row[1]))
+    return tuple(rows)
+
+
 def lookup(conn: sqlite3.Connection, raw_name: str) -> str | None:
     """Return the ``clinician_id`` for ``raw_name`` if the clinician exists; never writes.
 
