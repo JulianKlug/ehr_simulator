@@ -1,111 +1,223 @@
 # Session 09c — CSV export (`export-answers`)
 
-**Goal:** a researcher can turn the pilot's SQLite file into one analysis-ready CSV with a single command, without leaking clinician names and without a spreadsheet executing anything a clinician typed. S9c adds `ehr-simulator export-answers STUDY_CONFIG QUESTIONS [--db-path P] [--out F] [--keyfile K] [--only-complete] [--allow-mixed-config] [--force]`: one row per `(patient_id, clinician_id, timepoint)`, one column per `question_id` in `questions.yaml` order, plus `arm`, `t_index`, `config_hash` and the walk's `completed_at`. Multi-select cells are pipe-delimited. Every cell passes a **CSV-injection guard**. The file carries the 16-hex `clinician_id` only; the `clinician_id → name` mapping is written to a separate, opt-in, mode-0600 keyfile that lives under the (gitignored) DB directory. The export **refuses** a DB whose answers span more than one `config_hash` unless told otherwise, and it opens the DB read-only so it can run against a live server.
+**Goal:** a researcher can turn the pilot's SQLite file into one analysis-ready CSV with a single command, without exporting the clinician login-name mapping and without a spreadsheet executing anything a clinician typed.
 
-**Out of scope (later sessions):** events export + dwell-time derivation (S10 reads `events` directly); the divergence figure (S10); randomized arms (S11 — the `arm` column already exists and will round-trip, ROADMAP S11 regression); export from the web UI (an operator command is enough on a single laptop); scheduled/automatic export at shutdown (the S6 backup already snapshots the DB; CSV is a derived view); Excel `.xlsx` output; a "wide" one-row-per-pair pivot (one `pandas.pivot` away from this file — see §15 and the review report).
+S9c adds:
 
-> **Spec history:** drafted 2026-09-16; routed through `/plan-eng-review` before implementation (see `## GSTACK REVIEW REPORT`).
+```text
+ehr-simulator export-answers STUDY_CONFIG QUESTIONS
+    [--db-path P]
+    [--out F]
+    [--keyfile K]
+    [--only-complete]
+    [--force]
+```
+
+The answers CSV has one row per `(patient_id, clinician_id, timepoint)`, one column per `question_id` in `questions.yaml` order, plus `arm`, `t_index`, `config_hash`, and the walk's `completed_at`.
+
+Multi-select cells are pipe-delimited. Every CSV cell passes a formula-injection guard at the file boundary.
+
+The answers file carries only the 16-hex `clinician_id`; `clinicians.name_normalized` is never placed in that file. An optional `--keyfile` writes the mapping for clinicians actually present in the export to a separate mode-0600 file.
+
+The export is an **interpreted export of the live study configuration**. It therefore refuses any relevant database record belonging to another `config_hash`; there is no mixed-config override. It also strictly validates persisted answers and arm provenance before writing anything.
+
+The database is opened read-only, and all research-state reads occur inside one explicit SQLite read transaction so the command can run against a live WAL-mode server while seeing one consistent snapshot.
+
+**Out of scope (later sessions):**
+
+* events export + dwell-time derivation — S10 reads `events` directly;
+* the divergence figure — S10;
+* randomized arms — S11; the `arm` column already round-trips;
+* `arm_source` in the CSV — revisit with S11 if analysis needs assignment provenance explicitly;
+* export from the web UI — an operator command is enough on a single laptop;
+* scheduled/automatic export at shutdown — the S6 backup already snapshots the DB; CSV is a derived view;
+* Excel `.xlsx` output;
+* raw recovery export for mixed config generations;
+* a one-row-per-pair wide pivot — one `pandas.pivot` away from this file.
+
+> **Spec history:** drafted 2026-09-16; revised 2026-09-18 after engineering review. The revised version removes mixed-config interpretation, adds strict persisted-answer validation, fixes the SQLite snapshot contract, promotes arm mismatches to integrity errors, and makes output installation staged.
 
 ---
 
 ## 1. Context
 
-S9a fixed the `answers.value` string contract (categorical verbatim; multi-select as a JSON array in `questions.yaml` option order; likert / probability as `str(int)`; free-text stripped, ≤ 4000 chars) precisely so that *"the wide-pivot export does not have to guess"* (S9a §1, §6). S9b froze answers behind the frontier and added `progress.completed_at`, and filed two TODOs against this session: *export must know about `progress`* and *export inherits the `config_hash` drift check* (TODOS.md, S9a R23). Both are in scope here.
+S9a fixed the `answers.value` storage contract:
 
-`plan.md:29` is the user's requirement: *"should easily export to csv file with columns: patient_id, clinician_name, timepoint, question_1, question_2 …"*. `CLAUDE.md` restates it as *"must export to CSV with one column per question"*. The ROADMAP's S9c block instead describes a per-pair pivot with `{question_id}_t{timepoint}` columns. The two shapes are not compatible; §5 picks the `plan.md` one and §15 records why. The ROADMAP's other four bullets (pipe-delimited multi-select, UTF-8 + header, injection guard with a `[REGRESSION]` test, pseudonymization keyfile) are kept verbatim.
+* categorical — option verbatim;
+* multi-select — JSON array in `questions.yaml` option order;
+* likert / probability — canonical `str(int)`;
+* free-text — stripped text, ≤ 4000 chars.
 
-Three failure modes drive the design:
+S9b froze answers behind the frontier and added `progress.completed_at`. It also left two S9c requirements:
 
-1. **A spreadsheet executes a clinician's free text.** `=HYPERLINK(...)`, `-2+3`, `@SUM` typed into `free_notes` becomes a formula the moment the CSV is opened in Excel/LibreOffice. The guard (§7) is a pure function applied to every cell, including ids, and locked by a regression test.
-2. **Names leave the laptop.** `clinicians.name_normalized` is the only identifying column in the DB. The export never reads it unless `--keyfile` is given, and then writes it to its own file, never into the answers CSV. This is the D9 pseudonym policy (TODOS.md) made concrete before the first pilot export exists.
-3. **Two studies in one file.** A mid-pilot `questions.yaml` edit changes `config_hash`; answers recorded under the old hash have different columns, prompts or option sets. A silent mix is an analysis bug discovered six weeks later. The export refuses by default (§8.3).
+1. export must know about `progress`;
+2. export must detect `config_hash` drift.
 
-Design principle carried from S9b: the **service layer owns every decision** (`export.py`); `cli.py` parses flags, prints one line and maps exceptions to exit codes; the DAOs gain pure read-all functions and nothing else.
+`plan.md` requires CSV export with one row per patient / clinician / timepoint and one column per question. `CLAUDE.md` repeats the one-column-per-question requirement.
+
+The older ROADMAP S9c description instead proposed one row per clinician/patient pair with `{question_id}_t{timepoint}` columns. The two shapes are incompatible. §15 keeps the tidy row-per-timepoint shape and updates the ROADMAP pointer.
+
+Four failure modes drive the revised design:
+
+1. **A spreadsheet executes clinician-entered text.**
+   A free-text answer beginning with `=`, `+`, `-`, `@`, or another spreadsheet formula trigger can be interpreted as a formula when the CSV is opened.
+
+2. **The login-name mapping leaves the laptop unintentionally.**
+   `clinicians.name_normalized` is identifying metadata. The answers CSV never reads or exports it. It is queried only when `--keyfile` is explicitly supplied.
+
+3. **An interpreted CSV silently combines incompatible study generations.**
+   `answers.config_hash` belongs to each individual answer row, and an answer can be independently upserted. A single `(clinician, patient, timepoint)` export row can therefore contain answers written under different generations. One row-level `config_hash` cannot faithfully represent such a row.
+
+   **[review-fix R1]** S9c therefore refuses any non-live `config_hash`. A future recovery/raw-export command may export the underlying long-form rows without interpreting them.
+
+4. **Malformed persisted data is converted into plausible analysis data.**
+   The existing UI deserializer is intentionally forgiving for browser pre-fill. That is inappropriate for a research export.
+
+   **[review-fix R2]** Export uses a strict persisted-value decoder and fails loudly if the DB violates the S9a storage contract.
+
+Design principle carried from S9b:
+
+> **The service layer owns every research-data decision.**
+
+`export.py` validates and builds the export. `cli.py` parses flags, prints results and maps operator errors to exit codes. DAO additions remain read-only.
 
 ---
 
 ## 2. Deliverables
 
-| # | Path | Purpose |
-|---|---|---|
-| 1 | `pyproject.toml` | No new runtime deps (`csv` + `pandas` already present). No new dev deps. |
-| 2 | `src/ehr_simulator/answer_codec.py` | NEW. Lifts `serialize_answer`, `deserialize_answer`, `AnswerValidationError`, `FREE_TEXT_MAX_CHARS`, `PROBABILITY_MIN/MAX` and the `_SERIALIZERS` table out of `web/answer_capture.py` **unchanged**, so a non-web consumer (this session's export, S10's divergence query) can decode `answers.value` without importing the web layer. `answer_capture.py` re-imports the names, so every S9a/S9b test and import path keeps working. Pure move — `git diff --color-moved` shows no edited lines. |
-| 3 | `src/ehr_simulator/config/questions.py` | MODIFIED (one validator). Multi-select `options` must not contain `|` (the export delimiter) — `ValueError("multi-select options must not contain '|' (CSV export delimiter)")`. A validator only; the dumped model is unchanged, so **`config_hash` does not shift** and no `schema_version` bump. |
-| 4 | `src/ehr_simulator/db/connection.py` | MODIFIED. `connect(db_path, *, apply_pragmas=True, access=AccessMode.READ_WRITE)`; `class AccessMode(StrEnum): READ_WRITE, READ_ONLY`. `READ_ONLY` opens `sqlite3.connect(f"file:{path}?mode=ro", uri=True)` and skips the `journal_mode` PRAGMA (a read-only connection cannot change it; the other two are harmless and still applied). A missing file under `READ_ONLY` raises `FileNotFoundError` instead of silently creating an empty DB. Default unchanged → every existing call site is untouched. |
-| 5 | `src/ehr_simulator/db/answers.py` | MODIFIED. `fetch_all(conn) -> list[AnswerRow]`, `@dataclass(frozen=True) AnswerRow(clinician_id, patient_id, timepoint: float, question_id, value, arm, config_hash, ts_recorded)`. `ORDER BY patient_id, clinician_id, timepoint, question_id` so callers never depend on insertion order. |
-| 6 | `src/ehr_simulator/db/progress.py` | MODIFIED. `fetch_all(conn) -> dict[tuple[str, str], Progress]` keyed by `(clinician_id, patient_id)`. |
-| 7 | `src/ehr_simulator/db/arm_assignments.py` | MODIFIED. `fetch_all(conn) -> dict[tuple[str, str], str]` → `arm`. |
-| 8 | `src/ehr_simulator/db/clinicians.py` | MODIFIED. `fetch_all(conn) -> list[tuple[str, str]]` → `(clinician_id, name_normalized)` ordered by `clinician_id`. **Only** the keyfile path calls it. |
-| 9 | `src/ehr_simulator/export.py` | NEW. The service: `build_export(...) -> ExportFrame`, `write_csv(frame, out)`, `write_keyfile(rows, path)`, `guard_cell(value) -> str`, `encode_multi_select(value) -> str`, `ExportError`, `ExportReport`. §8. |
-| 10 | `src/ehr_simulator/cli_support.py` | MODIFIED. `ResetError` generalized: `class OperatorError(ValueError)` with `ResetError = OperatorError` kept as an alias so `assert_schema_current` can be shared by `reset-progress` and `export-answers` (it currently raises `ResetError`, which reads wrong from the export). No behavior change. |
-| 11 | `src/ehr_simulator/cli.py` | MODIFIED. NEW command `export-answers`. §5. Module docstring: "Nine commands after S9c". |
-| 12 | `.gitignore` | MODIFIED. `exports/` and `*.keyfile.csv` — belt-and-braces; the defaults already sit under the ignored `data/`, but an operator who passes `--out ./answers.csv` should still not be able to commit a keyfile by accident. |
-| 13 | `.github/workflows/ci.yml` | MODIFIED. `DB smoke` gains an `export-answers` run against the freshly migrated (empty) DB and asserts the header line byte-for-byte; a second run with `--keyfile` asserts the keyfile's mode is `600`. §10. |
-| 14 | `tests/test_export.py` | NEW (~24 functions). §9. |
-| 15 | `tests/test_cli.py` | EXTENDED (+6). §9. |
-| 16 | `tests/test_config.py` | EXTENDED (+1 param case: `|` in a multi-select option is rejected; `|` in a *categorical* option is still accepted). |
-| 17 | `tests/test_db.py` | EXTENDED (+4: the four `fetch_all`s + read-only `connect`). |
-| 18 | `tests/test_answer_capture.py` | 0 changed lines — the import-path compatibility of deliverable #2 is what this asserts. |
-| 19 | `tests/fixtures/study/questions_broken_pipe_option.yaml` | NEW (one multi-select option containing `\|`). |
-| 20 | `TODOS.md` | MODIFIED. Strike the two S9c TODOs (closed). Add §14 items. |
-| 21 | `specs/ROADMAP.md` | MODIFIED (S9c block). Shape pointer to §5 / §15, one line. S11's "`arm` round-trips through CSV" bullet gets the column name. |
+| #  | Path                                                     | Purpose                                                                                                                                                                                                    |                                                                                                     |
+| -- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| 1  | `pyproject.toml`                                         | No new runtime or dev dependencies. `csv` is stdlib; pandas remains test/analysis-only.                                                                                                                    |                                                                                                     |
+| 2  | `src/ehr_simulator/answer_codec.py`                      | NEW. Move the answer serialization contract out of `web/answer_capture.py`; retain the existing lenient `deserialize_answer` for UI pre-fill and add strict `decode_stored_answer` for research consumers. |                                                                                                     |
+| 3  | `src/ehr_simulator/config/questions.py`                  | MODIFIED. Multi-select options may not contain `                                                                                                                                                           | `, the export delimiter. Accepted models are unchanged, so existing valid configs hash identically. |
+| 4  | `src/ehr_simulator/db/connection.py`                     | MODIFIED. Add `AccessMode.READ_WRITE` / `READ_ONLY`; read-only opens an existing DB via SQLite `mode=ro` and never applies write-affecting boot PRAGMAs.                                                   |                                                                                                     |
+| 5  | `src/ehr_simulator/db/answers.py`                        | MODIFIED. Add deterministic `fetch_all()` returning typed `AnswerRow`s.                                                                                                                                    |                                                                                                     |
+| 6  | `src/ehr_simulator/db/progress.py`                       | MODIFIED. Add deterministic `fetch_all()` keyed by `(clinician_id, patient_id)`.                                                                                                                           |                                                                                                     |
+| 7  | `src/ehr_simulator/db/arm_assignments.py`                | MODIFIED. Add typed `fetch_all()` including `arm`, `arm_source`, and `config_hash`.                                                                                                                        |                                                                                                     |
+| 8  | `src/ehr_simulator/db/clinicians.py`                     | MODIFIED. Add `fetch_by_ids()` for the optional keyfile; no name lookup occurs without `--keyfile`.                                                                                                        |                                                                                                     |
+| 9  | `src/ehr_simulator/export.py`                            | NEW. Export service: snapshot read, integrity validation, frame construction, CSV guard, staged output installation.                                                                                       |                                                                                                     |
+| 10 | `src/ehr_simulator/cli_support.py`                       | MODIFIED. Generalize operator-command errors so schema-current checks can be reused without export raising a reset-specific exception.                                                                     |                                                                                                     |
+| 11 | `src/ehr_simulator/cli.py`                               | MODIFIED. Add `export-answers`; module docstring becomes nine commands after S9c.                                                                                                                          |                                                                                                     |
+| 12 | `.gitignore`                                             | MODIFIED. Ignore `exports/` and `*.keyfile.csv`.                                                                                                                                                           |                                                                                                     |
+| 13 | `.github/workflows/ci.yml`                               | MODIFIED. DB smoke gains header-only export + keyfile mode check.                                                                                                                                          |                                                                                                     |
+| 14 | `tests/test_answer_codec.py`                             | NEW. Strict persisted-value decoder tests.                                                                                                                                                                 |                                                                                                     |
+| 15 | `tests/test_export.py`                                   | NEW. Export service, integrity, snapshot, guard and output tests.                                                                                                                                          |                                                                                                     |
+| 16 | `tests/test_cli.py`                                      | EXTENDED. CLI happy path and refusal behavior.                                                                                                                                                             |                                                                                                     |
+| 17 | `tests/test_config.py`                                   | EXTENDED. Pipe in a multi-select option is rejected; categorical pipe remains valid.                                                                                                                       |                                                                                                     |
+| 18 | `tests/test_db.py`                                       | EXTENDED. New DAO reads + read-only connection.                                                                                                                                                            |                                                                                                     |
+| 19 | `tests/test_answer_capture.py`                           | Test logic unchanged; existing tests lock compatibility of the moved codec.                                                                                                                                |                                                                                                     |
+| 20 | `tests/fixtures/study/questions_broken_pipe_option.yaml` | NEW. Multi-select option containing `                                                                                                                                                                      | `.                                                                                                  |
+| 21 | `TODOS.md`                                               | MODIFIED. Close the two S9c TODOs; add deferred raw mixed-config export / `arm_source` decisions.                                                                                                          |                                                                                                     |
+| 22 | `specs/ROADMAP.md`                                       | MODIFIED. Point S9c at the tidy shape and note that interpreted export refuses config drift.                                                                                                               |                                                                                                     |
 
-`README.md` and `CLAUDE.md` "Current state" are owned by `/document-release` post-ship (README's *"CSV export … not in this build yet"* and the *"they live in SQLite only for now"* bullet become false).
+`README.md` and `CLAUDE.md` current-state wording remains release-documentation work after implementation.
 
 ---
 
-## 3. Repo layout after Session 9c (diff vs end-of-S9b)
+## 3. Repo layout after Session 9c
 
-```
+```text
 src/ehr_simulator/
-├── answer_codec.py            NEW   value-string contract (moved out of web/)
-├── export.py                  NEW   build_export / write_csv / write_keyfile / guard_cell
+├── answer_codec.py            NEW   shared answer storage codec
+├── export.py                  NEW   export preparation + integrity + file writing
 ├── cli.py                     MOD   export-answers
-├── cli_support.py             MOD   OperatorError (ResetError alias kept)
-├── config/questions.py        MOD   multi-select options: no '|'
+├── cli_support.py             MOD   OperatorError
+├── config/
+│   └── questions.py           MOD   multi-select options: no '|'
 ├── db/
-│   ├── connection.py          MOD   AccessMode, read-only open
+│   ├── connection.py          MOD   AccessMode + read-only open
 │   ├── answers.py             MOD   fetch_all + AnswerRow
 │   ├── progress.py            MOD   fetch_all
-│   ├── arm_assignments.py     MOD   fetch_all
-│   └── clinicians.py          MOD   fetch_all (keyfile only)
-└── web/answer_capture.py      MOD   re-imports from answer_codec (no logic change)
+│   ├── arm_assignments.py     MOD   fetch_all + typed row
+│   └── clinicians.py          MOD   fetch_by_ids for keyfile
+└── web/
+    └── answer_capture.py      MOD   imports codec functions; web behavior unchanged
 
 tests/
+├── test_answer_codec.py       NEW
 ├── test_export.py             NEW
 ├── test_cli.py                MOD
 ├── test_config.py             MOD
 ├── test_db.py                 MOD
-└── fixtures/study/questions_broken_pipe_option.yaml   NEW
+└── fixtures/study/
+    └── questions_broken_pipe_option.yaml
 ```
 
-Layering (new code only):
+Layering:
 
-```
- cli.py ──▶ export.py ──▶ db/answers, db/progress, db/arm_assignments, db/clinicians ──▶ sqlite3
+```text
+cli.py ──▶ export.py ──▶ db/answers
+                │       db/progress
+                │       db/arm_assignments
+                │       db/clinicians   [only with --keyfile]
                 │
-                └─▶ answer_codec.deserialize_answer   (same layer as config/; no web import)
+                └────▶ answer_codec.decode_stored_answer
 ```
 
-`export.py` never imports `ehr_simulator.web`. That is the reason for deliverable #2.
+`export.py` never imports `ehr_simulator.web`.
 
 ---
 
 ## 4. Data flow
 
-```
- study.yaml + questions.yaml ──▶ load + compute_config_hash_from_models ──▶ live_hash, timepoints_minutes, question order
-                                                                                   │
- DB (read-only) ──▶ answers.fetch_all ──┐                                          ▼
-                    progress.fetch_all ─┤──▶ build_export(...) ──▶ ExportFrame(header, rows, report)
-                    arm_assignments.fetch_all ┘         │                  │
-                                                        │                  ├──▶ write_csv(out)      guard_cell on EVERY cell
-                                                        │                  └──▶ ExportReport → one stdout line
-                                                        └── refuses: mixed config_hash (unless --allow-mixed-config)
- clinicians.fetch_all ──▶ write_keyfile(K)   only when --keyfile given; mode 0600
+```text
+study.yaml + questions.yaml
+        │
+        ├── load + validate
+        └── compute_config_hash_from_models
+                     │
+                     ▼
+                  live_hash
+
+DB opened READ_ONLY
+        │
+        ▼
+     BEGIN                         explicit read transaction
+        │
+        ├── answers.fetch_all
+        ├── progress.fetch_all
+        ├── arm_assignments.fetch_all
+        │
+        ├── validate config hashes
+        ├── validate pair / frontier / arm invariants
+        ├── strict-decode every persisted answer
+        ├── build ExportFrame
+        │
+        └── clinicians.fetch_by_ids       only when --keyfile requested
+        │
+     ROLLBACK                              closes read snapshot
+        │
+        ▼
+fully validated ExportBundle
+        │
+        ├── stage answers CSV
+        ├── stage mode-0600 keyfile       optional
+        └── install final outputs
 ```
 
-Row universe (§6): for every `(clinician_id, patient_id)` pair that appears in `answers` **or** `progress`, one row per study `t_index` from `0` to the pair's frontier (`progress.unlocked_t_index`, or the highest answered `t_index` when no progress row exists). Cells with no answer are empty strings, never `NaN`/`None` text — an unanswered optional question and a not-yet-reached timepoint look identical in the file, and both are distinguishable from the walk state via `completed_at` + `t_index`.
+**[review-fix R3]** `with conn:` is not treated as the snapshot mechanism. `build_export` issues an explicit `BEGIN` before the first research-state `SELECT` and ends the read transaction in `finally`.
+
+The snapshot therefore covers:
+
+* answers;
+* progress;
+* arm assignments;
+* optional clinician-name lookup.
+
+### Row universe
+
+For every `(clinician_id, patient_id)` pair appearing in `answers` or `progress`, emit one row for each live-study `t_index` from `0` through that pair's frontier.
+
+Frontier:
+
+* if a `progress` row exists: `progress.unlocked_t_index`;
+* otherwise: the highest live `t_index` represented by that pair's answer rows.
+
+A future, not-yet-unlocked timepoint has **no CSV row**.
+
+An unlocked timepoint with an unanswered optional question has a CSV row with an empty question cell.
+
+Those states are intentionally distinct.
 
 ---
 
@@ -113,30 +225,126 @@ Row universe (§6): for every `(clinician_id, patient_id)` pair that appears in 
 
 ### 5.1 `ehr-simulator export-answers STUDY_CONFIG QUESTIONS [options]`
 
-| Flag | Default | Meaning |
-|---|---|---|
-| `STUDY_CONFIG` (arg) | required | Same YAML `serve --config` takes. Needed for `patient_ids` order, `timepoints_minutes` (→ `t_index`), `db_path` and the config hash. |
-| `QUESTIONS` (arg) | required | Same YAML `serve --questions` takes. Defines the question columns and their order; needed for the hash and for multi-select decoding. |
-| `--db-path P` | `resolve_db_path(study)` | Same precedence chain as every other command. Must exist (exit 1 otherwise — the export never creates a DB). |
-| `--out F` | `<db parent>/exports/answers_<UTC YYYYmmddTHHMMSSZ>.csv` | Parent created if missing. An existing `F` is refused (exit 1) unless `--force`. |
-| `--keyfile K` | *unset* | When given, write `clinician_id,name_normalized` to `K` with mode `0600`. Existing `K` refused unless `--force`. Without the flag, `clinicians` is never read. |
-| `--only-complete` | off | Drop every pair whose `progress.completed_at IS NULL`. |
-| `--allow-mixed-config` | off | Export even when rows carry a `config_hash` other than the live one (§8.3). |
-| `--force` | off | Overwrite `--out` / `--keyfile`. |
+| Argument / flag   | Default                                                  | Meaning                                                                                            |
+| ----------------- | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `STUDY_CONFIG`    | required                                                 | Same study YAML used by `serve`; supplies patient order, timepoints, DB path and live config hash. |
+| `QUESTIONS`       | required                                                 | Same questions YAML used by `serve`; defines question columns, response types and live hash.       |
+| `--db-path P`     | `resolve_db_path(study)`                                 | Override DB path. DB must already exist.                                                           |
+| `--out F`         | `<db parent>/exports/answers_<UTC YYYYmmddTHHMMSSZ>.csv` | Answers CSV. Parent created if needed. Existing path refused unless `--force`.                     |
+| `--keyfile K`     | unset                                                    | Write `clinician_id,name_normalized` for clinicians present in this export. Must be mode 0600.     |
+| `--only-complete` | off                                                      | Export only pairs with a progress row whose `completed_at IS NOT NULL`.                            |
+| `--force`         | off                                                      | Replace existing requested output paths after all validation succeeds.                             |
 
-Exit codes: **0** written (also for a header-only file when the DB has no answers — a valid, empty dataset; stdout says `0 rows`); **1** for every refusal, printed to stderr as `Error: <reason>` **before any file is created**. Refusals: config error; DB missing; schema behind (`assert_schema_current`, same message as `reset-progress`); mixed config without the flag; `--out`/`--keyfile` exists without `--force`; `--keyfile` on a filesystem that cannot honour `chmod 600` (Windows) → exit 1 with an explicit message rather than a world-readable keyfile.
+There is deliberately **no `--allow-mixed-config` flag**.
 
-stdout on success, one line:
+An interpreted tidy export cannot faithfully combine answer cells whose question definitions or provenance may belong to different study generations.
 
+### Exit codes
+
+**0** — export written successfully, including a header-only answers CSV when there are no exportable pairs.
+
+**1** — operator/config/data-integrity/filesystem refusal.
+
+Examples:
+
+* invalid study/questions config;
+* DB missing;
+* schema migrations pending;
+* question id collides with an export metadata column;
+* any relevant `answers.config_hash != live_hash`;
+* any relevant `progress.config_hash != live_hash`;
+* any relevant `arm_assignments.config_hash != live_hash`;
+* answer references an unknown question;
+* answer references a timepoint outside the live study;
+* pair references a patient outside the live study;
+* persisted answer violates the S9a storage contract;
+* missing arm assignment for an exported pair;
+* answer's denormalized `arm` disagrees with locked assignment;
+* invalid progress frontier;
+* answer exists beyond the progress frontier;
+* `completed_at` exists before the final frontier;
+* output and keyfile resolve to the same path;
+* requested final path exists without `--force`;
+* secure keyfile permissions cannot be provided;
+* file staging / installation fails.
+
+CLI refusal format:
+
+```text
+Error: <reason>
 ```
-Wrote 42 rows × 13 columns for 3 patients, 2 clinicians (2 complete walks, 1 in progress) to data/exports/answers_20260916T101500Z.csv
+
+No normal validation or data-integrity refusal creates or replaces a final output path.
+
+Unexpected OS-level failures during staging/install are reported as exit 1; temporary files are removed best-effort.
+
+### stdout
+
+Example:
+
+```text
+Wrote 42 rows × 13 columns for 3 patients, 2 clinicians (2 complete walks, 1 in progress) to data/exports/answers_20260918T081500Z.csv
 ```
 
-plus `Wrote keyfile (2 clinicians, mode 600) to data/clinician.keyfile.csv` when asked. Logging: `setup_logging(Path("logs"))` like every operator command; one `export.written` INFO event with the counts and `export.config_hash.drift` WARNING when `--allow-mixed-config` let a mix through.
+With a keyfile:
+
+```text
+Wrote keyfile (2 clinicians, mode 600) to data/clinician.keyfile.csv
+```
+
+Logging:
+
+* `setup_logging(Path("logs"))`;
+* one `export.written` INFO event with counts;
+* integrity refusals may log structured context but raw answer values and clinician names are not logged.
+
+---
 
 ### 5.2 Live server
 
-The DB is opened with `AccessMode.READ_ONLY`. Under WAL a reader never blocks the server's writer and sees a consistent snapshot for the duration of its transaction. `build_export` performs its three `fetch_all`s inside one `BEGIN … COMMIT` so `answers` and `progress` come from the same snapshot (a frontier that moved between the two reads would otherwise produce a row with an answer past its own frontier). Documented in the CLI help: *safe to run while `serve` is up*.
+The export connection uses:
+
+```python
+connect(db_path, access=AccessMode.READ_ONLY)
+```
+
+Read-only connection behavior:
+
+```python
+class AccessMode(StrEnum):
+    READ_WRITE = "read-write"
+    READ_ONLY = "read-only"
+```
+
+`READ_ONLY`:
+
+* requires an existing file;
+* opens SQLite with URI `mode=ro`;
+* sets the row factory;
+* may enable `PRAGMA foreign_keys=ON`;
+* does not attempt `PRAGMA journal_mode=WAL`;
+* does not alter synchronous mode;
+* may additionally set `PRAGMA query_only=ON` as defense in depth.
+
+The application server remains the writer.
+
+**[review-fix R3]** The exporter explicitly starts one read transaction:
+
+```python
+conn.execute("BEGIN")
+try:
+    ...
+finally:
+    conn.rollback()
+```
+
+The first SELECT establishes the read snapshot; subsequent DAO reads remain inside it.
+
+The contract is therefore:
+
+> safe to run while `serve` is up; export sees one committed snapshot and never observes uncommitted server writes.
+
+The snapshot test deliberately commits a second connection between exporter fetches and proves the later exporter fetch still sees the original snapshot.
 
 ---
 
@@ -144,60 +352,375 @@ The DB is opened with `AccessMode.READ_ONLY`. Under WAL a reader never blocks th
 
 ### 6.1 Columns, in order
 
+```text
+patient_id,
+clinician_id,
+t_index,
+timepoint_minutes,
+arm,
+completed_at,
+config_hash,
+<q1>,
+<q2>,
+…,
+<qN>
 ```
-patient_id, clinician_id, t_index, timepoint_minutes, arm, completed_at, config_hash, <q1>, <q2>, …, <qN>
+
+`<qi>` is the `question_id` verbatim and follows `questions.yaml` order.
+
+Fixed metadata columns:
+
+```text
+patient_id
+clinician_id
+t_index
+timepoint_minutes
+arm
+completed_at
+config_hash
 ```
 
-- `<qi>` = `question_id`, verbatim, in `questions.yaml` order. `question_id` matches `^[a-z0-9_]+$`, so no header cell can ever collide with the seven fixed names — **as long as no question is called `patient_id`, `clinician_id`, `t_index`, `timepoint_minutes`, `arm`, `completed_at` or `config_hash`**. `build_export` raises `ExportError` on such a collision (test #7); adding a `questions.py` validator instead would shift `config_hash` for nothing.
-- `patient_id`, `clinician_id` — as stored. `clinician_id` is the 16-hex pseudonym; there is no name column.
-- `t_index` — integer position of `timepoint_minutes` in `study.timepoints_minutes`. Empty when the row's timepoint is not in the live study (only reachable under `--allow-mixed-config`).
-- `timepoint_minutes` — `answers.timepoint`, formatted with `repr(float)` → `60.0`, never `60` or `6e1` (test #12 asserts byte equality).
-- `arm` — from `arm_assignments` for the pair. If any `answers.arm` for the pair disagrees, WARNING `export.arm.mismatch` and the `arm_assignments` value wins (it is the locked assignment; `answers.arm` is a denormalized copy).
-- `completed_at` — `progress.completed_at` as stored (`YYYY-MM-DD HH:MM:SS`), repeated on every row of the pair; empty while the walk is in progress. This is the "mark incomplete walks" TODO; `--only-complete` is the "exclude" half.
-- `config_hash` — per row, from `answers` (the hash the answer was recorded under). Rows synthesised for un-answered timepoints carry the pair's `progress.config_hash`.
+If a question uses one of those ids, `build_export` refuses before DB output preparation.
 
-### 6.2 Rows
+This remains an export-layer validation rather than making the generic questions model aware of every downstream format.
 
-Order: `study.patient_ids` order, then `clinician_id` ascending, then `t_index` ascending. Pairs whose `patient_id` is not in the live study (only under `--allow-mixed-config`) sort after the study's patients, by `patient_id`. Deterministic: two exports of the same DB are byte-identical (test #13).
+`question_id` already matches `^[a-z0-9_]+$`.
 
-Per response type, the cell is `deserialize_answer(question, value)` rendered as:
+### Metadata semantics
 
-| response_type | stored `value` | CSV cell |
-|---|---|---|
-| categorical | `Yes` | `Yes` |
-| multi-select | `["Imaging","Labs"]` | `Imaging\|Labs` (option order preserved; empty list → empty cell — unreachable in practice, S9a deletes the row) |
-| likert | `3` | `3` |
-| probability-0-100 | `75` | `75` |
-| free-text | text | text, verbatim (newlines and commas quoted by `csv`) |
+**`patient_id`**
+Live-study patient id as stored.
 
-Then `guard_cell` (§7). A `question_id` present in `answers` but absent from the live `questions.yaml` is part of the mixed-config case: refused by default; under `--allow-mixed-config` such ids become extra columns appended **after** the known questions, sorted, decoded as free-text (no question to decode against) — never silently dropped (test #17).
+**`clinician_id`**
+16-hex pseudonym as stored. The answers file never contains `name_normalized`.
 
-### 6.3 Encoding + dialect
+**`t_index`**
+Integer index in `study.timepoints_minutes`.
 
-`open(out, "w", encoding="utf-8", newline="")` + `csv.writer(f, lineterminator="\n", quoting=csv.QUOTE_MINIMAL)`. No BOM: `pandas.read_csv` and R's `readr` handle bare UTF-8; a BOM would make the first header cell `﻿patient_id` in some readers. Header row first. Test #14 writes `é`, `–`, a newline, a comma and a `"` through a free-text answer and reads them back.
+There are no rows with an empty `t_index`: foreign/unknown timepoints are integrity errors, not partially interpreted rows.
+
+**`timepoint_minutes`**
+Formatted from the live study's float value using `repr(float(...))`, e.g.:
+
+```text
+60.0
+180.0
+```
+
+**`arm`**
+The locked `arm_assignments.arm`.
+
+Before emitting a pair, every answer row for that pair must carry the same `answers.arm`.
+
+A disagreement is an `ExportError`; the exporter does not choose a winner.
+
+**[review-fix R4]**
+
+**`completed_at`**
+For a completed pair, serialize the `datetime` returned by SQLite back to the canonical SQLite second-resolution representation:
+
+```text
+YYYY-MM-DD HH:MM:SS
+```
+
+Repeat it on every row for that pair.
+
+For an in-progress pair, use the empty string.
+
+A pair with no progress row is necessarily considered incomplete.
+
+**`config_hash`**
+Always `live_hash`.
+
+This is valid because S9c refuses the export if any relevant answer, progress or arm-assignment record has another hash.
+
+The column remains useful provenance once CSVs are detached from the source DB.
 
 ---
 
-## 7. CSV-injection guard
+### 6.2 Pair and row ordering
+
+Order is deterministic:
+
+1. `study.patient_ids` order;
+2. `clinician_id` ascending;
+3. `t_index` ascending.
+
+A pair referencing a patient not in the live study is refused rather than sorted into a foreign-data tail.
+
+Two exports from the same DB snapshot and same config are byte-identical except when the caller uses different output filenames; file contents are identical.
+
+### `--only-complete`
+
+Without the flag:
 
 ```python
-_FORMULA_TRIGGERS = frozenset("=+-@\t\r")
+pairs = progress_pairs | answer_pairs
+```
+
+With the flag:
+
+```python
+pairs = {
+    pair
+    for pair in pairs
+    if (p := progress_rows.get(pair)) is not None
+    and p.completed_at is not None
+}
+```
+
+**[review-fix R5]** An answer-only pair therefore does not raise `KeyError`; it is simply excluded from `--only-complete`.
+
+---
+
+### 6.3 Strict answer decoding
+
+The web UI retains:
+
+```python
+deserialize_answer(...)
+```
+
+for forgiving browser pre-fill.
+
+Research export uses:
+
+```python
+decode_stored_answer(...)
+```
+
+which validates the persisted representation.
+
+#### categorical
+
+Stored:
+
+```text
+Yes
+```
+
+Requirements:
+
+* exactly one configured option;
+* value must appear in `question.options`.
+
+CSV:
+
+```text
+Yes
+```
+
+#### multi-select
+
+Stored:
+
+```json
+["Imaging","Labs"]
+```
+
+Requirements:
+
+* syntactically valid JSON;
+* top-level value is a list;
+* every member is a string;
+* every member is a configured option;
+* no duplicates;
+* order exactly matches canonical `questions.yaml` option order;
+* persisted list is non-empty.
+
+CSV:
+
+```text
+Imaging|Labs
+```
+
+A malformed JSON value does **not** become an empty CSV cell.
+
+#### likert
+
+Stored:
+
+```text
+3
+```
+
+Requirements:
+
+* canonical integer string;
+* integer is within configured `[scale_min, scale_max]`;
+* non-canonical persisted forms such as `+3`, `03`, `3.0` are rejected.
+
+CSV:
+
+```text
+3
+```
+
+#### probability-0-100
+
+Stored:
+
+```text
+75
+```
+
+Requirements:
+
+* canonical integer string;
+* range 0–100.
+
+CSV:
+
+```text
+75
+```
+
+#### free-text
+
+Stored and exported verbatim after validating the storage contract:
+
+* length ≤ `FREE_TEXT_MAX_CHARS`;
+* value is already in the canonical stripped form produced by S9a.
+
+Commas, quotes and embedded newlines are handled by `csv.writer`.
+
+A strict-decoding failure is reported with identifiers, not the raw value:
+
+```text
+Error: invalid persisted answer for patient synth_001, clinician a1b2…, timepoint 60.0, question confidence: expected canonical integer 1..5
+```
+
+Raw free text is never echoed into the error or log.
+
+---
+
+### 6.4 Progress integrity
+
+Before rows are emitted:
+
+* `0 <= unlocked_t_index < len(study.timepoints_minutes)`;
+* every answer timepoint maps exactly to one live timepoint;
+* if progress exists, no answer may lie beyond `unlocked_t_index`;
+* if `completed_at is not None`, the frontier must be the final study `t_index`.
+
+Violations are refused rather than repaired.
+
+For an answer-only pair with no progress row:
+
+```text
+frontier = max(t_index of its answers)
+```
+
+For a progress-only pair:
+
+```text
+frontier = progress.unlocked_t_index
+```
+
+The latter produces blank question cells for unlocked timepoints with no recorded answers.
+
+---
+
+### 6.5 Encoding and CSV dialect
+
+```python
+open(path, "w", encoding="utf-8", newline="")
+csv.writer(
+    f,
+    lineterminator="\n",
+    quoting=csv.QUOTE_MINIMAL,
+)
+```
+
+No BOM.
+
+Header row first.
+
+A regression round-trip includes:
+
+* `é`;
+* en dash;
+* comma;
+* quote;
+* embedded newline;
+* leading apostrophe;
+* every formula-trigger prefix.
+
+The round-trip comparison uses the exact guarded CSV representation. It does **not** attempt to heuristically “undo” guard prefixes.
+
+---
+
+## 7. CSV / formula-injection guard
+
+Formula guarding is an output-boundary concern.
+
+```python
+_FORMULA_TRIGGERS = frozenset(
+    (
+        "=",
+        "+",
+        "-",
+        "@",
+        "\t",
+        "\r",
+        "\n",
+        "＝",
+        "＋",
+        "－",
+        "＠",
+    )
+)
 _GUARD_PREFIX = "'"
 
-def guard_cell(value: str) -> str:
-    """Neutralise spreadsheet formula injection.
 
-    A cell whose first character is one of ``= + - @ TAB CR`` is prefixed
-    with a single quote: Excel / LibreOffice / Sheets then render it as
-    text.  Applied to EVERY cell, ids and header included — a question_id
-    cannot start with these (regex), a patient_id or free-text can.
-    """
+def guard_cell(value: str) -> str:
     if value and value[0] in _FORMULA_TRIGGERS:
         return _GUARD_PREFIX + value
     return value
 ```
 
-Consequences, stated so the analyst is not surprised: a free-text answer `-2 points` exports as `'-2 points`; a Geneva `patient_id` never starts with a trigger (digits + `_`) so ids are unaffected on both real datasets; likert/probability cells are non-negative ints and unaffected; multi-select cells start with an option's first character — an option starting with `-` or `+` (e.g. `+ve troponin`) **would** be guarded, so the export applies the guard to the joined cell, once. The guard is one-way; `read_back(path)` (test helper, not shipped) strips one leading `'` from cells that start with `''`? — **no**: an original value that starts with `'` is *not* guarded (`'` is not a trigger) so there is no ambiguity to resolve; the reverse map is "strip one leading `'` iff the next char is a trigger". Documented in the module docstring; test #4 (**[REGRESSION]**, ROADMAP) is parametrised over all six triggers, the empty string, a value that begins with `'`, and a value with a trigger in position 2.
+**[review-fix R6]** LF and full-width variants are included in addition to the original six triggers.
+
+`guard_cell` is applied exactly once to **every** cell passed to the CSV writer, including metadata and headers.
+
+Consequences:
+
+```text
+=1+1       -> '=1+1
+-3 points  -> '-3 points
+@SUM(...)  -> '@SUM(...)
+＝1+1      -> '＝1+1
+```
+
+An original value beginning with `'` is unchanged.
+
+For example:
+
+```text
+'=1+1
+```
+
+remains:
+
+```text
+'=1+1
+```
+
+There is deliberately no generic “unguard” operation: an original apostrophe followed by a trigger is indistinguishable from an injected guard prefix without access to the original frame.
+
+Tests therefore compare:
+
+```python
+parsed_csv_cell == guard_cell(original_frame_cell)
+```
+
+rather than stripping prefixes heuristically.
+
+`csv.writer` owns delimiter / quote / newline escaping; handwritten CSV concatenation is forbidden.
+
+Security statement:
+
+> The export neutralizes recognized formula-leading characters when the generated CSV is initially opened in common spreadsheet software. No claim is made that this protection survives arbitrary spreadsheet editing, re-saving, locale conversion or import/export through another application.
 
 ---
 
@@ -206,12 +729,14 @@ Consequences, stated so the analyst is not surprised: a free-text answer `-2 poi
 ### 8.1 API
 
 ```python
-class ExportError(ValueError): ...            # refusal; nothing written
+class ExportError(ValueError):
+    """Research export cannot be produced faithfully."""
+
 
 @dataclass(frozen=True)
 class ExportOptions:
-    only_complete: bool = False               # (enum-less: read straight from Typer flags)
-    allow_mixed_config: bool = False
+    only_complete: bool = False
+
 
 @dataclass(frozen=True)
 class ExportReport:
@@ -221,224 +746,911 @@ class ExportReport:
     clinicians: int
     complete_walks: int
     in_progress_walks: int
-    config_hashes: tuple[str, ...]           # distinct, sorted; len > 1 only under --allow-mixed-config
+    config_hash: str
+
 
 @dataclass(frozen=True)
 class ExportFrame:
     header: tuple[str, ...]
-    rows: tuple[tuple[str, ...], ...]         # already decoded, NOT yet guarded
+    rows: tuple[tuple[str, ...], ...]
     report: ExportReport
 
-def build_export(conn, *, study: StudyConfig, questions: Questions, live_hash: str,
-                 options: ExportOptions) -> ExportFrame
-def write_csv(frame: ExportFrame, out: Path) -> None          # guard_cell applied here, header included
-def write_keyfile(conn, path: Path) -> int                    # returns row count; chmod 0600 before writing rows
-def encode_multi_select(options: list[str]) -> str            # "|".join
-def guard_cell(value: str) -> str
+
+@dataclass(frozen=True)
+class ExportBundle:
+    frame: ExportFrame
+    keyfile_rows: tuple[tuple[str, str], ...] | None
+
+
+def build_export(
+    conn,
+    *,
+    study: StudyConfig,
+    questions: Questions,
+    live_hash: str,
+    options: ExportOptions,
+    include_keyfile: bool = False,
+) -> ExportBundle:
+    ...
+
+
+def write_export(
+    bundle: ExportBundle,
+    *,
+    out: Path,
+    keyfile: Path | None,
+    force: bool,
+) -> None:
+    ...
+
+
+def write_csv(frame: ExportFrame, path: Path) -> None:
+    ...
+
+
+def write_keyfile(rows: tuple[tuple[str, str], ...], path: Path) -> None:
+    ...
+
+
+def encode_multi_select(options: list[str]) -> str:
+    return "|".join(options)
+
+
+def guard_cell(value: str) -> str:
+    ...
 ```
 
-`ExportOptions` uses two booleans on a **dataclass**, not positional function parameters — the CLAUDE.md rule targets call-site readability (`f(conn, True, False)`); a keyword-constructed frozen options object is the enum-free way to get the same readability without four enum types for four flags. If the review prefers enums, `WalkFilter.{ALL, COMPLETE_ONLY}` and `ConfigMix.{REFUSE, ALLOW}` are the names.
+`ExportFrame` contains **un-guarded** semantic cell values.
 
-### 8.2 `build_export` algorithm
+Guarding occurs only in `write_csv`.
 
-```
-1. header  = FIXED_COLUMNS + tuple(q.question_id for q in questions)        (collision check → ExportError)
-2. with conn: (one snapshot)
-       answers  = answers.fetch_all(conn)
+---
+
+### 8.2 Read snapshot algorithm
+
+```text
+1. validate metadata/question-column collisions
+
+2. assert connection is not already inside an application transaction
+
+3. conn.execute("BEGIN")
+
+4. try:
+       answers = answers.fetch_all(conn)
        progress = progress.fetch_all(conn)
-       arms     = arm_assignments.fetch_all(conn)
-3. hashes = {a.config_hash for a in answers} | {p.config_hash for p in progress.values()}
-   if hashes - {live_hash} and not allow_mixed_config → ExportError listing the foreign hashes + counts
-4. pairs = keys(progress) ∪ {(a.clinician_id, a.patient_id) for a in answers}
-   if only_complete: pairs = {p for p in pairs if progress[p].completed_at is not None}
-5. for each pair (study order): frontier = progress.unlocked_t_index or max answered t_index
-       for t_index in 0..frontier: emit row; fill cells from answers[(pair, timepoints[t_index])]
-   answers whose timepoint ∉ timepoints_minutes (mixed only) → extra rows with t_index=""
-6. report counts; return ExportFrame
+       assignments = arm_assignments.fetch_all(conn)
+
+       validate config hashes
+       validate referenced patients/questions/timepoints
+       validate progress/frontier invariants
+       validate arm assignment presence + consistency
+       strict-decode all stored answers
+
+       choose pairs
+       apply --only-complete
+       build rows in deterministic order
+       build report
+
+       if include_keyfile:
+           exported_ids = clinician ids actually represented in frame
+           keyfile_rows = clinicians.fetch_by_ids(conn, exported_ids)
+           verify every exported clinician id resolved exactly once
+       else:
+           keyfile_rows = None
+
+       return immutable ExportBundle
+   finally:
+       conn.rollback()
 ```
 
-Everything above is pure Python over lists; `pandas` is **not** used to build the frame (it would coerce `"3"` → `3`, `"60.0"` → `60`, and empty → `NaN` — exactly the surprises §6 rules out). `pandas.read_csv(..., dtype=str, keep_default_na=False)` is the sanctioned reader for the round-trip test.
+No final output file is touched until this function returns successfully.
 
-### 8.3 Mixed config policy
-
-Default **refuse**. Message names the live hash, each foreign hash and its row count, and the flag that overrides:
-
-```
-Error: answers span 2 config generations; live config is 3f9a…; found 17 rows under 8c21… .
-       Re-export with --allow-mixed-config to include them (t_index / question columns may be empty for foreign rows).
-```
-
-Under the flag: rows kept, `config_hash` column tells them apart, WARNING event, and the stdout line ends with `(2 config generations — see config_hash column)`. This is the S9a R23 TODO closed with "refuse **or** column": both, default refuse.
+**[review-fix R3]** The test for snapshot consistency does not merely inspect `conn.in_transaction`; it proves snapshot behavior using a second connection that commits between two exporter reads.
 
 ---
 
-## 9. Test inventory (ROADMAP bar ≥6; **35 new functions**)
+### 8.3 Config-generation integrity
 
-Baseline 393 collected → ~428. Counted by function, e2e unaffected (no browser surface).
+Collect config hashes from:
 
-### `tests/test_export.py` (24)
+```text
+answers.config_hash
+progress.config_hash
+arm_assignments.config_hash
+```
 
-Fixtures: `study_synthetic.yaml` + `questions.yaml` from `tests/fixtures/study/`; a `walked_db(tmp_path, *, pairs=…)` builder reusing `test_cli.py::_walked_db`'s pattern (lift it into `conftest.py` as `seed_walked_db`).
+Any value other than `live_hash` causes refusal.
 
-1. `test_header_order_fixed_then_questions_in_yaml_order`
-2. `test_one_row_per_pair_per_timepoint_up_to_frontier` — pair unlocked to t=1 → rows for t_index 0 and 1 only.
-3. `test_pair_with_answers_but_no_progress_row_uses_max_answered_t_index`
-4. `test_guard_cell_regression` **[REGRESSION]** — parametrised over `= + - @ \t \r`, `""`, `"'x"`, `"a=b"`.
-5. `test_guard_applied_to_every_cell_including_ids_and_header` — a `patient_id` starting with `=` in a synthetic-shaped DB is guarded; header untouched because no fixed name or `question_id` can start with a trigger (asserted literally).
-6. `test_multi_select_pipe_encoding_preserves_option_order`
-7. `test_question_id_colliding_with_fixed_column_raises` — a `Questions` model built in-test with `question_id: arm`.
-8. `test_empty_cells_for_unanswered_optional_question` — `free_notes` blank → `""`, not `None`.
-9. `test_completed_at_repeated_on_every_row_and_empty_in_progress`
-10. `test_only_complete_drops_in_progress_pairs`
-11. `test_arm_from_arm_assignments_wins_and_mismatch_warns` — `answers.arm="ai"` vs assignment `no_ai` → WARNING captured, cell `no_ai`.
-12. `test_timepoint_minutes_formatted_as_repr_float` — `60.0`, `180.0`.
-13. `test_export_is_deterministic_byte_identical_twice`
-14. `test_utf8_round_trip_free_text_with_newline_comma_quote_and_accents`
-15. `test_round_trip_pandas_read_csv_dtype_str_matches_frame` — read with `dtype=str, keep_default_na=False`; after stripping guards, equals `frame.rows`.
-16. `test_mixed_config_refused_by_default_and_message_names_hashes`
-17. `test_mixed_config_allowed_appends_unknown_question_columns_sorted_after_known`
-18. `test_mixed_config_allowed_foreign_timepoint_gets_empty_t_index`
-19. `test_write_csv_creates_parent_and_no_bom`
-20. `test_write_keyfile_mode_0600_and_columns` — `stat(path).st_mode & 0o777 == 0o600`; skipped on Windows (`sys.platform == "win32"`).
-21. `test_keyfile_not_written_when_not_requested_and_clinicians_never_read` — monkeypatch `clinicians.fetch_all` to raise.
-22. `test_empty_db_writes_header_only_and_reports_zero_rows`
-23. `test_build_export_reads_within_one_transaction` — assert `conn.in_transaction` is `True` inside a monkeypatched `progress.fetch_all` and `False` after.
-24. `test_no_web_import` — `import ehr_simulator.export` in a fresh subprocess; `"ehr_simulator.web" not in sys.modules`. Cheap architectural lock for §3.
+Example:
 
-### `tests/test_cli.py` (+6)
+```text
+Error: database contains records from another study configuration.
+Live config: 3f9a…
+Foreign records:
+  answers:        8c21… (17 rows)
+  progress:       8c21… (2 rows)
+  arm_assignments: 8c21… (2 rows)
+Refusing interpreted CSV export.
+```
 
-25. `test_cli_export_answers_happy_path_writes_file_and_prints_counts`
-26. `test_cli_export_answers_default_out_path_under_db_parent_exports` — regex on the timestamped name.
-27. `test_cli_export_answers_refuses_existing_out_without_force_then_overwrites_with_force`
-28. `test_cli_export_answers_errors` — parametrised: missing DB; stale schema (`pending migrations`); mixed config; `--keyfile` exists. Each: exit 1, `Error:` on stderr, **no file created**.
-29. `test_cli_export_answers_keyfile_flag_writes_keyfile`
-30. `test_cli_export_answers_runs_against_open_write_connection` — hold a `connect()` (WAL) with an uncommitted `answers.upsert` in the test process, run the export, assert it succeeds and does not see the uncommitted row.
+No override flag is advertised.
 
-### `tests/test_config.py` (+1 case)
+Rationale:
 
-31. `|` in a multi-select option → `ConfigError` naming the option; `|` in a categorical option → accepted (fixture #19 + an in-test model).
+* answer hash is per answer, not per export row;
+* question response type/options may have changed;
+* an old numeric timepoint may have a different `t_index`;
+* a question id may have changed semantic meaning while retaining the same text id;
+* pretending those rows fit the live model is worse than refusing.
 
-### `tests/test_db.py` (+4)
+A future raw recovery export may expose:
 
-32. `test_answers_fetch_all_ordered`
-33. `test_progress_and_arm_fetch_all_keyed_by_pair`
-34. `test_clinicians_fetch_all_ordered_by_id`
-35. `test_connect_read_only_refuses_write_and_missing_file` — `sqlite3.OperationalError` on `INSERT`; `FileNotFoundError` on a missing path (the default mode would have created it).
+```text
+clinician_id,
+patient_id,
+timepoint,
+question_id,
+value,
+arm,
+config_hash,
+ts_recorded
+```
 
-### `tests/test_answer_capture.py` (0 changed)
+without interpreting values through the live question model.
 
-The unchanged file passing is the assertion that deliverable #2 was a pure move.
+That feature is explicitly outside S9c.
 
 ---
 
-## 10. CI changes (`.github/workflows/ci.yml`)
+### 8.4 Arm integrity
 
-`DB smoke` step, after the existing `backup` lines:
+For every exported pair:
+
+1. a locked `arm_assignments` row must exist;
+2. its `config_hash` must equal `live_hash`;
+3. every `answers.arm` for that pair must equal the assignment's `arm`.
+
+If not:
+
+```text
+Error: arm mismatch for patient synth_001, clinician a1b2…: assignment=no_ai, answer row=ai
+```
+
+No row is exported.
+
+**[review-fix R4]** A mismatch is not downgraded to a warning and no source is silently selected as “winner.”
+
+`arm_source` is fetched because it is part of the assignment record and may be useful for diagnostics/future S11 work, but it is not exported in S9c.
+
+---
+
+### 8.5 Output staging and installation
+
+**[review-fix R7]**
+
+`write_export` owns final-path safety.
+
+Preflight before staging:
+
+* `out.resolve()` and `keyfile.resolve()` must differ;
+* both parents are creatable;
+* existing finals are rejected unless `force=True`;
+* if keyfile requested, platform/filesystem must support the required private permission semantics.
+
+Then:
+
+1. write answers to a sibling temporary file;
+2. if requested, create keyfile temp with private permissions from creation time;
+3. verify keyfile has no group/other permission bits;
+4. flush/close both;
+5. install final paths;
+6. remove temporary paths in `finally`.
+
+The keyfile is not created world-readable and then chmodded afterwards.
+
+On POSIX, create the keyfile temp with an API equivalent to:
+
+```python
+os.open(
+    temp_path,
+    os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+    0o600,
+)
+```
+
+and verify:
+
+```python
+stat.S_IMODE(path.stat().st_mode) == 0o600
+```
+
+On a platform where the application cannot provide the promised keyfile protection, `--keyfile` refuses instead of silently weakening it.
+
+Without `--force`, installation uses a no-clobber operation so a race creating the destination after preflight does not overwrite it.
+
+With `--force`, a completed staged file replaces the final path.
+
+The two-file operation is not described as crash-atomic: two filesystem paths cannot be committed as one portable atomic transaction. Normal validation happens before either final path is installed; unexpected filesystem failure during final installation is surfaced explicitly.
+
+---
+
+## 9. Test inventory
+
+The acceptance bar is behavior-based rather than a hard-coded total pytest collection count.
+
+### `tests/test_answer_codec.py`
+
+1. categorical stored value must be a configured option;
+2. valid multi-select JSON decodes in configured order;
+3. malformed multi-select JSON raises;
+4. non-list multi-select JSON raises;
+5. unknown / duplicate / non-string multi-select members raise;
+6. non-canonical multi-select order raises;
+7. empty persisted multi-select raises;
+8. likert rejects non-canonical integers and out-of-range values;
+9. probability rejects non-canonical integers and values outside 0–100;
+10. free-text storage-contract violation raises;
+11. existing lenient `deserialize_answer` behavior remains unchanged for UI pre-fill.
+
+### `tests/test_export.py`
+
+12. fixed columns precede questions in YAML order;
+13. row per pair per unlocked timepoint;
+14. answer-only pair uses highest answered live `t_index`;
+15. progress-only pair emits unlocked rows with empty answers;
+16. `--only-complete` omits answer-only pair rather than raising;
+17. unanswered optional question is `""`;
+18. completed timestamp repeated on every pair row;
+19. completed timestamp formatting is exact;
+20. deterministic patient / clinician / t-index order;
+21. timepoint formatting uses `repr(float)`;
+22. identical input produces byte-identical CSV;
+23. multi-select pipe encoding preserves option order;
+24. question id colliding with fixed export column raises;
+25. pipe-containing multi-select option cannot reach exporter;
+26. unknown question id in DB raises;
+27. unknown timepoint in DB raises;
+28. unknown patient in DB raises;
+29. invalid progress frontier raises;
+30. answer beyond progress frontier raises;
+31. `completed_at` before final frontier raises;
+32. missing arm assignment raises;
+33. answer/assignment arm mismatch raises;
+34. answer hash drift raises;
+35. progress hash drift raises;
+36. arm-assignment hash drift raises;
+37. multiple hashes in one timepoint are refused rather than collapsed;
+38. malformed persisted answer raises with identifiers but not raw value;
+39. `guard_cell` regression over `= + - @ TAB CR LF` and full-width variants;
+40. guard leaves empty string unchanged;
+41. guard leaves leading apostrophe unchanged, including `'=1+1`;
+42. trigger in position 2 is unchanged;
+43. guard applied to metadata and question values;
+44. UTF-8 / comma / quote / newline round-trip;
+45. pandas read-back with `dtype=str, keep_default_na=False` equals the **guarded** frame;
+46. no BOM;
+47. empty DB produces header-only frame;
+48. clinicians DAO is never called when keyfile not requested;
+49. keyfile includes only clinician ids represented in the export;
+50. explicit read transaction gives a consistent WAL snapshot across DAO reads;
+51. export module imports no `ehr_simulator.web`.
+
+### `tests/test_cli.py`
+
+52. happy path writes file and prints counts;
+53. default output path is under `<db parent>/exports`;
+54. existing output refused without `--force`;
+55. `--force` replaces a completed destination;
+56. missing DB / stale schema / integrity failures exit 1 and create no final output;
+57. `--keyfile` writes the mapping with mode 0600;
+58. answers file and keyfile cannot be the same resolved path;
+59. keyfile unsupported-permission platform refuses;
+60. live-server/WAL test succeeds while another connection has an uncommitted write and does not see that write.
+
+For test #60, do **not** call `answers.upsert()` to create the pending write, because that DAO commits internally.
+
+**[review-fix R8]**
+
+Instead:
+
+```python
+writer.execute("BEGIN IMMEDIATE")
+writer.execute("INSERT ...")
+# no commit
+run export from second connection
+```
+
+Then assert:
+
+* export succeeds;
+* uncommitted row is absent;
+* writer remains usable.
+
+### `tests/test_config.py`
+
+61. `|` inside a multi-select option is rejected;
+62. `|` inside a categorical option remains accepted.
+
+### `tests/test_db.py`
+
+63. `answers.fetch_all` returns deterministic typed rows;
+64. `progress.fetch_all` keyed by pair;
+65. `arm_assignments.fetch_all` returns arm, source and hash;
+66. `clinicians.fetch_by_ids` returns only requested ids in deterministic order;
+67. read-only connection rejects INSERT;
+68. read-only connection does not create a missing DB.
+
+Existing browser/e2e tests remain green.
+
+---
+
+## 10. CI changes
+
+After the existing DB smoke migration/backup work:
 
 ```yaml
 uv run ehr-simulator export-answers \
   configs/example_config.yaml configs/example_questions.yaml \
-  --db-path /tmp/ci_db_smoke/test.db --out /tmp/ci_db_smoke/answers.csv \
+  --db-path /tmp/ci_db_smoke/test.db \
+  --out /tmp/ci_db_smoke/answers.csv \
   --keyfile /tmp/ci_db_smoke/clinicians.keyfile.csv
+
 test "$(head -1 /tmp/ci_db_smoke/answers.csv)" = \
   "patient_id,clinician_id,t_index,timepoint_minutes,arm,completed_at,config_hash,deterioration_6h,survives_hospital,good_outcome_3mo,dead_6mo,confidence,contributing_factors,free_notes"
+
 test "$(stat -c %a /tmp/ci_db_smoke/clinicians.keyfile.csv)" = "600"
 ```
 
-The header literal is intentional: it fails the day someone reorders `configs/example_questions.yaml` or the fixed columns without touching this spec.
+The empty migrated DB legitimately produces:
+
+* answers CSV: header only;
+* keyfile CSV: header only;
+* exit 0.
+
+The literal answers header is intentional: changing example question order or export metadata ordering should fail CI until the contract is deliberately updated.
 
 ---
 
-## 11. Commit discipline (target 4 commits, ~1 day)
+## 11. Commit discipline
 
-1. **`Lift answer codec, add read-only connect and fetch_all DAOs`** — deliverables #2, #3, #4–#8, #10, #16, #17, #18. Pure moves + additive reads. Suite green at 393 + 5.
-2. **`Add export service with injection guard`** — #9, #14, #19. `export.py` + `test_export.py`.
-3. **`Add export-answers CLI and CI smoke`** — #11, #12, #13, #15.
-4. **`Close S9c TODOs and roadmap pointers`** — #20, #21.
+Target: four commits.
 
-Each commit: `uv run ruff check . && uv run ruff format --check . && uv run pytest` green before landing. Commit messages follow the seven rules; no attribution trailer.
+### 1. `Lift answer codec and add read-only export reads`
+
+Includes:
+
+* `answer_codec.py`;
+* strict stored decoder;
+* read-only `AccessMode`;
+* DAO read functions;
+* config pipe validator;
+* codec / DB tests.
+
+Existing answer-capture behavior remains green.
+
+### 2. `Add strict CSV export service`
+
+Includes:
+
+* `export.py`;
+* snapshot transaction;
+* config-generation refusal;
+* arm/data-integrity checks;
+* CSV guard;
+* staged output;
+* service tests.
+
+### 3. `Add export-answers CLI and CI smoke`
+
+Includes:
+
+* CLI command;
+* output-path handling;
+* keyfile option;
+* `.gitignore`;
+* CLI tests;
+* CI smoke.
+
+### 4. `Close S9c TODOs and roadmap pointers`
+
+Includes:
+
+* `TODOS.md`;
+* `ROADMAP.md`;
+* final spec/release pointers.
+
+Each commit:
+
+```text
+uv run ruff check .
+uv run ruff format --check .
+uv run pytest
+```
+
+must be green before landing.
 
 ---
 
 ## 12. Acceptance criteria
 
-- `uv run ehr-simulator export-answers configs/example_config.yaml configs/example_questions.yaml --db-path data/ehr_simulator.db` on a DB produced by the S9b e2e walk writes a file whose header is the §10 literal and whose rows open in LibreOffice with **no** cell rendered as a formula after a `free_notes` answer of `=1+1` and `-3` (§17 step 5).
-- The answers CSV contains no `name_normalized` value anywhere (`grep -c` of every clinician name = 0), with and without `--keyfile`.
-- `--keyfile` produces a `600` file with exactly the clinicians in the DB.
-- A DB with answers under two hashes exits 1 by default with the §8.3 message and exports with the flag, `config_hash` column distinguishing the rows.
-- Export runs while `serve` is up (§17 step 6) and the server keeps accepting answers during it.
-- `uv run pytest` ≥ 428 collected, all default-suite green on 3.11 and 3.12; `ruff check`/`format --check` clean; CI `DB smoke` header + mode assertions pass.
-- `git diff --color-moved` on commit 1 shows `answer_capture.py` → `answer_codec.py` as pure moves.
+### Functional export
+
+Running:
+
+```text
+uv run ehr-simulator export-answers \
+  configs/example_config.yaml \
+  configs/example_questions.yaml \
+  --db-path data/ehr_simulator.db
+```
+
+against an S9b walk produces the §6 header and deterministic tidy rows.
+
+### Formula guard
+
+After clinician free-text answers beginning with:
+
+```text
+=1+1
+-3 points
+@SUM(1,1)
+```
+
+the generated CSV contains guarded textual values and opening the freshly generated file in the pilot's spreadsheet application does not evaluate them as formulas.
+
+Automated tests cover the complete trigger set including LF and full-width prefixes.
+
+The acceptance criterion applies to the generated file, not an Excel-resaved derivative.
+
+### Identifying-name separation
+
+The answers exporter never queries `clinicians.name_normalized` unless `--keyfile` is requested.
+
+The answers CSV contains no mapping column and no value sourced from `clinicians.name_normalized`.
+
+This is deliberately narrower than claiming the CSV contains “no names”: clinician-entered free text may itself contain identifying text.
+
+**[review-fix R9]**
+
+### Keyfile
+
+With `--keyfile`:
+
+* output mode is exactly 0600 on supported systems;
+* rows contain only clinician ids represented in this export;
+* no unrelated clinician login mappings are included.
+
+### Config drift
+
+Changing a study/question config and then attempting export against rows from the previous generation exits 1.
+
+This applies when drift appears in any of:
+
+* answers;
+* progress;
+* arm assignments.
+
+There is no `--allow-mixed-config` success path.
+
+### Persisted corruption
+
+Manually corrupting an answer value produces exit 1 with an identifying cell location and no final CSV.
+
+Malformed persisted data is never silently represented as blank.
+
+### Arm integrity
+
+Changing an answer's denormalized `arm` so it disagrees with the locked assignment causes exit 1.
+
+### Live server
+
+Export can run while `serve` is active.
+
+A writer transaction left uncommitted does not block or leak into the read-only export snapshot under WAL.
+
+A committed change made by another connection after the export snapshot has begun is not partially observed by later exporter DAO reads.
+
+### Quality
+
+```text
+uv run pytest
+uv run pytest -m e2e
+uv run ruff check .
+uv run ruff format --check .
+```
+
+all pass.
+
+No exact total pytest collection number is an acceptance criterion; behavior is.
 
 ---
 
 ## 13. Conventions
 
-- **Service decides, CLI reports.** `cli.py` contains no branch on export content; every refusal is an `ExportError` / `OperatorError` raised by the service before any file is opened for writing. Order in `write_csv`: validate → build frame → **then** `open(out, "x")` (or `"w"` under `--force`) — `"x"` makes the no-overwrite rule an OS guarantee, not a `Path.exists()` race.
-- **Guard at the boundary.** `guard_cell` is applied in `write_csv`, once, to every cell. `ExportFrame.rows` are un-guarded so tests compare against stored values, and so S10 can consume `build_export` in-process without CSV artefacts.
-- **No pandas in the write path** (§8.2). Reading back with `dtype=str, keep_default_na=False` is the only sanctioned pandas use, in tests.
-- **Read-only means read-only.** `AccessMode.READ_ONLY` is passed from `cli.py`; test #35 locks that an `INSERT` fails on such a connection, and test #21 locks that `clinicians` is not even queried without `--keyfile`.
-- **No new access-modifier changes.** Everything lifted in #2 keeps its name and its leading-underscore status; `answer_capture.py` re-exports what it already exported.
-- **Timestamps as stored.** `completed_at` and (in the keyfile) nothing else; the export does not reformat SQLite's `CURRENT_TIMESTAMP` strings. `ts_recorded` is fetched (it is in `AnswerRow` for S10) but **not** exported — one column per question is the contract; per-question timestamps would double the width. §15.
+### Service decides, CLI reports
+
+`cli.py` does not decide:
+
+* which rows belong in the export;
+* whether drift is acceptable;
+* whether stored answers are valid;
+* which arm wins;
+* how incomplete walks are represented.
+
+Those belong to `export.py`.
+
+### Validate before file output
+
+Research data is:
+
+1. read;
+2. integrity-checked;
+3. decoded;
+4. shaped;
+5. reported;
+
+before final output installation begins.
+
+### Explicit snapshot
+
+Never use:
+
+```python
+with conn:
+```
+
+as shorthand for “all SELECTs share a snapshot.”
+
+The snapshot begins with explicit SQL `BEGIN`.
+
+### Strict at research boundaries, lenient at UI boundaries
+
+Browser pre-fill may retain the existing forgiving decoder.
+
+Export and future analysis consumers use strict persisted-value decoding.
+
+### Guard at the file boundary
+
+`ExportFrame` is semantic data.
+
+`guard_cell` belongs only in CSV serialization so in-process analysis code never sees export-escape artifacts.
+
+### No pandas in the write path
+
+No DataFrame construction or implicit type inference is used to create the export.
+
+Pandas is allowed in tests and downstream analysis when called with explicit string-preserving options.
+
+### Read-only means read-only
+
+Export does not migrate, checkpoint, repair or normalize the source DB.
+
+A database requiring repair/migration is refused.
+
+### Timestamps are serialized explicitly
+
+`completed_at` is received as a Python `datetime` under `PARSE_DECLTYPES` and serialized explicitly to the documented CSV format.
+
+Do not rely on `str()` accidentally matching SQLite formatting.
+
+**[review-fix R10]**
+
+### `ts_recorded` remains unexported
+
+`AnswerRow` may include `ts_recorded` for S10/future work, but S9c does not add per-question timestamp columns.
 
 ---
 
-## 14. Open decisions deferred to later sessions / TODOs to file
+## 14. Deferred decisions / TODOs
 
-- **S10: events export.** Dwell time, `advance.blocked` counts and `answer.upsert` edit counts live in `events`; S10 reads the DB directly or adds `export-events`. `AnswerRow.ts_recorded` is already fetched for it.
-- **S10/S12: wide per-pair pivot.** `pd.read_csv(...).pivot(index=["patient_id","clinician_id"], columns="t_index", values=[...])` reproduces the ROADMAP's original S9c shape from this file; ship it as a helper in the S12 analysis notebook, not as a second export format.
-- **S11: `arm` column round-trip regression** — test #11 already asserts the column; S11's spec adds the `ai` value case and the `arm_source` question (export it? today: no).
-- **Per-question `ts_recorded` columns** (`<q>_ts`) — only if an analysis needs within-timepoint ordering that `events` cannot give.
-- **`--patients P1,P2` / `--clinician NAME` filters** — trivial to add to `ExportOptions`; wait for a request.
-- **BOM opt-in (`--excel`)** for double-click-open on Windows — §6.3 chose bare UTF-8; revive if a collaborator hits mojibake.
-- **Windows keyfile permissions** — §5.1 refuses; an ACL-based equivalent is out of scope for a Linux/macOS pilot.
+### S10 — events export
+
+Dwell time, blocked-advance counts and edit counts remain in `events`.
+
+S10 may query the DB directly or introduce `export-events`.
+
+### Raw mixed-generation recovery export
+
+If real pilot operations require recovery of a DB spanning config generations, implement a separate long-form/raw export that does not decode values through the live question model.
+
+Do not add an override to the tidy interpreted exporter.
+
+### Wide per-pair pivot
+
+Downstream:
+
+```python
+pd.read_csv(...).pivot(...)
+```
+
+can create `{question_id}_t{timepoint}` analysis columns.
+
+No second S9c export format.
+
+### S11 — `arm_source`
+
+Revisit whether the analysis CSV should include:
+
+```text
+arm_source
+```
+
+once assignments can come from both phase-1 stub and phase-2 randomization.
+
+S9c validates/fetches assignment provenance but exports `arm` only.
+
+### Per-question `ts_recorded`
+
+Add `<question>_ts` only if an analysis requires within-timepoint answer timing and events cannot provide it.
+
+### Filters
+
+Potential future flags:
+
+```text
+--patients
+--clinician-id
+```
+
+Wait for a concrete use case.
+
+Do not add filtering by clinician login name to the answers export path.
+
+### Excel-specific output
+
+Bare UTF-8 remains the default.
+
+An opt-in Excel-oriented format/BOM may be added only if collaborators encounter an actual interoperability problem.
+
+### Windows keyfile ACLs
+
+Exact secure Windows ACL behavior is outside the pilot scope.
+
+S9c refuses `--keyfile` where its 0600-equivalent promise cannot be implemented and verified.
 
 ---
 
-## 15. What Session 9c does NOT lock
+## 15. Decisions S9c does lock
 
-- **The export shape vs the ROADMAP's pivot.** `plan.md:29` (and CLAUDE.md) specify one row per `(patient_id, clinician_name, timepoint)` with one column per question; the ROADMAP's S9c block (written before S9a fixed the value contract) specifies one row per pair with `{question_id}_t{timepoint}` columns. S9c ships the `plan.md` shape because: (a) it is the owner's stated requirement and the one CLAUDE.md repeats; (b) it is tidy — a study with 3 timepoints × 7 questions is 14 columns, not 28, and a Geneva study with 24 timepoints is 31 columns, not 175; (c) S10's divergence view groups by `(patient, t_index, arm)`, which is a `groupby` on this shape and a `melt` on the other; (d) the pivot is one pandas call away (§14). **This is a premise-level decision for the owner** — see the review report.
-- **`clinician_id` as the pseudonym.** It is `sha256(name_normalized)[:16]`, deterministic and *not* salted — anyone with a name list can re-identify by hashing (S6 design). The keyfile is therefore a convenience, not the only reverse path. A salted or random pseudonym is a D9/IRB policy question (Phase-2 gate), not an export-format one; the export column will not change shape if the id scheme does.
-- **Header-only export on an empty DB is exit 0.** A refusal would make the CI smoke need seeded data; an empty dataset is a legitimate answer to "what has been recorded". Reversible in one `if`.
-- **`'` as the guard prefix.** OWASP's recommendation; the alternative (a leading space) is invisible in a spreadsheet and gets trimmed by many readers.
-- **No `clinician_name` column, ever, in the answers file — not even behind a flag.** The two-file design is the whole point; a flag would be the first thing an analyst in a hurry reaches for.
+### Tidy export shape
+
+One row per:
+
+```text
+patient_id × clinician_id × timepoint
+```
+
+with one column per question.
+
+Reasons:
+
+1. matches `plan.md`;
+2. matches `CLAUDE.md`;
+3. stays narrow as the number of timepoints grows;
+4. supports S10 grouping directly;
+5. wide-per-pair form is a downstream pivot.
+
+The ROADMAP is updated to point here.
+
+### Interpreted export is live-generation only
+
+This session does **not** attempt best-effort interpretation of historical question schemas.
+
+Foreign generation = refusal.
+
+### `clinician_id` is the exported pseudonym
+
+The existing id is deterministic and unsalted.
+
+S9c does not claim that this makes re-identification cryptographically impossible; changing the pseudonym scheme is a D9/IRB-policy decision.
+
+The export's concrete guarantee is:
+
+> `clinicians.name_normalized` is not read unless the keyfile is explicitly requested, and is never written into the answers CSV.
+
+### Empty DB succeeds
+
+A valid migrated DB with no exportable walks produces a header-only CSV and exit 0.
+
+“What has been recorded?” may legitimately have the answer “nothing.”
+
+### No clinician-name flag on the answers CSV
+
+There is deliberately no:
+
+```text
+--include-clinician-name
+```
+
+The mapping remains a separate file.
+
+### Integrity errors are not repaired during export
+
+The exporter never silently:
+
+* chooses one config generation;
+* chooses one arm source;
+* drops unknown question rows;
+* converts malformed values to blank;
+* clips an invalid frontier;
+* moves answers to another timepoint.
+
+Repair, if ever required, is a separate explicit operator workflow.
 
 ---
 
-## 16. What already exists (carried into S9c)
+## 16. Existing components reused
 
-- `answers.value` string contract (S9a §6) and `deserialize_answer` — moved, not rewritten.
-- `progress.completed_at` + `unlocked_t_index` (S9b) — the row universe and the `completed_at` column.
-- `arm_assignments` (S6, `phase1_stub` → `no_ai`) — the `arm` column; S11 fills in `ai`.
-- `compute_config_hash_from_models` (S5) — the live hash the refusal compares against.
-- `resolve_db_path` (S6), `assert_schema_current` (S9b), `setup_logging` — reused verbatim by the new command.
-- `test_cli.py::_walked_db` — lifted to `conftest.py::seed_walked_db` and reused by `test_export.py`.
+* S9a answer storage contract;
+* existing web `deserialize_answer` behavior for pre-fill;
+* `progress.completed_at`;
+* `progress.unlocked_t_index`;
+* `arm_assignments`;
+* `compute_config_hash_from_models`;
+* `resolve_db_path`;
+* schema-current assertion;
+* logging setup;
+* existing walked-DB fixture pattern.
+
+The codec extraction changes dependency direction, not browser semantics.
 
 ---
 
-## 17. Verification (end-to-end)
+## 17. Verification — end to end
 
-1. `uv sync && uv run pytest` — ≥ 428 collected, default suite green.
-2. `uv run ehr-simulator migrate --db-path /tmp/s9c/test.db` then `uv run ehr-simulator export-answers configs/example_config.yaml configs/example_questions.yaml --db-path /tmp/s9c/test.db --out /tmp/s9c/empty.csv` → exit 0, `0 rows`, header equals §10 literal.
-3. `uv run ehr-simulator serve --config configs/example_config.yaml --questions configs/example_questions.yaml --db-path /tmp/s9c/test.db`; log in as `Dr. Export`; walk `synth_001` to completion answering `free_notes` with `=1+1` at t=0 and `-3 points` at t=1; walk `synth_002` to t=1 only.
-4. With the server **still running**: `export-answers … --db-path /tmp/s9c/test.db --out /tmp/s9c/walk.csv --keyfile /tmp/s9c/k.csv` → exit 0; stdout reports 5 rows (3 + 2), 1 complete walk, 1 in progress; `stat -c %a /tmp/s9c/k.csv` = `600`; `grep -c "dr. export" /tmp/s9c/walk.csv` = 0; `grep -c "dr. export" /tmp/s9c/k.csv` = 1.
-5. Open `walk.csv` in LibreOffice Calc: the two `free_notes` cells display `'=1+1` and `'-3 points` as text; no cell evaluates.
-6. Back in the browser, answer a question at `synth_002` t=1 during step 4's run (or immediately after) → 200; the server never logged `database is locked`.
-7. Edit `configs/example_questions.yaml` (change a prompt), restart the server, answer one more question; re-run export → exit 1 with the §8.3 message; add `--allow-mixed-config` → exit 0, `config_hash` column shows two values.
-8. `uv run pytest -m e2e` — 8 Playwright tests still green (no UI change, sanity).
+### 1. Automated suite
+
+```text
+uv sync
+uv run pytest
+uv run ruff check .
+uv run ruff format --check .
+```
+
+All green.
+
+### 2. Empty export
+
+```text
+uv run ehr-simulator migrate --db-path /tmp/s9c/test.db
+
+uv run ehr-simulator export-answers \
+  configs/example_config.yaml \
+  configs/example_questions.yaml \
+  --db-path /tmp/s9c/test.db \
+  --out /tmp/s9c/empty.csv
+```
+
+Expected:
+
+* exit 0;
+* stdout says `0 rows`;
+* file contains exactly the header.
+
+### 3. Create live study data
+
+Start:
+
+```text
+uv run ehr-simulator serve \
+  --config configs/example_config.yaml \
+  --questions configs/example_questions.yaml \
+  --db-path /tmp/s9c/test.db
+```
+
+Log in as a test clinician.
+
+Walk:
+
+* `synth_001` to completion;
+* enter `=1+1` in free notes at one timepoint;
+* enter `-3 points` at another;
+* walk `synth_002` only part-way.
+
+### 4. Export while server remains running
+
+```text
+uv run ehr-simulator export-answers \
+  configs/example_config.yaml \
+  configs/example_questions.yaml \
+  --db-path /tmp/s9c/test.db \
+  --out /tmp/s9c/walk.csv \
+  --keyfile /tmp/s9c/k.keyfile.csv
+```
+
+Expected:
+
+* exit 0;
+* counts match unlocked rows;
+* one complete and one in-progress walk;
+* keyfile mode = `600`;
+* keyfile contains the one exported clinician mapping;
+* answers CSV contains no value sourced from `name_normalized`.
+
+### 5. Spreadsheet verification
+
+Open the freshly generated `walk.csv`.
+
+Verify free-text cells display textual guarded values and no formula is evaluated.
+
+This is an initial-open check, not a promise about save/re-open behavior after spreadsheet transformation.
+
+### 6. Live writer verification
+
+While the server remains open:
+
+* continue recording answers;
+* confirm no `database is locked` failure caused by export.
+
+Automated test separately proves snapshot isolation using two SQLite connections.
+
+### 7. Config drift verification
+
+Change a prompt or other hash-relevant config value.
+
+Attempt export against the existing DB.
+
+Expected:
+
+```text
+exit 1
+Error: database contains records from another study configuration...
+```
+
+No final CSV.
+
+There is no override flag.
+
+### 8. Corrupt answer verification
+
+In a disposable test DB, manually replace a multi-select answer with invalid JSON.
+
+Export.
+
+Expected:
+
+* exit 1;
+* error identifies patient / clinician / timepoint / question;
+* raw stored value is not printed;
+* no final CSV.
+
+### 9. Arm mismatch verification
+
+In a disposable DB, manually change one `answers.arm`.
+
+Export.
+
+Expected:
+
+* exit 1;
+* arm mismatch named;
+* no final CSV.
+
+### 10. Browser regression
+
+```text
+uv run pytest -m e2e
+```
+
+Existing browser tests remain green.
 
 ---
 
 ## 18. Review history
 
-Filled by `/plan-eng-review`. Each accepted fix is annotated `[review-fix R<N>]` inline in the spec body; this table cross-references them.
-
-| Review-fix | Original design | Resolved design |
-|---|---|---|
-| — | — | — |
+| Review-fix | Original design                                                                                    | Revised design                                                                                              |
+| ---------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| R1         | `--allow-mixed-config` attempted to merge foreign answer generations into tidy rows.               | Interpreted export refuses every foreign answer/progress/assignment hash; raw recovery export deferred.     |
+| R2         | Export reused UI `deserialize_answer`, which maps malformed multi-select storage to `[]`.          | Add strict persisted-value decoder; corruption fails export.                                                |
+| R3         | `with conn:` described as one SQLite read snapshot.                                                | Explicit `BEGIN` / `ROLLBACK`; behavioral two-connection snapshot regression.                               |
+| R4         | Arm assignment won on mismatch and export continued with a warning.                                | Mismatch is a data-integrity refusal.                                                                       |
+| R5         | `--only-complete` indexed `progress[pair]` even for answer-only pairs.                             | Missing-progress pairs are simply incomplete and omitted.                                                   |
+| R6         | Formula triggers covered `=+-@`, TAB and CR only.                                                  | Add LF and full-width variants; clarify mitigation limits.                                                  |
+| R7         | CSV/keyfile writes had an underspecified “nothing written on refusal” guarantee.                   | Validate first, stage files, create keyfile private from first byte, install only after success.            |
+| R8         | Live-write test proposed an uncommitted `answers.upsert`, but that DAO commits internally.         | Test uses explicit SQL in an uncommitted writer transaction.                                                |
+| R9         | Privacy wording implied exported content could contain no clinician names at all.                  | Guarantee is specifically that the login-name mapping is not read/exported; free text remains user content. |
+| R10        | `completed_at` was described as exported “as stored,” though SQLite conversion returns `datetime`. | Explicit canonical timestamp serialization.                                                                 |
 
 ---
 
-## Spec destination
 
-`specs/session-09c-csv-export.md` (matches the `session-NN-name.md` convention). The pre-review draft is overwritten in place by the review pass.
