@@ -179,9 +179,11 @@ Scope:
 
 **Test inventory:** ≥5 tests. `/advance` rejects mismatched `expected_timepoint`; cannot advance with unanswered question; click-when-disabled emits event; remaining-count label correctness.
 
-#### Session 9c — CSV export
+#### Session 9c — CSV export [SHIPPED]
 
-Scope:
+**Shipped per `specs/session-09c-csv-export.md`** — the spec supersedes the draft scope below (shape changed to one row per `patient_id × clinician_id × timepoint` with one column per question; strict persisted-value decoding; config-generation refusal; formula-injection guard; id→name keyfile gated behind `--keyfile`). Deferred items (raw mixed-generation recovery export, wide-pair pivot, `arm_source` column) live in spec §14. CI smoke in `.github/workflows/ci.yml`; `export-answers`, `--only-complete`, `--keyfile`, `--force` in the CLI.
+
+Scope (historical draft):
 - `ehr-simulator export-answers <study_config.yaml>`: wide pivot, one row per `(patient_id, clinician_id)`, columns `{question_id}_t{timepoint}` plus `arm`.
 - Multi-select answers pipe-delimited; UTF-8; header row first.
 - **Cell-injection guard:** any cell whose first character is in `{=, +, -, @, \t, \r}` is prefixed with `'`. **[REGRESSION]** test required.
