@@ -822,6 +822,94 @@ def test_write_keyfile_refuses_non_posix(monkeypatch: pytest.MonkeyPatch, tmp_pa
         write_keyfile((("id16", "Alice"),), tmp_path / "kf.csv")
 
 
+def test_write_export_keyfile_preflight_failure_installs_nothing(
+    study,
+    questions,
+    ro_db,
+    live_hash,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os as real_os
+
+    from ehr_simulator import export as export_module
+
+    class _NonPosixOS:
+        name = "nt"
+
+        def __getattr__(self, item: str) -> object:
+            return getattr(real_os, item)
+
+    bundle = build(
+        study,
+        questions,
+        ro_db,
+        live_hash=live_hash,
+        include_keyfile=True,
+    )
+    out = tmp_path / "answers.csv"
+    keyfile = tmp_path / "clinicians.keyfile.csv"
+
+    monkeypatch.setattr(export_module, "os", _NonPosixOS())
+
+    with pytest.raises(ExportError, match="keyfile"):
+        write_export(bundle, out=out, keyfile=keyfile)
+
+    assert not out.exists()
+    assert not keyfile.exists()
+
+
+def test_write_export_force_preserves_existing_finals_if_staging_fails(
+    study,
+    questions,
+    ro_db,
+    live_hash,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ehr_simulator import export as export_module
+
+    bundle = build(
+        study,
+        questions,
+        ro_db,
+        live_hash=live_hash,
+        include_keyfile=True,
+    )
+    out = tmp_path / "answers.csv"
+    keyfile = tmp_path / "clinicians.keyfile.csv"
+    out.write_text("old answers", encoding="utf-8")
+    keyfile.write_text("old keyfile", encoding="utf-8")
+
+    real_stage = export_module._stage_content
+    calls = 0
+
+    def fail_second_stage(content, final, what, *, require_0600):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise PermissionError("cannot stage keyfile")
+        return real_stage(
+            content,
+            final,
+            what,
+            require_0600=require_0600,
+        )
+
+    monkeypatch.setattr(export_module, "_stage_content", fail_second_stage)
+
+    with pytest.raises(ExportError, match="cannot stage keyfile"):
+        write_export(
+            bundle,
+            out=out,
+            keyfile=keyfile,
+            force=True,
+        )
+
+    assert out.read_text(encoding="utf-8") == "old answers"
+    assert keyfile.read_text(encoding="utf-8") == "old keyfile"
+
+
 # ---------------------------------------------------------------------------
 # Snapshot semantics + import hygiene (items 50-51)
 # ---------------------------------------------------------------------------

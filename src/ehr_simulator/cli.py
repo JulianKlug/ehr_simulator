@@ -37,6 +37,7 @@ over for the ``serve`` command.
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -54,7 +55,7 @@ app_typer: typer.Typer = typer.Typer(
 
 def main(argv: list[str] | None = None) -> None:
     """Entry point. Preserves the S2 argparse signature for back-compat tests."""
-    app_typer(args=argv, standalone_mode=False)
+    return app_typer(args=argv, standalone_mode=False)
 
 
 # ---------------------------------------------------------------------------
@@ -430,7 +431,7 @@ def reset_progress_cmd(
     ),
 ) -> None:
     """Rewind a clinician's walk of one patient (recovery for a mis-click on Next)."""
-    from ehr_simulator.cli_support import ResetError, assert_schema_current, reset_progress
+    from ehr_simulator.cli_support import OperatorError, assert_schema_current, reset_progress
     from ehr_simulator.config import load_study_config
     from ehr_simulator.db import connect, resolve_db_path
     from ehr_simulator.logging import setup_logging
@@ -457,7 +458,7 @@ def reset_progress_cmd(
             to_t_index=to_t_index,
             timepoints=list(study.timepoints_minutes),
         )
-    except ResetError as exc:
+    except OperatorError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     finally:
@@ -508,7 +509,7 @@ def export_answers(
     from datetime import UTC, datetime
 
     from ehr_simulator import export
-    from ehr_simulator.cli_support import assert_schema_current
+    from ehr_simulator.cli_support import OperatorError, assert_schema_current
     from ehr_simulator.config import (
         compute_config_hash_from_models,
         load_questions,
@@ -527,38 +528,38 @@ def export_answers(
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
-    live_hash = compute_config_hash_from_models(study, questions)
-    target_db = resolve_db_path(study, cli_override=db_path)
-    if not target_db.exists():
-        typer.echo(f"Error: database not found: {target_db}", err=True)
-        raise typer.Exit(code=1)
-
-    conn = connect(target_db, access=AccessMode.READ_ONLY)
     bundle: export.ExportBundle
     try:
-        assert_schema_current(conn)
-        bundle = export.build_export(
-            conn,
-            study=study,
-            questions=questions,
-            live_hash=live_hash,
-            options=export.ExportOptions(only_complete=only_complete),
-            include_keyfile=keyfile is not None,
-        )
-        if out is None:
-            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-            out = target_db.parent / "exports" / f"answers_{stamp}.csv"
-        export.write_export(
-            bundle,
-            out=out,
-            keyfile=keyfile,
-            force=force,
-        )
-    except (export.ExportError, ValueError, FileNotFoundError) as exc:
+        live_hash = compute_config_hash_from_models(study, questions)
+        target_db = resolve_db_path(study, cli_override=db_path)
+        if not target_db.exists():
+            raise export.ExportError(f"database not found: {target_db}")
+
+        conn = connect(target_db, access=AccessMode.READ_ONLY)
+        try:
+            assert_schema_current(conn)
+            bundle = export.build_export(
+                conn,
+                study=study,
+                questions=questions,
+                live_hash=live_hash,
+                options=export.ExportOptions(only_complete=only_complete),
+                include_keyfile=keyfile is not None,
+            )
+            if out is None:
+                stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+                out = target_db.parent / "exports" / f"answers_{stamp}.csv"
+            export.write_export(
+                bundle,
+                out=out,
+                keyfile=keyfile,
+                force=force,
+            )
+        finally:
+            conn.close()
+    except (ConfigError, export.ExportError, OperatorError, OSError, sqlite3.Error) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
-    finally:
-        conn.close()
 
     report = bundle.frame.report
     get_logger().info(

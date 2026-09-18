@@ -836,6 +836,7 @@ def test_cli_export_answers_keyfile_refused_on_non_posix(
 
     monkeypatch.setattr(export_module, "os", _NonPosixOS())
     keyfile = tmp_path / "clinicians.keyfile.csv"
+    out = tmp_path / "answers.csv"
 
     result = runner.invoke(
         cli.app_typer,
@@ -843,7 +844,7 @@ def test_cli_export_answers_keyfile_refused_on_non_posix(
             study_fixture_dir,
             tmp_db_path,
             "--out",
-            str(tmp_path / "answers.csv"),
+            str(out),
             "--keyfile",
             str(keyfile),
         ),
@@ -851,7 +852,36 @@ def test_cli_export_answers_keyfile_refused_on_non_posix(
 
     assert result.exit_code == 1
     assert "keyfile" in result.stderr
+    assert not out.exists()
     assert not keyfile.exists()
+
+
+def test_cli_export_answers_os_failure_is_exit_1(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ehr_simulator import export as export_module
+
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    out = tmp_path / "answers.csv"
+
+    def fail_write(*_args, **_kwargs):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(export_module, "write_export", fail_write)
+
+    result = runner.invoke(
+        cli.app_typer,
+        _export_args(study_fixture_dir, tmp_db_path, "--out", str(out)),
+    )
+
+    assert result.exit_code == 1
+    assert "Error: permission denied" in result.stderr
+    assert not out.exists()
 
 
 def test_cli_export_answers_invisible_to_uncommitted_writer(

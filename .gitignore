@@ -2,8 +2,8 @@
 docs/data-contract.md.tmp
 logs/
 data/
-data/backups/
-data/exports/
+exports/
+*.keyfile.csv
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

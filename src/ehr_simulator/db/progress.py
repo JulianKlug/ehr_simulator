@@ -50,17 +50,19 @@ def _bump(app_state: Any) -> None:
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
 
 
-def fetch_all(conn: sqlite3.Connection) -> tuple[Progress, ...]:
-    """Every walk frontier, ordered by (clinician_id, patient_id).
+def fetch_all(conn: sqlite3.Connection) -> dict[tuple[str, str], Progress]:
+    """Every walk frontier keyed by ``(clinician_id, patient_id)``.
 
-    S9c read path: the export needs all rows (one per pair) inside its
-    snapshot transaction; the key is the pair, so the order is just a
-    stable one.
+    Query order is deterministic, so dict insertion order is deterministic too.
     """
     rows = conn.execute(
         f"SELECT {_SELECT_COLUMNS} FROM progress ORDER BY clinician_id, patient_id"
     ).fetchall()
-    return tuple(_row_to_progress(row) for row in rows)
+    result: dict[tuple[str, str], Progress] = {}
+    for row in rows:
+        item = _row_to_progress(row)
+        result[(item.clinician_id, item.patient_id)] = item
+    return result
 
 
 def fetch(conn: sqlite3.Connection, *, clinician_id: str, patient_id: str) -> Progress | None:

@@ -984,11 +984,10 @@ def test_progress_fetch_all_keyed_by_pair(db) -> None:
         config_hash=S9C_HASH,
     )
     rows = progress.fetch_all(db)
-    assert [(r.clinician_id, r.patient_id) for r in rows] == [(a, "p2"), (b, "p1")]
-    assert all(isinstance(r.unlocked_t_index, int) for r in rows)
-    by_pair = {(r.clinician_id, r.patient_id): r for r in rows}
-    assert by_pair[(a, "p2")].completed_at is None
-    assert by_pair[(b, "p1")].completed_at is not None
+    assert list(rows) == [(a, "p2"), (b, "p1")]
+    assert all(isinstance(row.unlocked_t_index, int) for row in rows.values())
+    assert rows[(a, "p2")].completed_at is None
+    assert rows[(b, "p1")].completed_at is not None
 
 
 def test_arm_assignments_fetch_all_returns_arm_source_and_hash(db) -> None:

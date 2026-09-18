@@ -26,6 +26,7 @@ operator-facing message that names the failure *shape* and coordinates
 
 from __future__ import annotations
 
+import contextlib
 import csv
 import io
 import os
@@ -70,10 +71,9 @@ _KEYFILE_HEADER: tuple[str, str] = ("clinician_id", "name_normalized")
 
 
 class ExportError(ValueError):
-    """The export cannot be produced; nothing was written and nothing was logged.
+    """Research export cannot be produced faithfully.
 
-    The message is operator-facing (it goes to stderr) and names what is
-    wrong without revealing free-text answer content.
+    Messages are operator-facing and never reveal free-text answer content.
     """
 
 
@@ -169,7 +169,7 @@ def build_export(
     conn.execute("BEGIN")
     try:
         answer_rows = tuple(answers.fetch_all(conn))
-        progress_rows = tuple(progress.fetch_all(conn))
+        progress_rows = tuple(progress.fetch_all(conn).values())
         assignment_rows = tuple(arm_assignments.fetch_all(conn))
         return _build_under_snapshot(
             conn,
@@ -305,12 +305,14 @@ def _build_under_snapshot(
                 f"no arm assignment for patient {pair[1]!r}, clinician {pair[0]}; "
                 "every exported pair must have locked an arm at session start"
             )
-        for row in answer_rows:
-            if (row.clinician_id, row.patient_id) == pair and row.arm != arms[pair]:
-                raise ExportError(
-                    f"arm mismatch for patient {pair[1]!r}, clinician {pair[0]}: assignment is "
-                    f"{arms[pair]!r} but an answer row carries {row.arm!r}"
-                )
+
+    for row in answer_rows:
+        pair = (row.clinician_id, row.patient_id)
+        if row.arm != arms[pair]:
+            raise ExportError(
+                f"arm mismatch for patient {pair[1]!r}, clinician {pair[0]}: assignment is "
+                f"{arms[pair]!r} but an answer row carries {row.arm!r}"
+            )
 
     # -- 5) Strict decode of every stored cell ----------------------------
     decoded: dict[tuple[str, str, int, str], str] = {}
@@ -432,45 +434,81 @@ def write_export(
     keyfile: Path | None = None,
     force: bool = False,
 ) -> None:
-    """Install the export at *out* (and the keyfile at *keyfile*, if any).
+    """Stage every requested artifact before installing either final path.
 
-    Preflight (before any directory is created and any staging begins):
-
-    - ``out`` and ``keyfile`` must not resolve to the same path;
-    - a target that exists is refused unless *force*;
-    - a target that is a **directory** is always refused (replacement of
-      a directory is not supported, even with *force*).
-
-    With *force*, existing final files are unlinked *first*, then the
-    writers install via hard link (no-clobber): two concurrent exports
-    cannot both claim the same name.
+    Normal validation/refusal cannot create or replace a final output.
+    Without ``force`` installation is no-clobber. With ``force``, a fully
+    staged file atomically replaces its existing final path.
     """
     out = Path(out)
     keyfile = Path(keyfile) if keyfile is not None else None
-    if keyfile is not None and out.resolve() == keyfile.resolve():
-        raise ExportError(
-            "--keyfile and --out resolve to the same path; the answers CSV and the keyfile "
-            "are different artifacts"
-        )
-    for target in _targets(out, keyfile):
-        if target.is_dir():
-            raise ExportError(f"refusing to replace a pre-existing directory: {target}")
-    finals = [t for t in _targets(out, keyfile) if t.exists()]
-    if finals and not force:
-        listed = ", ".join(str(t) for t in finals)
-        raise ExportError(f"refusing to overwrite existing output: {listed}; re-run with --force")
-    if force:
-        for t in finals:
-            t.unlink()
-    for target in _targets(out, keyfile):
-        target.parent.mkdir(parents=True, exist_ok=True)
-    if keyfile is not None and bundle.keyfile_rows is None:
-        raise ExportError(
-            "--keyfile was passed but build_export was called without include_keyfile=True"
-        )
-    write_csv(bundle.frame, out)
-    if keyfile is not None:
-        write_keyfile(bundle.keyfile_rows, keyfile)
+
+    try:
+        if keyfile is not None and out.resolve() == keyfile.resolve():
+            raise ExportError(
+                "--keyfile and --out resolve to the same path; the answers CSV and the keyfile "
+                "are different artifacts"
+            )
+
+        if keyfile is not None:
+            if bundle.keyfile_rows is None:
+                raise ExportError(
+                    "--keyfile was passed but build_export was called without include_keyfile=True"
+                )
+            _validate_keyfile_rows(bundle.keyfile_rows)
+
+        targets = _targets(out, keyfile)
+        for target in targets:
+            if target.is_dir():
+                raise ExportError(f"refusing to replace a pre-existing directory: {target}")
+
+        finals = [target for target in targets if target.exists()]
+        if finals and not force:
+            listed = ", ".join(str(target) for target in finals)
+            raise ExportError(
+                f"refusing to overwrite existing output: {listed}; re-run with --force"
+            )
+
+        # Parent creation is preflight. No final output path is touched yet.
+        for target in targets:
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+        rendered: list[tuple[Path, str, str, bool]] = [
+            (out, _render_csv(bundle.frame), "csv", False),
+        ]
+        if keyfile is not None:
+            rendered.append(
+                (
+                    keyfile,
+                    _render_keyfile(bundle.keyfile_rows),
+                    "keyfile",
+                    True,
+                )
+            )
+
+        staged: list[tuple[Path, Path, str]] = []
+        try:
+            # Stage and validate every requested artifact first.
+            for final, data, what, require_0600 in rendered:
+                staged_path = _stage_content(
+                    data,
+                    final,
+                    what,
+                    require_0600=require_0600,
+                )
+                staged.append((staged_path, final, what))
+
+            # Only after all staging succeeds may finals be installed.
+            for staged_path, final, what in staged:
+                _install_staged(staged_path, final, what, force=force)
+        finally:
+            for staged_path, _final, _what in staged:
+                _cleanup_stage(staged_path)
+
+    except ExportError:
+        raise
+    except OSError as exc:
+        raise ExportError(f"failed to write export: {exc}") from exc
 
 
 def _targets(out: Path, keyfile: Path | None) -> list[Path]:
@@ -481,68 +519,165 @@ def _targets(out: Path, keyfile: Path | None) -> list[Path]:
 
 
 def write_csv(frame: ExportFrame, path: Path) -> None:
-    """Render *frame* as the answers CSV and no-clobber-install it at *path*."""
-    buf = io.StringIO()
-    writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow([guard_cell(c) for c in frame.header])
-    for row in frame.rows:
-        writer.writerow([guard_cell(c) for c in row])
-    _stage_and_install(buf.getvalue(), Path(path), "csv")
+    """Render and no-clobber-install one answers CSV."""
+    _write_one(
+        _render_csv(frame),
+        Path(path),
+        "csv",
+        require_0600=False,
+    )
 
 
 def write_keyfile(rows: tuple[tuple[str, str], ...], path: Path) -> None:
-    """Write the id→name *rows* (0600, POSIX) and no-clobber-install at *path*.
+    """Render and no-clobber-install one POSIX mode-0600 keyfile."""
+    _validate_keyfile_rows(rows)
+    _write_one(
+        _render_keyfile(rows),
+        Path(path),
+        "keyfile",
+        require_0600=True,
+    )
 
-    An empty keyfile is legitimate when the export contains no pairs
-    (the header is still written).
-    """
+
+def _render_csv(frame: ExportFrame) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow([guard_cell(cell) for cell in frame.header])
+    for row in frame.rows:
+        writer.writerow([guard_cell(cell) for cell in row])
+    return buf.getvalue()
+
+
+def _render_keyfile(rows: tuple[tuple[str, str], ...]) -> str:
+    buf = io.StringIO()
+    writer = csv.writer(buf, lineterminator="\n")
+    writer.writerow([guard_cell(cell) for cell in _KEYFILE_HEADER])
+    for clinician_id, name_normalized in rows:
+        writer.writerow(
+            [
+                guard_cell(clinician_id),
+                guard_cell(name_normalized),
+            ]
+        )
+    return buf.getvalue()
+
+
+def _validate_keyfile_rows(rows: tuple[tuple[str, str], ...]) -> None:
     if os.name != "posix":
         raise ExportError(
             f"cannot write keyfile on {os.name}: a mode-0600 guarantee for a name-to-id "
             "keyfile is not available on this platform; export without --keyfile"
         )
-    if len(rows) != len({c for c, _ in rows}):
+    if len(rows) != len({clinician_id for clinician_id, _ in rows}):
         raise ExportError(
             "duplicate clinician_id in keyfile rows; a keyfile maps each id exactly once"
         )
-    buf = io.StringIO()
-    writer = csv.writer(buf, lineterminator="\n")
-    writer.writerow([guard_cell(h) for h in _KEYFILE_HEADER])
-    for cid, name in rows:
-        writer.writerow([guard_cell(cid), guard_cell(name)])
-    _stage_and_install(buf.getvalue(), Path(path), "keyfile")
 
 
-def _stage_and_install(content: str, final: Path, what: str) -> None:
-    """Stage *content* mode-0600 in *final*'s directory, hard-link to *final*.
+def _write_one(
+    content: str,
+    final: Path,
+    what: str,
+    *,
+    require_0600: bool,
+) -> None:
+    try:
+        if final.is_dir():
+            raise ExportError(f"refusing to replace a pre-existing directory: {final}")
+        if final.exists():
+            raise ExportError(
+                f"refusing to overwrite existing {what}: {final}; re-run with --force"
+            )
 
-    The hard link is the install step: it fails with ``FileExistsError``
-    if *final* already exists (no-clobber, even under *force* after the
-    preflight unlink — two racing installs can't both claim the name).
-    The staged temp file is always cleaned up.
-    """
-    final.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(dir=str(final.parent)) as tmpdir:
-        tmp = Path(tmpdir) / ".stage"
-        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
-                handle.write(content)
-                handle.flush()
-                os.fsync(handle.fileno())
-            try:
-                os.link(tmp, final)
-            except FileExistsError as exc:
-                raise ExportError(
-                    f"refusing to overwrite existing {what}: {final}; re-run with --force"
-                ) from exc
-        finally:
-            if tmp.exists():
-                tmp.unlink()
-    final.chmod(0o600)
-    installed = stat.S_IMODE(final.stat().st_mode)
-    if installed != 0o600:
-        raise ExportError(
-            f"{what} was installed with mode {installed:#o}, not 0600; refusing to deliver it"
+        final.parent.mkdir(parents=True, exist_ok=True)
+        staged = _stage_content(
+            content,
+            final,
+            what,
+            require_0600=require_0600,
         )
-    return None
+        try:
+            _install_staged(staged, final, what, force=False)
+        finally:
+            _cleanup_stage(staged)
+
+    except ExportError:
+        raise
+    except OSError as exc:
+        raise ExportError(f"failed to write {what}: {exc}") from exc
+
+
+def _stage_content(
+    content: str,
+    final: Path,
+    what: str,
+    *,
+    require_0600: bool,
+) -> Path:
+    """Write a completed sibling temp file without touching the final path."""
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{final.name}.",
+        suffix=".tmp",
+        dir=str(final.parent),
+    )
+    tmp = Path(tmp_name)
+
+    try:
+        if require_0600:
+            created_mode = stat.S_IMODE(os.fstat(fd).st_mode)
+            if created_mode != 0o600:
+                raise ExportError(
+                    f"{what} staging file has mode {created_mode:#o}, not 0600; "
+                    "refusing to write identifying data"
+                )
+
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as handle:
+            fd = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+
+        if require_0600:
+            staged_mode = stat.S_IMODE(tmp.stat().st_mode)
+            if staged_mode != 0o600:
+                raise ExportError(
+                    f"{what} staging file has mode {staged_mode:#o}, not 0600; "
+                    "refusing to write identifying data"
+                )
+
+        return tmp
+
+    except BaseException:
+        if fd != -1:
+            os.close(fd)
+        _cleanup_stage(tmp)
+        raise
+
+
+def _install_staged(
+    staged: Path,
+    final: Path,
+    what: str,
+    *,
+    force: bool,
+) -> None:
+    """Install one fully staged artifact.
+
+    ``os.link`` gives no-clobber semantics. ``os.replace`` preserves the
+    old destination until the replacement is fully staged.
+    """
+    if force:
+        os.replace(staged, final)
+        return
+
+    try:
+        os.link(staged, final)
+    except FileExistsError as exc:
+        raise ExportError(
+            f"refusing to overwrite existing {what}: {final}; re-run with --force"
+        ) from exc
+
+
+def _cleanup_stage(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink(missing_ok=True)
