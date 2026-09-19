@@ -11,8 +11,10 @@ from __future__ import annotations
 import json
 import sqlite3
 
+import pytest
 from fastapi.testclient import TestClient
 
+from ehr_simulator.web import routes, timing_events
 from tests.conftest import answer_all_required, seed_progress
 
 PID = "synth_001"
@@ -128,6 +130,122 @@ def test_full_walk_ends_with_exit_finish(study_client: TestClient) -> None:
 
     exits = _exit_pairs(study_client)
     assert exits == [
+        (0.0, {"t_index": 0, "reason": "advance"}),
+        (60.0, {"t_index": 1, "reason": "advance"}),
+        (180.0, {"t_index": 2, "reason": "finish"}),
+    ]
+
+
+# ---------------------------------------------------------------------------
+# S10 fixes (data/s10_fixes.md): enter is a response fact, and a failed
+# ``timepoint.exit`` rolls the advance (or the finish) back atomically.
+# ---------------------------------------------------------------------------
+
+
+def test_failed_render_records_no_enter(
+    study_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The enter is written only after a successful render — a broken pane
+    leaves the event stream clean (no enter without its paired data view)."""
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("pane render exploded")
+
+    monkeypatch.setattr(routes, "_render_patient_view", _boom)
+    with pytest.raises(RuntimeError, match="pane render exploded"):
+        study_client.get(_view_url(0), follow_redirects=False)
+    assert _enter_pairs(study_client) == []
+    assert _exit_pairs(study_client) == []
+
+
+def test_failed_exit_event_rolls_back_the_advance(
+    study_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The ``advance.ok`` state move and its ``timepoint.exit`` ride one
+    transaction: the exit failing rolls the frontier back — the next attempt
+    retries from the unchanged frontier, and the failed attempt left no
+    half-advance behind."""
+
+    def _fail_exit(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("exit event lost")
+
+    monkeypatch.setattr(timing_events, "record_exit", _fail_exit)
+    answer_all_required(study_client, PID, 0)
+    with pytest.raises(RuntimeError, match="exit event lost"):
+        study_client.post(_advance_url(0), headers=HX, follow_redirects=False)
+
+    db: sqlite3.Connection = study_client.app.state.db  # type: ignore[attr-defined]
+    assert db.execute("SELECT COUNT(*) FROM events WHERE kind = 'advance.ok'").fetchone()[0] == 0
+    exits = db.execute("SELECT COUNT(*) FROM events WHERE kind = 'timepoint.exit'").fetchone()[0]
+    assert exits == 0
+
+    # Retries from the original frontier and commits normally this time.
+    monkeypatch.undo()
+    r = study_client.post(_advance_url(0), headers=HX, follow_redirects=False)
+    assert r.status_code == 200
+    assert r.headers.get("HX-Push-Url") == _view_url(1)
+    assert _exit_pairs(study_client) == [(0.0, {"t_index": 0, "reason": "advance"})]
+
+
+def test_failed_exit_event_rolls_back_the_finish(
+    study_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The terminal advance's state writes (mark_complete + session close) and
+    its events are atomic: a failed ``finish`` exit re-opens the session and
+    leaves the walk incomplete; the walk can then be completed for real."""
+
+    real = timing_events.record_exit
+
+    def _fail_finish_exit(*args: object, **kwargs: object) -> None:
+        if kwargs.get("reason") == "finish":
+            raise RuntimeError("finish exit lost")
+        real(*args, **kwargs)
+
+    monkeypatch.setattr(timing_events, "record_exit", _fail_finish_exit)
+    for t_index in range(2):  # the two non-final advances complete normally
+        answer_all_required(study_client, PID, t_index)
+        r = study_client.post(_advance_url(t_index), headers=HX, follow_redirects=False)
+        assert r.status_code == 200
+
+    answer_all_required(study_client, PID, 2)
+    with pytest.raises(RuntimeError, match="finish exit lost"):
+        study_client.post(_advance_url(2), headers=HX, follow_redirects=False)
+
+    db: sqlite3.Connection = study_client.app.state.db  # type: ignore[attr-defined]
+    cid = study_client.cookies.get("ehrsim_clinician_id")
+    # Rolled back: the walk is still open at t=2, the session is still open,
+    # and no finish-family events survived the failed attempt.
+    completed = db.execute(
+        "SELECT completed_at FROM progress WHERE clinician_id = ? AND patient_id = ?",
+        (cid, PID),
+    ).fetchone()[0]
+    assert completed is None
+    ended = db.execute(
+        "SELECT COUNT(*) FROM sessions"
+        " WHERE clinician_id = ? AND patient_id = ? AND ended_at IS NOT NULL",
+        (cid, PID),
+    ).fetchone()[0]
+    assert ended == 0
+    n = db.execute(
+        "SELECT COUNT(*) FROM events WHERE kind IN ('advance.ok', 'session.end')"
+    ).fetchone()[0]
+    assert n == 2  # only the two normal advances, no final advance.ok / session.end
+    assert _exit_pairs(study_client) == [
+        (0.0, {"t_index": 0, "reason": "advance"}),
+        (60.0, {"t_index": 1, "reason": "advance"}),
+    ]
+
+    # The retry completes the walk for real this time.
+    monkeypatch.undo()
+    r = study_client.post(_advance_url(2), headers=HX, follow_redirects=False)
+    assert r.status_code in (200, 303)  # HTMX HX-Redirect or non-HTMX 303
+    ended = db.execute(
+        "SELECT COUNT(*) FROM sessions"
+        " WHERE clinician_id = ? AND patient_id = ? AND ended_at IS NOT NULL",
+        (cid, PID),
+    ).fetchone()[0]
+    assert ended == 1
+    assert _exit_pairs(study_client) == [
         (0.0, {"t_index": 0, "reason": "advance"}),
         (60.0, {"t_index": 1, "reason": "advance"}),
         (180.0, {"t_index": 2, "reason": "finish"}),

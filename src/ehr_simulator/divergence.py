@@ -132,7 +132,8 @@ def newly_visible_summary(
     * ``i > 0``:  ``t_(i-1) < data_time <= t_i``.
 
     Counts only, canonical category, fixed order: ``admission`` (first
-    timepoint only), ``vitals``, ``labs``, ``AI``, ``imaging``.
+    timepoint only), ``vitals``, ``labs``, ``other scalar`` (any scalar
+    variable outside the vitals/lab sets), ``AI``, ``imaging``.
     Categories with zero new rows are omitted; an all-empty interval
     renders ``"no new data"``. Otherwise the annotation is prefixed
     ``"new: "`` (spec §7 example): ``new: vitals 6 · labs 4 · AI 1``.
@@ -147,6 +148,9 @@ def newly_visible_summary(
 
     vitals = scalar_pid.loc[scalar_pid.variable.isin(VITAL_VAR_SET)]
     labs = scalar_pid.loc[scalar_pid.variable.isin(LAB_VAR_SET)]
+    other_scalar = scalar_pid.loc[
+        ~scalar_pid.variable.isin(VITAL_VAR_SET) & ~scalar_pid.variable.isin(LAB_VAR_SET)
+    ]
 
     out: list[str] = []
     for i, t_i in enumerate(timepoints_minutes):
@@ -157,6 +161,7 @@ def newly_visible_summary(
         for label, frame in (
             ("vitals", vitals),
             ("labs", labs),
+            ("other scalar", other_scalar),
             ("AI", ai_pid),
             ("imaging", imaging_pid),
         ):
@@ -201,9 +206,21 @@ def build_divergence_figure(
     by_id: Mapping[str, Question] = {q.question_id: q for q in questions.questions}
 
     all_answers = tuple(a for a in answers.fetch_all(conn) if a.patient_id == patient_id)
-    assignments = {
-        a.clinician_id: a.arm for a in arm_assignments.fetch_all(conn) if a.patient_id == patient_id
-    }
+    # S10 fix: config-hash drift is checked on the assignment rows too, not
+    # only the answer rows — with zero answers the drift would otherwise be
+    # invisible (spec §5: the patient's answers AND their locked arm were
+    # both written under the live config).
+    all_assignments = tuple(
+        a for a in arm_assignments.fetch_all(conn) if a.patient_id == patient_id
+    )
+    for a in all_assignments:
+        if a.config_hash != live_hash:
+            raise DivergenceError(
+                "arm assignment for patient "
+                f"{patient_id!r} was recorded under a different study/question "
+                "configuration (config-hash drift)"
+            )
+    assignments = {a.clinician_id: a.arm for a in all_assignments}
 
     arm_of = _attribute_arms(patient_id, all_answers, assignments, by_id, live_hash, tps_set)
 
@@ -221,7 +238,12 @@ def build_divergence_figure(
     fallback_arm = next(iter(arm_of.values()), "not set")
     for q in questions.questions:
         mine = [(cid, t, val) for cid, t, qid, val in decoded if qid == q.question_id]
-        panels.append((q.question_id, _question_panel(q, mine, arm_of, fallback_arm)))
+        df = _question_panel(q, mine, arm_of, fallback_arm)
+        if df.empty:
+            # S10 fix: an all-blank question must still get a visible
+            # placeholder strip — "no responses", never a blank facet.
+            df = _placeholder_panel(tps, fallback_arm, "no responses")
+        panels.append((q.question_id, df))
 
     # -- Timing (spec §4/§6) --------------------------------------------
     events = tuple(e for e in timing.fetch_timing_events(conn) if e.patient_id == patient_id)
@@ -254,8 +276,14 @@ def build_divergence_figure(
         if len(arms_at_tp[t]) == 1:
             ann_points.append((t, SINGLE_ARM_NOTE))
 
-    panels.append((_PANEL_TIMING, _timing_panel(t_points, fallback_arm)))
+    # S10 fix: facet order is all questions (config order), then the
+    # newly-visible-data annotations, then the timing panel last — a
+    # consistent reading top-to-bottom, with timing the explicit tail.
     panels.append((_PANEL_ANNOTATION, _annotation_panel(ann_points, fallback_arm)))
+    timing_df = _timing_panel(t_points, fallback_arm)
+    if timing_df.empty:
+        timing_df = _placeholder_panel(tps, fallback_arm, "no completed timing intervals")
+    panels.append((_PANEL_TIMING, timing_df))
 
     arms_present = sorted(arm_of.values()) or [fallback_arm]
     arm_note = " · ".join(
@@ -518,6 +546,25 @@ def _annotation_panel(points: list[tuple[float, str]], fallback_arm: str) -> pd.
     return _frame(rows, fallback_arm)
 
 
+def _placeholder_panel(x_range: Sequence[float], fallback_arm: str, label: str) -> pd.DataFrame:
+    """Honest blank: a timepoint range plus a single text row (``label``)."""
+    if not x_range:
+        return _frame([], fallback_arm)
+    return _frame(
+        [
+            {
+                "x": float(min(x_range)),
+                "arm": fallback_arm,
+                "series": "note",
+                "value": 0.5,
+                "kind": "text",
+                "label": label,
+            }
+        ],
+        fallback_arm,
+    )
+
+
 def _frame(rows: list[dict[str, Any]], fallback_arm: str) -> pd.DataFrame:
     """Uniform long-format frame (all columns always present)."""
     if not rows:
@@ -566,9 +613,13 @@ def _render(panels: list[tuple[str, pd.DataFrame]], *, title: str, subtitle: str
     ``data=``.
     """
     parts = []
+    panel_order = [name for name, _df in panels]
     for name, df in panels:
         part = df.copy()
-        part["panel"] = name
+        # Ordered Categorical: plotnine facets by category levels, which
+        # preserves the requested panel order (the alphabetical fallback
+        # would scramble question ids and the timing/annotation tails).
+        part["panel"] = pd.Categorical([name] * len(part), categories=panel_order, ordered=True)
         parts.append(part)
     base = pd.concat(parts, ignore_index=True)
     for col in ("arm", "series", "label", "style"):

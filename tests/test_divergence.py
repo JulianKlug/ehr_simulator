@@ -356,3 +356,80 @@ def test_no_answers_at_all_still_renders(db, study, questions, live_hash, tmp_pa
     finally:
         out.unlink(missing_ok=True)
     assert "<svg" in svg or svg.startswith("<?xml")
+
+
+# ---------------------------------------------------------------------------
+# S10-fix regressions (data/s10_fixes.md §8)
+# ---------------------------------------------------------------------------
+
+
+def test_assignment_only_drift_refuses(db, study, questions, live_hash, tmp_path: Path) -> None:
+    """Zero answers + an arm assignment recorded under a stale config must
+    still refuse — the drift check cannot key on answers alone."""
+    a = _seed_clinician(db, "Dr. StaleArm")
+    db.execute(
+        "INSERT INTO arm_assignments "
+        "(clinician_id, patient_id, arm, arm_source, seed, config_hash) "
+        "VALUES (?, ?, 'no_ai', 'test', NULL, 'stale-hash-000')",
+        (a, PID),
+    )
+    db.commit()
+    with pytest.raises(divergence.DivergenceError, match="config-hash drift"):
+        _render(db, study, questions, live_hash=live_hash, out_dir=tmp_path)
+
+
+def test_empty_panels_render_visible_placeholders(
+    db, study, questions, live_hash, tmp_path: Path
+) -> None:
+    """One clinician, zero answers: every question panel and the timing
+    panel must show a visible placeholder, never a blank facet."""
+    a = _seed_clinician(db, "Dr. Blank")
+    _arm(db, a, "no_ai", live_hash=live_hash)
+    out = _render(db, study, questions, live_hash=live_hash, out_dir=tmp_path)
+    try:
+        svg = out.read_text(encoding="utf-8")
+    finally:
+        out.unlink(missing_ok=True)
+    assert svg.count("no responses") >= len(questions.questions)
+    assert "no completed timing intervals" in svg
+
+
+def test_facet_order_is_questions_then_annotation_then_timing(
+    db, study, questions, live_hash, tmp_path: Path
+) -> None:
+    """Panels render top-to-bottom: every question (config order), then the
+    newly-visible-data annotation strip, then the timing panel last."""
+    a = _seed_clinician(db, "Dr. Order")
+    _arm(db, a, "no_ai", live_hash=live_hash)
+    out = _render(db, study, questions, live_hash=live_hash, out_dir=tmp_path)
+    try:
+        svg = out.read_text(encoding="utf-8")
+    finally:
+        out.unlink(missing_ok=True)
+    labels = [q.question_id for q in questions.questions] + [
+        "newly_visible_data",
+        "timing",
+    ]
+    pos = -1
+    for label in labels:
+        found = svg.find(label, pos + 1)
+        assert found > pos, f"panel {label!r} out of order (previous pos {pos})"
+        pos = found
+
+
+def test_other_scalar_variables_get_their_own_category() -> None:
+    """A scalar variable outside the vitals/lab sets is summarised as
+    ``other scalar`` — counted, and the variable name never appears."""
+    ds = _fake_dataset(vitals=[0.0], labs=[0.0])
+    ds.scalar_ts = pd.concat(
+        [
+            ds.scalar_ts,
+            pd.DataFrame(
+                {"patient_id": [PID], "variable": ["nihs_stroke_scale"], "t_minutes": [0.0]}
+            ),
+        ],
+        ignore_index=True,
+    )
+    summary = divergence.newly_visible_summary(ds, PID, [0.0, 60.0])
+    assert "other scalar 1" in summary[0]
+    assert "nihs_stroke_scale" not in summary[0]

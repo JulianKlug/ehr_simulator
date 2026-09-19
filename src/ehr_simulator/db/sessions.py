@@ -65,15 +65,21 @@ def find_latest(conn: sqlite3.Connection, clinician_id: str, patient_id: str) ->
     return None if row is None else row[0]
 
 
-def close(conn: sqlite3.Connection, session_id: str) -> int:
+def close(conn: sqlite3.Connection, session_id: str, *, commit: bool = True) -> int:
     """Set ``ended_at`` on an open session; return the rowcount (0 if already closed).
 
     Frees the pair under ``ux_sessions_open``.
+
+    S10: ``commit=False`` leaves the UPDATE in the connection's open
+    transaction so the final advance can commit it together with
+    ``advance.ok`` / ``timepoint.exit`` / ``session.end`` (see
+    ``web/gating.py``); a failed event write rolls the close back.
     """
     cursor = conn.execute(
         "UPDATE sessions SET ended_at = CURRENT_TIMESTAMP "
         "WHERE session_id = ? AND ended_at IS NULL",
         (session_id,),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return cursor.rowcount

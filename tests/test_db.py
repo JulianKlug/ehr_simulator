@@ -662,6 +662,10 @@ class _State:
     write_counter = 0
 
 
+def _count_events(db: sqlite3.Connection, kind: str) -> int:
+    return db.execute("SELECT COUNT(*) FROM events WHERE kind = ?", (kind,)).fetchone()[0]
+
+
 def _v2_db(tmp_db_path: Path) -> sqlite3.Connection:
     """A DB at schema version 2 (S9a state) with the runner table in place."""
     conn = connect(tmp_db_path)
@@ -1032,3 +1036,191 @@ def test_read_only_connect_refuses_missing_db(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError):
         connect(missing, access=AccessMode.READ_ONLY)
     assert not missing.exists()
+
+
+# ---------------------------------------------------------------------------
+# S10 atomicity (specs/session10.md §2/§3; s10_fixes.md fix 1): the DAOs gain
+# ``commit=False`` so web/gating batches the state write and the behavioral
+# events of one advance into a single atomic transaction — either all commit
+# or all roll back together, and neither bumps ``write_counter`` on its own.
+# ---------------------------------------------------------------------------
+
+
+def test_unlock_commit_false_rolls_back_atomically(db: sqlite3.Connection) -> None:
+    """The advance path: ``unlock`` + the exit event ride one transaction.
+
+    A rollback retracts the frontier move together with the ``timepoint.exit``
+    (the core S10 guarantee — no advanced frontier without its exit), and the
+    deferred writes never bump ``write_counter``.
+    """
+    cid = clinicians.lookup_or_create(db, "Dr. Atomic")
+    state = _State()
+    sid = sessions.start_or_resume(db, cid, "p1", arm="no_ai", config_hash="h")
+
+    assert (
+        progress.unlock(
+            db,
+            clinician_id=cid,
+            patient_id="p1",
+            from_t_index=0,
+            to_t_index=1,
+            config_hash="h",
+            app_state=state,
+            commit=False,
+        )
+        is True
+    )
+    # Same transaction is visible to this connection, but nothing is durable,
+    # and the DAO deferred its commit/bump to the caller.
+    assert progress.fetch(db, clinician_id=cid, patient_id="p1").unlocked_t_index == 1
+    assert state.write_counter == 0
+
+    events.append(
+        db,
+        session_id=sid,
+        clinician_id=cid,
+        patient_id="p1",
+        timepoint=60.0,
+        kind="timepoint.exit",
+        payload={"t_index": 0, "reason": "advance"},
+        app_state=state,
+        commit=False,
+    )
+    assert state.write_counter == 0
+    exits = _count_events(db, "timepoint.exit")
+    assert exits == 1
+
+    db.rollback()
+    # Both the frontier move and the exit event rolled back together.
+    assert progress.fetch(db, clinician_id=cid, patient_id="p1") is None
+    assert _count_events(db, "timepoint.exit") == 0
+    assert state.write_counter == 0
+
+
+def test_finish_path_commit_false_rolls_back_state_and_events_together(
+    db: sqlite3.Connection,
+) -> None:
+    """The terminal path: mark_complete + close + the final events are atomic.
+
+    If the final ``timepoint.exit`` (or any event) fails, the completion,
+    the session close and the emitted events all retract at once — the
+    session is re-opened, ``completed_at`` is cleared, no exit lingers.
+    """
+    cid = clinicians.lookup_or_create(db, "Dr. Finish")
+    state = _State()
+    sid = sessions.start_or_resume(db, cid, "p1", arm="no_ai", config_hash="h")
+    # Advance to the final timepoint (committed defaults).
+    progress.unlock(
+        db,
+        clinician_id=cid,
+        patient_id="p1",
+        from_t_index=0,
+        to_t_index=1,
+        config_hash="h",
+    )
+    progress.unlock(
+        db,
+        clinician_id=cid,
+        patient_id="p1",
+        from_t_index=1,
+        to_t_index=2,
+        config_hash="h",
+    )
+
+    # Terminal advance: everything deferred.
+    progress.mark_complete(
+        db,
+        clinician_id=cid,
+        patient_id="p1",
+        unlocked_t_index=2,
+        config_hash="h",
+        app_state=state,
+        commit=False,
+    )
+    sessions.close(db, sid, commit=False)
+    events.append(
+        db,
+        session_id=sid,
+        clinician_id=cid,
+        patient_id="p1",
+        timepoint=180.0,
+        kind="advance.ok",
+        payload={"final": True},
+        app_state=state,
+        commit=False,
+    )
+    events.append(
+        db,
+        session_id=sid,
+        clinician_id=cid,
+        patient_id="p1",
+        timepoint=180.0,
+        kind="timepoint.exit",
+        payload={"t_index": 2, "reason": "finish"},
+        app_state=state,
+        commit=False,
+    )
+    events.append(
+        db,
+        session_id=sid,
+        clinician_id=cid,
+        patient_id="p1",
+        timepoint=None,
+        kind="session.end",
+        payload={"reason": "patient_complete"},
+        app_state=state,
+        commit=False,
+    )
+    assert state.write_counter == 0  # deferred — the caller owns the single bump
+
+    # Within one transaction the clinician sees it all…
+    assert progress.fetch(db, clinician_id=cid, patient_id="p1").completed_at is not None
+    assert sessions.find_open(db, cid, "p1") is None
+    assert _count_events(db, "timepoint.exit") == 1
+
+    # …but a failed event retracts the whole block.
+    db.rollback()
+    assert progress.fetch(db, clinician_id=cid, patient_id="p1").completed_at is None
+    assert sessions.find_open(db, cid, "p1") == sid  # session re-opened
+    assert _count_events(db, "timepoint.exit") == 0
+    assert _count_events(db, "advance.ok") == 0
+    assert state.write_counter == 0
+
+
+def test_atomic_block_persists_and_bumps_exactly_once_when_caller_commits(
+    db: sqlite3.Connection,
+) -> None:
+    """Happy path: the caller's single commit makes the batch durable, and the
+    caller (not the deferred DAOs) owns the one ``write_counter`` bump."""
+    cid = clinicians.lookup_or_create(db, "Dr. Commit")
+    state = _State()
+    sid = sessions.start_or_resume(db, cid, "p1", arm="no_ai", config_hash="h")
+    assert (
+        progress.unlock(
+            db,
+            clinician_id=cid,
+            patient_id="p1",
+            from_t_index=0,
+            to_t_index=1,
+            config_hash="h",
+            app_state=state,
+            commit=False,
+        )
+        is True
+    )
+    events.append(
+        db,
+        session_id=sid,
+        clinician_id=cid,
+        patient_id="p1",
+        timepoint=60.0,
+        kind="timepoint.exit",
+        payload={"t_index": 0, "reason": "advance"},
+        app_state=state,
+        commit=False,
+    )
+    db.commit()
+    state.write_counter += 1
+    assert state.write_counter == 1
+    assert progress.fetch(db, clinician_id=cid, patient_id="p1").unlocked_t_index == 1
+    assert _count_events(db, "timepoint.exit") == 1

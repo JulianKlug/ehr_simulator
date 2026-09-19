@@ -14,16 +14,17 @@ Callers:
   The 303/409/412 paths write neither (the browser follows to a full
   GET, which records it, or the advance was blocked/stale).
 * ``web.gating.advance`` — one ``timepoint.exit`` (``reason="advance"`` or
-  ``"finish"``) in the same successful operation as the progress mutation;
-  blocked/412 outcomes emit nothing.
+  ``"finish"``) per successful advance. Gating wraps the progress /
+  sessions state write and this event in a single explicit transaction
+  (``commit=False`` on both, one ``conn.commit()``, rollback on failure),
+  so a failed exit never leaves an advanced frontier — or a closed
+  session — behind. The
+locked/412 outcomes emit nothing.
 
-The helpers raise on DB failure. On the advance path state (progress /
-sessions) has already been written by :func:`ehr_simulator.web.gating.advance`
-— the S9b ordering rule, state first then events: a failed event write
-surfaces as a 500, data intact, the event simply absent (the S6 "events
-missing" posture). On the GET path the caller treats the write as
-best-effort (the pane has already rendered; the export simply loses the
-enter) and logs a warning.
+The helpers raise on DB failure. On the GET path the enter is
+best-effort: :func:`record_enter` runs only after a successful render, so
+a failed render leaves no enter without a matching exit, and a later
+advance failure has no enter to orphan.
 
 These are server-side behavioural facts: the payload carries the ``t_index``
 (``timepoint`` already holds the minutes; ``client_ts`` / ``client_seq`` do
@@ -79,10 +80,16 @@ def record_exit(
     t_index: int,
     t_minutes: float,
     reason: str,
+    commit: bool = True,
 ) -> None:
     """One ``timepoint.exit`` for the pane just left. Only
     :func:`ehr_simulator.web.gating.advance` calls this, and only on the
-    advanced/finished outcomes — exactly one per timepoint."""
+    advanced/finished outcomes — exactly one per timepoint.
+
+    ``commit=False`` joins the connection's open transaction (and skips
+    the write-counter bump) so gating can atomically commit the state
+    write and this event, rolling both back on failure.
+    """
     if reason not in ("advance", "finish"):
         raise ValueError(f"invalid exit reason: {reason!r}")
     events.append(
@@ -95,4 +102,5 @@ def record_exit(
         # type: ignore[arg-type] -- EXIT_KIND is an EventKind member
         kind=EXIT_KIND,
         payload={"t_index": t_index, "reason": reason},
+        commit=commit,
     )
