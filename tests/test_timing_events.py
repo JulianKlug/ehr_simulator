@@ -186,6 +186,21 @@ def test_failed_exit_event_rolls_back_the_advance(
     assert r.headers.get("HX-Push-Url") == _view_url(1)
     assert _exit_pairs(study_client) == [(0.0, {"t_index": 0, "reason": "advance"})]
 
+def test_failed_full_document_render_records_no_enter(
+    study_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("full document render exploded")
+
+    monkeypatch.setattr(routes, "_full_document", _boom)
+
+    with pytest.raises(RuntimeError, match="full document render exploded"):
+        study_client.get(_view_url(0), follow_redirects=False)
+
+    assert _enter_pairs(study_client) == []
+    assert _exit_pairs(study_client) == []
+
 
 def test_failed_exit_event_rolls_back_the_finish(
     study_client: TestClient, monkeypatch: pytest.MonkeyPatch

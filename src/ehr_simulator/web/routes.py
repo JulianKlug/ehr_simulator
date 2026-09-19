@@ -547,34 +547,40 @@ async def patient_timepoint(
         resolved=resolved,
         ctx=ctx,
     )
-
-    # S10: only the current editable frontier is an "enter" — frozen past
-    # panes (locked mode) and bounced future navigation never emit (spec §3).
-    # Refreshes/resumes legitimately duplicate it; the timing derivation
-    # pairs the first valid (enter, exit). Recorded *after* a successful
-    # render (spec §3): a failed render leaves no enter without exit.
-    if state.study is not None and ctx is not None and pane_mode(ctx.frontier, t_index) == "open":
-        record_enter(
-            state.db,
-            state,
-            ctx=ctx,
-            clinician_id=clinician_id or "",
-            patient_id=patient_id,
-            t_index=t_index,
-            t_minutes=float(resolved.t_minutes),
-        )
-
-    # A history restore is an HX request that wants the whole document back.
+    # Build/render the complete response before recording timepoint.enter.
     if _is_history_restore(request) or not _is_htmx(request):
-        return _full_document(
-            request, inner=inner, patient_id=patient_id, t_index=t_index, chrome=chrome
+         response = _full_document(
+        request,
+        inner=inner,
+        patient_id=patient_id,
+        t_index=t_index,
+        chrome=chrome,
         )
-    return HTMLResponse(
+    else:
+        response = HTMLResponse(
         content=inner,
         status_code=200,
         headers={"HX-Push-Url": _timepoint_url(patient_id, t_index, chrome)},
-    )
+        )
 
+    # Only a successfully rendered editable frontier counts as an enter.
+    if (
+    state.study is not None
+    and ctx is not None
+    and pane_mode(ctx.frontier, t_index) == "open"
+    ):
+        record_enter(
+        state.db,
+        state,
+        ctx=ctx,
+        clinician_id=clinician_id or "",
+        patient_id=patient_id,
+        t_index=t_index,
+        t_minutes=float(resolved.t_minutes),
+        )
+
+    return response
+    
 
 @router.post(
     "/patient/{patient_id}/timepoint/{t_index}/answer",
