@@ -1,15 +1,13 @@
 """Answer capture service: the layer between the ``/answer`` route and the DAOs.
 
-Owns the ``answers.value`` string contract (spec §6) that S9c's export and
-S10's divergence view consume verbatim::
-
-    response_type        stored value
-    ─────────────────    ─────────────────────────────────────────
-    categorical          the option, verbatim
-    multi-select         JSON array in questions.yaml option order
-    likert               str(int) within [scale_min, scale_max]
-    probability-0-100    str(int) within [0, 100]
-    free-text            stripped text, ≤ FREE_TEXT_MAX_CHARS
+The encode/decode contract for ``answers.value`` (spec §6) lives in the
+shared codec, :mod:`ehr_simulator.answer_codec` — one home for the UI-
+facing direction (*serialize*) and the export-facing one (strict *decode*
+used by :mod:`ehr_simulator.export`).
+``serialize_answer`` / ``deserialize_answer`` /
+``AnswerValidationError`` and the bounds constants are re-exposed here
+so existing import sites (``web.routes``, ``web.gating``, the tests)
+keep working unchanged.
 
 An empty submission (no non-blank values) means *clear*: the row is
 deleted, so S9b's gate reads the cell as unanswered.
@@ -20,27 +18,32 @@ free-text into ``payload_json`` would double the pseudonymization surface).
 
 from __future__ import annotations
 
-import json
 import re
 import sqlite3
-from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any, Literal
 
-from ehr_simulator.config.questions import (
-    CategoricalQuestion,
-    LikertQuestion,
-    MultiSelectQuestion,
-    Question,
-    Questions,
+from ehr_simulator.answer_codec import (
+    FREE_TEXT_MAX_CHARS as FREE_TEXT_MAX_CHARS,  # noqa: F401  (re-export)
 )
+from ehr_simulator.answer_codec import (
+    PROBABILITY_MAX as PROBABILITY_MAX,  # noqa: F401  (re-export)
+)
+from ehr_simulator.answer_codec import (
+    PROBABILITY_MIN as PROBABILITY_MIN,  # noqa: F401  (re-export)
+)
+from ehr_simulator.answer_codec import (
+    AnswerValidationError as AnswerValidationError,  # noqa: F401  (re-export)
+)
+from ehr_simulator.answer_codec import (
+    deserialize_answer,  # noqa: F401  (re-export)
+    serialize_answer,
+)
+from ehr_simulator.config.questions import Question, Questions
 from ehr_simulator.db import answers, events
 from ehr_simulator.logging import get_logger
 from ehr_simulator.web.study_session import SessionContext
 
-FREE_TEXT_MAX_CHARS = 4000
-PROBABILITY_MIN = 0
-PROBABILITY_MAX = 100
 CLIENT_SEQ_MIN = 0
 CLIENT_SEQ_MAX = 2**63 - 1  # SQLite INTEGER ceiling
 FREE_TEXT_AUTOSAVE_DELAY_MS = 1500
@@ -52,99 +55,6 @@ _SQLITE_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 _INT_RE = re.compile(r"^[+-]?\d+$")
 
 AnswerOutcome = Literal["saved", "cleared"]
-
-
-class AnswerValidationError(ValueError):
-    """The submitted value does not fit the question's response type."""
-
-
-# ---------------------------------------------------------------------------
-# Serialization (per response type)
-# ---------------------------------------------------------------------------
-
-
-def _single(values: list[str]) -> str:
-    if len(values) != 1:
-        raise AnswerValidationError(f"expected exactly one value, got {len(values)}")
-    return values[0]
-
-
-def _int_in_range(raw: str, lo: int, hi: int) -> int:
-    if not _INT_RE.match(raw):
-        raise AnswerValidationError(f"expected an integer, got {raw!r}")
-    parsed = int(raw)
-    if not lo <= parsed <= hi:
-        raise AnswerValidationError(f"expected a value between {lo} and {hi}, got {parsed}")
-    return parsed
-
-
-def _serialize_categorical(question: Question, values: list[str]) -> str:
-    assert isinstance(question, CategoricalQuestion)
-    chosen = _single(values)
-    if chosen not in question.options:
-        raise AnswerValidationError(f"unknown option {chosen!r}")
-    return chosen
-
-
-def _serialize_multi_select(question: Question, values: list[str]) -> str:
-    assert isinstance(question, MultiSelectQuestion)
-    unknown = [v for v in values if v not in question.options]
-    if unknown:
-        raise AnswerValidationError(f"unknown option(s) {unknown!r}")
-    if len(set(values)) != len(values):
-        raise AnswerValidationError("duplicate options submitted")
-
-    # Canonical order = questions.yaml order, never click order.
-    canonical = [opt for opt in question.options if opt in values]
-    return json.dumps(canonical, separators=(",", ":"))
-
-
-def _serialize_likert(question: Question, values: list[str]) -> str:
-    assert isinstance(question, LikertQuestion)
-    return str(_int_in_range(_single(values), question.scale_min, question.scale_max))
-
-
-def _serialize_probability(_question: Question, values: list[str]) -> str:
-    return str(_int_in_range(_single(values), PROBABILITY_MIN, PROBABILITY_MAX))
-
-
-def _serialize_free_text(_question: Question, values: list[str]) -> str:
-    text = _single(values)
-    if len(text) > FREE_TEXT_MAX_CHARS:
-        raise AnswerValidationError(f"text too long ({len(text)} chars, max {FREE_TEXT_MAX_CHARS})")
-    return text
-
-
-_SERIALIZERS: dict[str, Callable[[Question, list[str]], str]] = {
-    "categorical": _serialize_categorical,
-    "multi-select": _serialize_multi_select,
-    "likert": _serialize_likert,
-    "probability-0-100": _serialize_probability,
-    "free-text": _serialize_free_text,
-}
-
-
-def serialize_answer(question: Question, raw_values: list[str]) -> str | None:
-    """Validate + canonicalize; ``None`` means "clear the cell".
-
-    Raises :class:`AnswerValidationError` on anything the question's
-    response type does not accept.
-    """
-    values = [v.strip() for v in raw_values if v.strip()]
-    if not values:
-        return None
-    return _SERIALIZERS[question.response_type](question, values)
-
-
-def deserialize_answer(question: Question, value: str) -> str | list[str]:
-    """Inverse of :func:`serialize_answer` for pre-fill (multi-select → list)."""
-    if question.response_type != "multi-select":
-        return value
-    try:
-        decoded = json.loads(value)
-    except ValueError:
-        return []
-    return [str(v) for v in decoded] if isinstance(decoded, list) else []
 
 
 # ---------------------------------------------------------------------------

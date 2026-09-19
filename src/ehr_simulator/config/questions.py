@@ -96,7 +96,7 @@ def _coerce_option(value: object) -> str:
     raise TypeError(f"option must be a string (got {type(value).__name__})")
 
 
-def _validate_options(v: list[object], *, kind: str) -> list[str]:
+def _validate_options(v: list[object], *, kind: str, reject_pipe: bool = False) -> list[str]:
     coerced = [_coerce_option(x) for x in v]
     if len(coerced) < 2:
         raise ValueError(f"{kind} options must have at least 2 entries")
@@ -108,6 +108,13 @@ def _validate_options(v: list[object], *, kind: str) -> list[str]:
                 dups.append(opt)
             seen.add(opt)
         raise ValueError(f"{kind} options must be unique; duplicates: {sorted(set(dups))}")
+    if reject_pipe:
+        for opt in coerced:
+            if "|" in opt:
+                raise ValueError(
+                    f"{kind} option {opt!r} contains '|', which is the CSV delimiter "
+                    "for selected options; pick option text without it"
+                )
     return coerced
 
 
@@ -128,7 +135,7 @@ class MultiSelectQuestion(_QuestionBase):
     @field_validator("options", mode="before")
     @classmethod
     def _options_unique(cls, v: list[object]) -> list[str]:
-        return _validate_options(v, kind="multi-select")
+        return _validate_options(v, kind="multi-select", reject_pipe=True)
 
 
 class ProbabilityQuestion(_QuestionBase):

@@ -26,13 +26,14 @@ from ehr_simulator.db import (
     progress,
     sessions,
 )
-from ehr_simulator.db.connection import connect, resolve_db_path
+from ehr_simulator.db.connection import AccessMode, connect, resolve_db_path
 from ehr_simulator.db.exceptions import DbError
 from ehr_simulator.db.migrations import MIGRATIONS, Migration, apply_migrations
 
 __all__ = [
     "MIGRATIONS",
     "DbError",
+    "AccessMode",
     "Migration",
     "answers",
     "apply_migrations",
