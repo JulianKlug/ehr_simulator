@@ -50,6 +50,21 @@ def _bump(app_state: Any) -> None:
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
 
 
+def fetch_all(conn: sqlite3.Connection) -> dict[tuple[str, str], Progress]:
+    """Every walk frontier keyed by ``(clinician_id, patient_id)``.
+
+    Query order is deterministic, so dict insertion order is deterministic too.
+    """
+    rows = conn.execute(
+        f"SELECT {_SELECT_COLUMNS} FROM progress ORDER BY clinician_id, patient_id"
+    ).fetchall()
+    result: dict[tuple[str, str], Progress] = {}
+    for row in rows:
+        item = _row_to_progress(row)
+        result[(item.clinician_id, item.patient_id)] = item
+    return result
+
+
 def fetch(conn: sqlite3.Connection, *, clinician_id: str, patient_id: str) -> Progress | None:
     """Return the pair's row, or ``None`` when the walk has not started."""
     row = conn.execute(
@@ -68,6 +83,7 @@ def unlock(
     to_t_index: int,
     config_hash: str,
     app_state: Any = None,
+    commit: bool = True,
 ) -> bool:
     """Move the frontier ``from_t_index → to_t_index`` iff it still sits at ``from_t_index``.
 
@@ -75,6 +91,11 @@ def unlock(
     frontier was stale (someone else moved it) — nothing is written.
     A missing row counts as a frontier at 0, so ``from_t_index == 0`` may
     insert; ``config_hash`` is recorded only on that first insert.
+
+    S10: ``commit=False`` leaves the write in the connection's open
+    transaction and defers the write-counter bump; ``web/gating.py`` uses
+    this to commit the unlock and the ``timepoint.exit`` event atomically
+    (a failed event write rolls the frontier move back with it).
     """
     cursor = conn.execute(
         "UPDATE progress SET unlocked_t_index = ?, updated_at = CURRENT_TIMESTAMP "
@@ -91,8 +112,9 @@ def unlock(
         )
         moved = cursor.rowcount == 1
 
-    conn.commit()
-    if moved:
+    if commit:
+        conn.commit()
+    if moved and commit:
         _bump(app_state)
     return moved
 
@@ -105,8 +127,14 @@ def mark_complete(
     unlocked_t_index: int,
     config_hash: str,
     app_state: Any = None,
+    commit: bool = True,
 ) -> None:
-    """Set ``completed_at`` once (upsert; a second call leaves the first timestamp)."""
+    """Set ``completed_at`` once (upsert; a second call leaves the first timestamp).
+
+    S10: ``commit=False`` defers commit + bump so the final advance's
+    ``advance.ok`` / ``timepoint.exit`` / ``session.end`` ride the same
+    transaction (see ``web/gating.py``).
+    """
     conn.execute(
         "INSERT INTO progress "
         "(clinician_id, patient_id, unlocked_t_index, completed_at, config_hash) "
@@ -116,8 +144,9 @@ def mark_complete(
         "updated_at = CURRENT_TIMESTAMP",
         (clinician_id, patient_id, unlocked_t_index, config_hash),
     )
-    conn.commit()
-    _bump(app_state)
+    if commit:
+        conn.commit()
+        _bump(app_state)
 
 
 def reset(

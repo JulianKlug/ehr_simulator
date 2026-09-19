@@ -18,6 +18,9 @@ from typing import Literal, Protocol, runtime_checkable
 
 import pandas as pd
 
+from ehr_simulator.ingestion.canonical import LAB_VAR_SET as _LAB_VARS
+from ehr_simulator.ingestion.canonical import VITAL_VAR_SET as _VITAL_VARS
+
 PanelState = Literal["loading", "empty-expected", "empty-unexpected", "partial", "error"]
 PanelName = Literal["vitals", "labs", "admission", "imaging", "ai"]
 
@@ -40,8 +43,6 @@ class DatasetLike(Protocol):
     ai_output: pd.DataFrame
 
 
-_VITAL_VARS = frozenset({"hr", "sbp", "dbp", "rr", "spo2", "temp"})
-_LAB_VARS = frozenset({"hgb", "na", "cr", "glucose", "wbc", "plt"})
 _AI_REQUIRED_KEYS = frozenset({"prob_deterioration_6h", "prob_mrs_0_2_90d"})
 
 

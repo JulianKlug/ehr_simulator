@@ -62,6 +62,19 @@ jobs:
             --db-path /tmp/ci_db_smoke/test.db \
             --backup-dir /tmp/ci_db_backups
           test "$(ls /tmp/ci_db_backups/*.db | wc -l)" -ge 1
+      - name: Export smoke
+        run: |
+          uv run ehr-simulator export-answers \
+            configs/example_config.yaml configs/example_questions.yaml \
+            --db-path /tmp/ci_db_smoke/test.db \
+            --out /tmp/ci_db_smoke/answers.csv \
+            --keyfile /tmp/ci_db_smoke/clinicians.keyfile.csv
+          test "$(head -1 /tmp/ci_db_smoke/answers.csv)" = \
+            "patient_id,clinician_id,t_index,timepoint_minutes,timepoint_started_at,timepoint_ended_at,elapsed_seconds,arm,completed_at,config_hash,deterioration_6h,survives_hospital,good_outcome_3mo,dead_6mo,confidence,contributing_factors,free_notes"
+          test "$(cat /tmp/ci_db_smoke/answers.csv | wc -l)" = "1"
+          test "$(head -1 /tmp/ci_db_smoke/clinicians.keyfile.csv)" = "clinician_id,name_normalized"
+          test "$(cat /tmp/ci_db_smoke/clinicians.keyfile.csv | wc -l)" = "1"
+          test "$(stat -c %a /tmp/ci_db_smoke/clinicians.keyfile.csv)" = "600"
 
   e2e:
     runs-on: ubuntu-latest

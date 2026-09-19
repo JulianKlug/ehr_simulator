@@ -46,6 +46,30 @@ def lookup_or_create(
     return clinician_id
 
 
+def fetch_by_ids(
+    conn: sqlite3.Connection, clinician_ids: tuple[str, ...] | list[str]
+) -> tuple[tuple[str, str], ...]:
+    """``(clinician_id, name_normalized)`` pairs for requested ids, id-sorted."""
+    ids = tuple(sorted(set(clinician_ids)))
+    if not ids:
+        return ()
+
+    placeholders = ",".join("?" for _ in ids)
+    rows = conn.execute(
+        "SELECT clinician_id, name_normalized FROM clinicians "
+        f"WHERE clinician_id IN ({placeholders}) "
+        "ORDER BY clinician_id",
+        ids,
+    ).fetchall()
+    return tuple((row[0], row[1]) for row in rows)
+
+
+def fetch_all_ids(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """Every ``clinician_id`` in the table, id-sorted (S10 integrity check)."""
+    rows = conn.execute("SELECT clinician_id FROM clinicians ORDER BY clinician_id").fetchall()
+    return tuple(row[0] for row in rows)
+
+
 def lookup(conn: sqlite3.Connection, raw_name: str) -> str | None:
     """Return the ``clinician_id`` for ``raw_name`` if the clinician exists; never writes.
 

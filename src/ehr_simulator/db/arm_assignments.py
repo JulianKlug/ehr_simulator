@@ -14,6 +14,43 @@ existing rows.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class ArmAssignment:
+    """One fully materialized ``arm_assignments`` row (S9c export reads all)."""
+
+    clinician_id: str
+    patient_id: str
+    arm: str
+    arm_source: str
+    seed: int | None
+    config_hash: str
+
+
+def fetch_all(conn: sqlite3.Connection) -> tuple[ArmAssignment, ...]:
+    """Every locked arm assignment, ordered by (clinician_id, patient_id).
+
+    S9c read path: the export validates that all exported pairs hold an
+    assignment and that the answer row arm matches; the stable order keeps
+    re-runs deterministic.
+    """
+    rows = conn.execute(
+        "SELECT clinician_id, patient_id, arm, arm_source, seed, config_hash "
+        "FROM arm_assignments ORDER BY clinician_id, patient_id"
+    ).fetchall()
+    return tuple(
+        ArmAssignment(
+            clinician_id=row[0],
+            patient_id=row[1],
+            arm=row[2],
+            arm_source=row[3],
+            seed=row[4],
+            config_hash=row[5],
+        )
+        for row in rows
+    )
 
 
 def assign_or_lookup(

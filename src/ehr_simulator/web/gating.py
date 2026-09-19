@@ -16,7 +16,11 @@
 Completeness is computed here, once, on the same ``saved_answers`` mapping
 the pane pre-fills from — the browser never counts badges. Writes go
 state-first (``progress``, ``sessions``) and events after, like S9a's
-``record_answer``.
+``record_answer`` — and S10 makes a successful advance atomic: the state
+write, ``advance.ok`` and ``timepoint.exit`` ride one explicit
+transaction (``commit=False`` everywhere, a single ``conn.commit()``), so
+a failed exit rolls the frontier (and the final close) back with it.
+``write_counter`` is bumped exactly once, after that commit succeeds.
 """
 
 from __future__ import annotations
@@ -30,6 +34,7 @@ from ehr_simulator.config.questions import Questions
 from ehr_simulator.db import events, progress, sessions
 from ehr_simulator.db.events import EventKind
 from ehr_simulator.logging import get_logger
+from ehr_simulator.web import timing_events
 from ehr_simulator.web.answer_capture import (
     normalize_client_seq,
     normalize_client_ts,
@@ -176,7 +181,9 @@ def advance(
         "client_seq": normalize_client_seq(client_seq),
     }
 
-    def _event(kind: EventKind, timepoint: float | None, payload: dict[str, Any]) -> None:
+    def _event(
+        kind: EventKind, timepoint: float | None, payload: dict[str, Any], *, commit: bool = True
+    ) -> None:
         try:
             events.append(
                 conn,
@@ -188,14 +195,21 @@ def advance(
                 payload=payload,
                 app_state=app_state,
                 **clock,
+                commit=commit,
             )
         except Exception:
-            # State was already written (state first, events after); make the
-            # hole in the event stream visible instead of silent, then re-raise.
+            # Make the hole in the event stream visible instead of silent,
+            # then re-raise — the caller owns the transaction boundary.
             get_logger().exception(
                 "event append failed after state write", event_kind="advance.event_lost", kind=kind
             )
             raise
+
+    def _bump() -> None:
+        # Bumped exactly once per successful advance, after the outer
+        # commit succeeds (the ``commit=False`` writes skip their own bumps).
+        if app_state is not None:
+            app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
 
     if not comp.complete:
         _event("advance.blocked", t_minutes, {**base_payload, "remaining": list(comp.remaining)})
@@ -203,37 +217,99 @@ def advance(
 
     is_last = t_index == len(timepoints) - 1
     if is_last:
-        progress.mark_complete(
-            conn,
-            clinician_id=clinician_id,
-            patient_id=patient_id,
-            unlocked_t_index=t_index,
-            config_hash=ctx.config_hash,
-            app_state=app_state,
-        )
-        sessions.close(conn, ctx.session_id)
-        _event("advance.ok", t_minutes, {**base_payload, "to_t_index": None, "final": True})
-        _event("session.end", None, {"reason": SESSION_END_REASON_COMPLETE})
+        # S10: the completion write and its events are one transaction —
+        # a failed ``timepoint.exit`` rolls the mark_complete / close back.
+        try:
+            progress.mark_complete(
+                conn,
+                clinician_id=clinician_id,
+                patient_id=patient_id,
+                unlocked_t_index=t_index,
+                config_hash=ctx.config_hash,
+                app_state=app_state,
+                commit=False,
+            )
+            sessions.close(conn, ctx.session_id, commit=False)
+            _event(
+                "advance.ok",
+                t_minutes,
+                {**base_payload, "to_t_index": None, "final": True},
+                commit=False,
+            )
+            timing_events.record_exit(
+                conn,
+                None,
+                ctx=ctx,
+                clinician_id=clinician_id,
+                patient_id=patient_id,
+                t_index=t_index,
+                t_minutes=t_minutes,
+                reason="finish",
+                commit=False,
+            )
+            _event("session.end", None, {"reason": SESSION_END_REASON_COMPLETE}, commit=False)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            get_logger().exception(
+                "terminal advance transaction rolled back (state + events restored)",
+                event_kind="advance.rollback",
+            )
+            raise
+        _bump()
         return AdvanceResult("finished", t_index, ())
 
     # Compare-and-set: a racing second request finds the row already moved
     # and degrades to "stale" here instead of unlocking twice. mark_complete
     # above has no CAS: it is guarded by frontier.completed and by the single
     # shared connection; a multi-connection refactor must revisit it.
-    moved = progress.unlock(
-        conn,
-        clinician_id=clinician_id,
-        patient_id=patient_id,
-        from_t_index=t_index,
-        to_t_index=t_index + 1,
-        config_hash=ctx.config_hash,
-        app_state=app_state,
-    )
-    if not moved:
-        get_logger().warning(
-            "advance lost the frontier race", event_kind="advance.stale", requested=t_index
+    # S10: the unlock and its events commit atomically (see the module
+    # docstring); a failed ``timepoint.exit`` rolls the unlock back, and the
+    # next attempt re-runs from the unchanged frontier.
+    try:
+        moved = progress.unlock(
+            conn,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            from_t_index=t_index,
+            to_t_index=t_index + 1,
+            config_hash=ctx.config_hash,
+            app_state=app_state,
+            commit=False,
         )
-        return AdvanceResult("stale", t_index + 1, ())
-
-    _event("advance.ok", t_minutes, {**base_payload, "to_t_index": t_index + 1, "final": False})
+        if not moved:
+            # CAS miss (and possibly a failed INSERT OR IGNORE): discard the
+            # open transaction; nothing durable happened.
+            conn.rollback()
+            get_logger().warning(
+                "advance lost the frontier race", event_kind="advance.stale", requested=t_index
+            )
+            return AdvanceResult("stale", t_index + 1, ())
+        _event(
+            "advance.ok",
+            t_minutes,
+            {**base_payload, "to_t_index": t_index + 1, "final": False},
+            commit=False,
+        )
+        # The sole producer rule: the exit pairs with the advance.ok above.
+        timing_events.record_exit(
+            conn,
+            None,
+            ctx=ctx,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            t_index=t_index,
+            t_minutes=t_minutes,
+            reason="advance",
+            commit=False,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        get_logger().exception(
+            "advance transaction rolled back (frontier + events restored)",
+            event_kind="advance.rollback",
+        )
+        raise
+    _bump()
     return AdvanceResult("advanced", t_index + 1, ())

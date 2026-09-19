@@ -1,6 +1,6 @@
 """Command-line entry point for ``ehr-simulator``.
 
-Eight commands after S9b:
+Nine commands after S9c:
 
 - ``serve`` — boot uvicorn against the FastAPI app. ``--config STUDY``
   + ``--questions Q`` wires a study-driven loader; without ``--config`` the
@@ -23,6 +23,12 @@ Eight commands after S9b:
 - ``reset-progress`` (S9b) — operator recovery for a mis-advanced walk:
   rewind one clinician's frontier on one patient, drop the answers past
   it, record a ``progress.reset`` event.
+- ``export-answers`` (S9c) — read-only, strictly-validated, guarded CSV
+  export of the recorded answers plus an optional POSIX 0600 keyfile.
+  ``STUDY_CONFIG QUESTIONS`` are positional; ``--db-path``/``--out``/
+  ``--keyfile``/``--only-complete``/``--force`` round it out. Exit 0 on
+  success (including a 0-row export), 1 with ``Error: <reason>`` on any
+  rejection; nothing is ever written before every validation passes.
 
 The ``main(argv: list[str] | None = None) -> None`` signature is preserved
 from the S2 argparse skeleton so ``test_cli.py``'s monkeypatch idiom carries
@@ -31,6 +37,7 @@ over for the ``serve`` command.
 
 from __future__ import annotations
 
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -47,8 +54,21 @@ app_typer: typer.Typer = typer.Typer(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Entry point. Preserves the S2 argparse signature for back-compat tests."""
-    app_typer(args=argv, standalone_mode=False)
+    """Console entry point (S10 §8: command failure must reach the OS).
+
+    With ``standalone_mode=True`` typer/click translate ``Exit`` into
+    ``SystemExit(1)`` (refusal) or ``SystemExit(2)`` (usage); success
+    paths return ``None`` so direct ``cli.main([...])`` test ergonomics
+    survive. A refusal surfaces as ``SystemExit`` with the exact code,
+    which the installed console script propagates as the process status.
+    """
+    try:
+        app_typer(args=argv, standalone_mode=True)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        if code == 0:
+            return None
+        raise SystemExit(code) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -424,7 +444,7 @@ def reset_progress_cmd(
     ),
 ) -> None:
     """Rewind a clinician's walk of one patient (recovery for a mis-click on Next)."""
-    from ehr_simulator.cli_support import ResetError, assert_schema_current, reset_progress
+    from ehr_simulator.cli_support import OperatorError, assert_schema_current, reset_progress
     from ehr_simulator.config import load_study_config
     from ehr_simulator.db import connect, resolve_db_path
     from ehr_simulator.logging import setup_logging
@@ -451,7 +471,7 @@ def reset_progress_cmd(
             to_t_index=to_t_index,
             timepoints=list(study.timepoints_minutes),
         )
-    except ResetError as exc:
+    except OperatorError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     finally:
@@ -462,6 +482,211 @@ def reset_progress_cmd(
         f"Reset {patient} for clinician {report.clinician_id}: "
         f"frontier {report.previous_unlocked_t_index}{state} → {report.to_t_index}, "
         f"{report.deleted_answers} answer(s) deleted."
+    )
+
+
+# ---------------------------------------------------------------------------
+# export-answers (S9c)
+# ---------------------------------------------------------------------------
+
+
+@app_typer.command("export-answers")
+def export_answers(
+    study_path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="Path to study_config.yaml."
+    ),
+    questions_path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="Path to questions.yaml."
+    ),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite DB; defaults to the study's db_path / data/ehr_simulator.db.",
+    ),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="Answers CSV destination; defaults to a UTC-timestamped file in <db dir>/exports/.",
+    ),
+    keyfile: Path | None = typer.Option(
+        None,
+        "--keyfile",
+        help="Optional POSIX 0600 id→name keyfile covering exactly the clinicians in this export.",
+    ),
+    only_complete: bool = typer.Option(False, "--only-complete"),
+    force: bool = typer.Option(
+        False, "--force", help="Replace an existing output path (both --out and --keyfile)."
+    ),
+) -> None:
+    """Export the study's recorded answers to a guarded, analysis-ready CSV."""
+    from datetime import UTC, datetime
+
+    from ehr_simulator import export
+    from ehr_simulator.cli_support import OperatorError, assert_schema_current
+    from ehr_simulator.config import (
+        compute_config_hash_from_models,
+        load_questions,
+        load_study_config,
+    )
+    from ehr_simulator.db import connect, resolve_db_path
+    from ehr_simulator.db.connection import AccessMode
+    from ehr_simulator.logging import get_logger, setup_logging
+
+    setup_logging(Path("logs"))
+
+    try:
+        study = load_study_config(study_path)
+        questions = load_questions(questions_path)
+    except ConfigError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    bundle: export.ExportBundle
+    try:
+        live_hash = compute_config_hash_from_models(study, questions)
+        target_db = resolve_db_path(study, cli_override=db_path)
+        if not target_db.exists():
+            raise export.ExportError(f"database not found: {target_db}")
+
+        conn = connect(target_db, access=AccessMode.READ_ONLY)
+        try:
+            assert_schema_current(conn)
+            bundle = export.build_export(
+                conn,
+                study=study,
+                questions=questions,
+                live_hash=live_hash,
+                options=export.ExportOptions(only_complete=only_complete),
+                include_keyfile=keyfile is not None,
+            )
+            if out is None:
+                stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+                out = target_db.parent / "exports" / f"answers_{stamp}.csv"
+            export.write_export(
+                bundle,
+                out=out,
+                keyfile=keyfile,
+                force=force,
+            )
+        finally:
+            conn.close()
+    except (ConfigError, export.ExportError, OperatorError, OSError, sqlite3.Error) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    report = bundle.frame.report
+    get_logger().info(
+        "export.written",
+        event_kind="export.written",
+        rows=report.rows,
+        columns=report.columns,
+        patients=report.patients,
+        clinicians=report.clinicians,
+        complete_walks=report.complete_walks,
+        in_progress_walks=report.in_progress_walks,
+    )
+    walk_word = "walk" if report.complete_walks + report.in_progress_walks == 1 else "walks"
+    clin_word = "clinician" if report.clinicians == 1 else "clinicians"
+    patient_word = "patient" if report.patients == 1 else "patients"
+    typer.echo(
+        f"Wrote {report.rows} rows × {report.columns} columns "
+        f"for {report.patients} {patient_word}, {report.clinicians} {clin_word} "
+        f"({report.complete_walks} complete {walk_word}, {report.in_progress_walks} in progress) "
+        f"to {out}"
+    )
+    if keyfile is not None:
+        n = len(bundle.keyfile_rows or ())
+        typer.echo(f"Wrote keyfile ({n} {clin_word}, mode 600) to {keyfile}")
+
+
+# ---------------------------------------------------------------------------
+# divergence-view (S10)
+# ---------------------------------------------------------------------------
+
+
+@app_typer.command("divergence-view")
+def divergence_view(
+    study_path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="Path to study_config.yaml."
+    ),
+    questions_path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="Path to questions.yaml."
+    ),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite DB; defaults to the study's db_path / data/ehr_simulator.db.",
+    ),
+    patient: str = typer.Option(
+        ..., "--patient", help="One configured patient id; renders one figure."
+    ),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="SVG destination; defaults to <db dir>/divergence_<patient>.svg.",
+    ),
+) -> None:
+    """Render the rough per-patient divergence figure (SVG) from the study DB."""
+    from ehr_simulator import divergence
+    from ehr_simulator.cli_support import OperatorError, assert_schema_current, build_dataset_loader
+    from ehr_simulator.config import (
+        compute_config_hash_from_models,
+        load_questions,
+        load_study_config,
+    )
+    from ehr_simulator.db import connect, resolve_db_path
+    from ehr_simulator.db.connection import AccessMode
+    from ehr_simulator.logging import get_logger, setup_logging
+
+    setup_logging(Path("logs"))
+
+    try:
+        study = load_study_config(study_path)
+        questions = load_questions(questions_path)
+    except ConfigError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    live_hash = compute_config_hash_from_models(study, questions)
+    target_db = resolve_db_path(study, cli_override=db_path)
+    if not target_db.exists():
+        typer.echo(f"Error: database not found: {target_db}", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        dataset = build_dataset_loader(study)()
+        conn = connect(target_db, access=AccessMode.READ_ONLY)
+        try:
+            assert_schema_current(conn)
+            fig = divergence.build_divergence_figure(
+                conn,
+                study=study,
+                questions=questions,
+                live_hash=live_hash,
+                patient_id=patient,
+                dataset=dataset,
+            )
+        finally:
+            conn.close()
+        if out is None:
+            out = target_db.parent / f"divergence_{patient}.svg"
+        fig.save(out)
+    except (
+        ConfigError,
+        divergence.DivergenceError,
+        OperatorError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    get_logger().info(
+        "divergence.written", event_kind="divergence.written", patient=patient, svg=str(out)
+    )
+    typer.echo(
+        f"Wrote divergence figure for patient {patient} to {out} "
+        f"(descriptive only; arms: study config + recorded answers)"
     )
 
 

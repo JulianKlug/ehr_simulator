@@ -341,7 +341,11 @@ def walk_preflight_report(study: StudyConfig, questions: Questions) -> tuple[Pre
 # ---------------------------------------------------------------------------
 
 
-class ResetError(ValueError):
+class OperatorError(ValueError):
+    """An operator command cannot safely proceed."""
+
+
+class ResetError(OperatorError):
     """The operator asked for a reset that cannot be applied; nothing was written."""
 
 
@@ -440,7 +444,7 @@ def assert_schema_current(conn: Any) -> None:
     }
     pending = [m.version for m in MIGRATIONS if m.version not in applied]
     if pending:
-        raise ResetError(
+        raise OperatorError(
             f"database schema is behind (pending migrations {pending}); "
             "stop the server and run `ehr-simulator migrate` first"
         )
