@@ -247,6 +247,15 @@ def build_divergence_figure(
 
     # -- Timing (spec §4/§6) --------------------------------------------
     events = tuple(e for e in timing.fetch_timing_events(conn) if e.patient_id == patient_id)
+    # S9c guarantee retained by S10: a timing event's recording generation is
+    # pinned on its sessions row — refuse a present, differing hash.
+    for ev in events:
+        if ev.config_hash not in (None, live_hash):
+            raise DivergenceError(
+                "timepoint enter/exit event for clinician "
+                f"{ev.clinician_id!r}, patient {patient_id!r} was recorded in a session "
+                "opened under a different study/question configuration (config-hash drift)"
+            )
     t_points: list[tuple[str, float, float]] = []  # (arm, t, elapsed)
     for cid in sorted(arm_of):
         try:

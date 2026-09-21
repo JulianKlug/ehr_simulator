@@ -1005,6 +1005,53 @@ def seed_timing(
     db.commit()
 
 
+def test_stale_timing_events_refused_with_current_answers(
+    study, questions, db, ro_db, live_hash
+) -> None:
+    """Regression: S10 retains S9c's config-drift refusal for timing.
+
+    The events table has no config_hash; the recording generation is pinned
+    on the sessions row. A timepoint enter/exit pair recorded in a session
+    opened under an old config must refuse the export even when the
+    answer / progress / arm-assignment rows are all at the live
+    generation — otherwise a stale wall-clock interval would silently
+    decorate a current-generation row.
+    """
+    from ehr_simulator.db import sessions
+
+    stale_hash = "ccdd" * 8
+    frank = seed_clinician(db, "Frank")
+    session_id = sessions.start_or_resume(
+        db, frank, "synth_001", arm="no_ai", config_hash=stale_hash
+    )
+    # Close so the current-generation session below can open for the pair.
+    sessions.close(db, session_id)
+    # Everything else is current: arm, frontier, and answers all at live_hash.
+    seed_arm(db, frank, "synth_001", config_hash=live_hash)
+    seed_frontier(db, frank, "synth_001", 1, live_hash=live_hash)
+    seed_answer(db, frank, "synth_001", 0, "deterioration_6h", "No", config_hash=live_hash)
+    seed_answer(db, frank, "synth_001", 1, "deterioration_6h", "Yes", config_hash=live_hash)
+    # But the enter/exit pair rode on the stale session.
+    db.execute(
+        "INSERT INTO events "
+        "(session_id, clinician_id, patient_id, timepoint, kind, payload_json, server_ts) "
+        "VALUES (?, ?, ?, 0.0, 'timepoint.enter', '{}', '2026-03-10 08:00:00')",
+        (session_id, frank, "synth_001"),
+    )
+    db.execute(
+        "INSERT INTO events "
+        "(session_id, clinician_id, patient_id, timepoint, kind, payload_json, server_ts) "
+        "VALUES (?, ?, ?, 0.0, 'timepoint.exit', '{}', '2026-03-10 08:12:00')",
+        (session_id, frank, "synth_001"),
+    )
+    db.commit()
+
+    with pytest.raises(
+        ExportError, match="timepoint enter/exit events from another study configuration"
+    ):
+        build(study, questions, ro_db, live_hash=live_hash)
+
+
 def test_timing_cells_derive_from_enter_exit_events(study, questions, db, ro_db, live_hash) -> None:
     alice = seed_clinician(db, "Alice")
     seed_arm(db, alice, "synth_001", config_hash=live_hash)

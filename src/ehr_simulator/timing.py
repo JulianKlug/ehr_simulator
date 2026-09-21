@@ -49,6 +49,14 @@ Derivation rules (spec §4):
 
 Legacy data without ``timepoint.enter`` derives blank timing fields and
 remains exportable.
+
+Config generation (S9c guarantee retained by S10): the ``events`` table
+has no ``config_hash`` column of its own, but a real timepoint event is
+always appended through a ``sessions`` row, which does pin the hash the
+study was running under. :func:`fetch_timing_events` therefore LEFT-JOINs
+``sessions`` and surfaces :attr:`TimingEvent.config_hash` (``None`` when
+the row carries no session id). Exporters and the divergence view refuse
+rows whose session hash differs from the live hash.
 """
 
 from __future__ import annotations
@@ -95,6 +103,10 @@ class TimingEvent:
     timepoint: float | None
     kind: str
     server_ts: datetime
+    #: ``sessions.config_hash`` for the session this event was appended in,
+    #: or ``None`` when the row has no session id. ``None`` is never a
+    #: *different* generation — callers refuse only a present, differing hash.
+    config_hash: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -215,15 +227,22 @@ def fetch_timing_events(conn: sqlite3.Connection) -> tuple[TimingEvent, ...]:
     Runs one indexed ``SELECT``; callers that need a torn-state guarantee
     (the S9c export) must run this inside their existing explicit read
     transaction.
+
+    The sessions LEFT-JOIN surfaces each event's recording-generation hash
+    (``sessions.config_hash``) so callers can run the S9c config-drift
+    refusal on timing events too. A dangling or absent session id yields
+    ``config_hash=None`` (legacy/unattributable), which callers pass through.
     """
     rows = conn.execute(
         """
-        SELECT event_id, clinician_id, patient_id, timepoint, kind, server_ts
-        FROM events
-        WHERE kind IN (?, ?)
-          AND patient_id IS NOT NULL
-          AND timepoint IS NOT NULL
-        ORDER BY server_ts, event_id
+        SELECT e.event_id, e.clinician_id, e.patient_id, e.timepoint, e.kind,
+               e.server_ts, s.config_hash
+        FROM events e
+        LEFT JOIN sessions s ON s.session_id = e.session_id
+        WHERE e.kind IN (?, ?)
+          AND e.patient_id IS NOT NULL
+          AND e.timepoint IS NOT NULL
+        ORDER BY e.server_ts, e.event_id
         """,
         (ENTER_KIND, EXIT_KIND),
     ).fetchall()
@@ -235,6 +254,7 @@ def fetch_timing_events(conn: sqlite3.Connection) -> tuple[TimingEvent, ...]:
             timepoint=timepoint,
             kind=kind,
             server_ts=server_ts,
+            config_hash=config_hash,
         )
-        for event_id, clinician_id, patient_id, timepoint, kind, server_ts in rows
+        for event_id, clinician_id, patient_id, timepoint, kind, server_ts, config_hash in rows
     )

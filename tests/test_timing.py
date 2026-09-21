@@ -211,3 +211,42 @@ def test_fetch_timing_events_reads_only_timing_rows(db: sqlite3.Connection) -> N
     assert all(isinstance(e.server_ts, datetime) for e in got)
     # Deterministic ordering: (server_ts, event_id).
     assert [e.event_id for e in got] == sorted(e.event_id for e in got)
+    # No session on any row → no recording generation to check.
+    assert all(e.config_hash is None for e in got)
+
+
+def test_fetch_timing_events_surfaces_session_config_hash(db: sqlite3.Connection) -> None:
+    """The events table has no config_hash of its own; the generation is
+    pinned on the sessions row the event was appended in — the fetch must
+    surface it for callers' drift refusal."""
+    from ehr_simulator.db import events, sessions
+
+    cid = clinicians.lookup_or_create(db, "Alice")
+    live_hash = "aabb" * 8
+    other_hash = "ccdd" * 8
+    session_id = sessions.start_or_resume(db, cid, PID, arm="no_ai", config_hash=live_hash)
+    # ux_sessions_open caps the pair at one open session — close it, then
+    # open the stale-generation one.
+    sessions.close(db, session_id)
+    other_id = sessions.start_or_resume(db, cid, PID, arm="no_ai", config_hash=other_hash)
+    events.append(
+        db,
+        session_id=session_id,
+        clinician_id=cid,
+        patient_id=PID,
+        timepoint=T,
+        kind="timepoint.enter",
+        payload={"t_index": 0},
+    )
+    events.append(
+        db,
+        session_id=other_id,
+        clinician_id=cid,
+        patient_id=PID,
+        timepoint=60.0,
+        kind="timepoint.exit",
+        payload={"t_index": 1, "reason": "advance"},
+    )
+
+    got = timing.fetch_timing_events(db)
+    assert [(e.timepoint, e.config_hash) for e in got] == [(T, live_hash), (60.0, other_hash)]

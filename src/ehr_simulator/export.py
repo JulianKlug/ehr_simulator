@@ -276,6 +276,26 @@ def _build_under_snapshot(
                 f"does not know (patient {ev.patient_id!r}, clinician {ev.clinician_id!r}); "
                 "the DB was written under a different study config"
             )
+    # S10 keeps S9c's config-drift refusal for timing events: the events row
+    # carries no hash of its own, so the recording generation is pinned on
+    # the *session* that appended it (real timepoint events always have one).
+    # A present, differing hash is a mixed-generation DB and is refused, not
+    # merged; an event with no session at all is unattributable legacy data
+    # (the same posture as legacy data without ``timepoint.enter``).
+    stale = {ev.config_hash for ev in timing_events if ev.config_hash not in (None, live_hash)}
+    if stale:
+        lines = [
+            "database contains timepoint enter/exit events from another study configuration.",
+            f"Live config: {live_hash[:4]}…",
+            "",
+        ]
+        for h in sorted(stale):
+            n = sum(1 for ev in timing_events if ev.config_hash == h)
+            lines.append(f"  events (via sessions): {h[:4]}… ({n} rows)")
+        lines.append(
+            "Refusing interpreted CSV export. Re-export under the config that recorded these rows."
+        )
+        raise ExportError("\n".join(lines))
 
     # -- 3) Group cells per pair; validate progress (spec §6.4) ----------
     cells: dict[tuple[str, str], dict[int, dict[str, str]]] = {}
