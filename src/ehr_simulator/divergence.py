@@ -294,7 +294,10 @@ def build_divergence_figure(
         timing_df = _placeholder_panel(tps, fallback_arm, "no completed timing intervals")
     panels.append((_PANEL_TIMING, timing_df))
 
-    arms_present = sorted(arm_of.values()) or [fallback_arm]
+    # S10 fix: deduplicate — multiple clinicians can share one arm, and the
+    # subtitle must list each arm once (rendering uses one colour per unique
+    # arm), not once per clinician.
+    arms_present = sorted(set(arm_of.values())) or [fallback_arm]
     arm_note = " · ".join(
         f"{a} = {_ARM_COLOR_NAMES[i % len(_ARM_COLOR_NAMES)]}" for i, a in enumerate(arms_present)
     )
@@ -338,31 +341,35 @@ def _attribute_arms(
                 f"{a.timepoint} the study config does not know"
             )
 
-    arm_of: dict[str, str] = {}
+    # S10 fix: arm_of is initialised from the *assignment map*, not just the
+    # clinicians appearing in all_answers — an arm assignment with no answers
+    # yet still pins a known arm for that clinician (the old code ignored that
+    # and could label the figure "not set"). Then every answer row is
+    # validated against its clinician's assigned arm (or, where there is no
+    # assignment, against the row's own column).
+    arm_of: dict[str, str] = {cid: assignments[cid] for cid in sorted(assignments)}
     for cid in sorted({a.clinician_id for a in all_answers}):
         assigned = assignments.get(cid)
         row_arms = sorted({a.arm for a in all_answers if a.clinician_id == cid})
+        if len(row_arms) > 1:
+            raise DivergenceError(
+                f"conflicting arm values ({', '.join(row_arms)}) in answer rows "
+                f"for clinician {cid}, patient {patient_id!r}"
+            )
         if assigned is not None:
-            if len(row_arms) > 1:
-                raise DivergenceError(
-                    f"conflicting arm values ({', '.join(row_arms)}) in answer rows "
-                    f"for clinician {cid}, patient {patient_id!r}"
-                )
             if row_arms and row_arms[0] != assigned:
                 raise DivergenceError(
                     f"answers for clinician {cid} (patient {patient_id!r}) hold arm "
                     f"{row_arms[0]!r} but the locked assignment is {assigned!r}"
                 )
-            arm_of[cid] = assigned
+            # arm_of[cid] already set from the assignment.
         elif len(row_arms) == 1:
             arm_of[cid] = row_arms[0]
-        elif len(row_arms) > 1:
-            raise DivergenceError(
-                f"conflicting arm values ({', '.join(row_arms)}) in answer rows "
-                f"for clinician {cid}, patient {patient_id!r}"
-            )
         else:
-            # Defensive: a clinician with answer rows always has ≥1 arm.
+            # Defensive: a clinician appearing in all_answers always has ≥1
+            # answer row carrying an arm, so this is unreachable; the guard
+            # keeps the failure loud (per-cid message) rather than a KeyError
+            # downstream.
             raise DivergenceError(f"no resolvable arm for clinician {cid}, patient {patient_id!r}")
     return arm_of
 

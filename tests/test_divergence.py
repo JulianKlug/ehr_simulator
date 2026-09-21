@@ -433,3 +433,49 @@ def test_other_scalar_variables_get_their_own_category() -> None:
     summary = divergence.newly_visible_summary(ds, PID, [0.0, 60.0])
     assert "other scalar 1" in summary[0]
     assert "nihs_stroke_scale" not in summary[0]
+
+
+def test_subtitle_deduplicates_shared_arms(
+    db: sqlite3.Connection, study, questions, live_hash: str, tmp_path: Path
+) -> None:
+    """Three clinicians in the same arm must list the arm ONCE in the
+    subtitle (matching one colour per unique arm in the rendering) — the
+    subtitle must not claim a second colour for the same arm."""
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    for name in ("Dr. One", "Dr. Two", "Dr. Three"):
+        cid = _seed_clinician(db, name)
+        _arm(db, cid, "no_ai", live_hash=live_hash)
+        _answer(
+            db, cid, t=0.0, qid="deterioration_6h", value="Yes", arm="no_ai", live_hash=live_hash
+        )
+
+    out = _render(db, study, questions, live_hash=live_hash, out_dir=tmp_path)
+    try:
+        svg = out.read_text(encoding="utf-8")
+    finally:
+        out.unlink(missing_ok=True)
+    assert svg.count("no_ai = black") == 1
+    assert "no_ai = red" not in svg
+    assert "no_ai = blue" not in svg
+
+
+def test_assignment_without_answers_pins_known_arm(
+    db: sqlite3.Connection, study, questions, live_hash: str, tmp_path: Path
+) -> None:
+    """A clinician with an arm assignment but no answers yet must still count
+    as that arm — the figure may not fall back to 'not set'."""
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    a = _seed_clinician(db, "Dr. Assigned")
+    _arm(db, a, "no_ai", live_hash=live_hash)  # no answers for this clinician
+
+    out = _render(db, study, questions, live_hash=live_hash, out_dir=tmp_path)
+    try:
+        svg = out.read_text(encoding="utf-8")
+    finally:
+        out.unlink(missing_ok=True)
+    assert "not set" not in svg
+    assert "no_ai = black" in svg
