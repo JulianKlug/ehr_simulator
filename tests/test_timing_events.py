@@ -186,6 +186,7 @@ def test_failed_exit_event_rolls_back_the_advance(
     assert r.headers.get("HX-Push-Url") == _view_url(1)
     assert _exit_pairs(study_client) == [(0.0, {"t_index": 0, "reason": "advance"})]
 
+
 def test_failed_full_document_render_records_no_enter(
     study_client: TestClient,
     monkeypatch: pytest.MonkeyPatch,

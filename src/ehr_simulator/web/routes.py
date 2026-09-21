@@ -549,38 +549,34 @@ async def patient_timepoint(
     )
     # Build/render the complete response before recording timepoint.enter.
     if _is_history_restore(request) or not _is_htmx(request):
-         response = _full_document(
-        request,
-        inner=inner,
-        patient_id=patient_id,
-        t_index=t_index,
-        chrome=chrome,
+        response = _full_document(
+            request,
+            inner=inner,
+            patient_id=patient_id,
+            t_index=t_index,
+            chrome=chrome,
         )
     else:
         response = HTMLResponse(
-        content=inner,
-        status_code=200,
-        headers={"HX-Push-Url": _timepoint_url(patient_id, t_index, chrome)},
+            content=inner,
+            status_code=200,
+            headers={"HX-Push-Url": _timepoint_url(patient_id, t_index, chrome)},
         )
 
     # Only a successfully rendered editable frontier counts as an enter.
-    if (
-    state.study is not None
-    and ctx is not None
-    and pane_mode(ctx.frontier, t_index) == "open"
-    ):
+    if state.study is not None and ctx is not None and pane_mode(ctx.frontier, t_index) == "open":
         record_enter(
-        state.db,
-        state,
-        ctx=ctx,
-        clinician_id=clinician_id or "",
-        patient_id=patient_id,
-        t_index=t_index,
-        t_minutes=float(resolved.t_minutes),
+            state.db,
+            state,
+            ctx=ctx,
+            clinician_id=clinician_id or "",
+            patient_id=patient_id,
+            t_index=t_index,
+            t_minutes=float(resolved.t_minutes),
         )
 
     return response
-    
+
 
 @router.post(
     "/patient/{patient_id}/timepoint/{t_index}/answer",
