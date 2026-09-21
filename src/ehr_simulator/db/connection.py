@@ -18,8 +18,10 @@ from __future__ import annotations
 
 import os
 import sqlite3
+from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
+from urllib.parse import quote
 
 from ehr_simulator.config.exceptions import ConfigError
 
@@ -27,11 +29,45 @@ if TYPE_CHECKING:
     from ehr_simulator.config.study import StudyConfig
 
 
+class AccessMode(StrEnum):
+    """Access mode for :func:`connect`.
+
+    ``READ_ONLY`` is the S9c export connection: the file is opened via
+    SQLite's ``mode=ro`` URI (it is never created), the boot journal/synchronous
+    PRAGMAs are **not** touched, and ``PRAGMA query_only=ON`` fences any
+    write. The file must already exist — a mistyped ``--db-path`` fails
+    fast instead of creating a database.
+    """
+
+    READ_WRITE = "read-write"
+    READ_ONLY = "read-only"
+
+
 _DEFAULT_DB_PATH = Path("data/ehr_simulator.db")
 
 
-def connect(db_path: Path, *, apply_pragmas: bool = True) -> sqlite3.Connection:
+def connect(
+    db_path: Path,
+    *,
+    apply_pragmas: bool = True,
+    access: AccessMode = AccessMode.READ_WRITE,
+) -> sqlite3.Connection:
     """Open a connection, set the row factory, apply boot PRAGMAs."""
+    if access is AccessMode.READ_ONLY:
+        db_path = Path(db_path)
+        if not db_path.exists():
+            raise FileNotFoundError(f"read-only connect: database file does not exist: {db_path}")
+        uri = f"file:{quote(db_path.as_posix(), safe='/')}?mode=ro"
+        conn = sqlite3.connect(
+            uri,
+            uri=True,
+            detect_types=sqlite3.PARSE_DECLTYPES,
+            check_same_thread=False,
+        )
+        conn.row_factory = sqlite3.Row
+        if apply_pragmas:
+            conn.execute("PRAGMA query_only = ON")
+        return conn
     conn = sqlite3.connect(
         db_path,
         detect_types=sqlite3.PARSE_DECLTYPES,

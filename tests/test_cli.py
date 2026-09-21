@@ -7,6 +7,7 @@ Uses :class:`typer.testing.CliRunner` for everything except the
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -548,3 +549,391 @@ def test_cli_reset_progress_refuses_stale_schema(
     conn = connect(db_path)
     assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
     conn.close()
+
+
+# ---------------------------------------------------------------------------
+# export-answers (S9c, spec tests 52-60)
+# ---------------------------------------------------------------------------
+
+STUDY_CONFIG = "study_synthetic.yaml"
+QUESTIONS = "questions.yaml"
+FINAL_INDEX = 2  # len([0, 60, 180]) - 1
+
+EXPECTED_ANSWER_HEADER = (
+    "patient_id,clinician_id,t_index,timepoint_minutes,arm,completed_at,"
+    "config_hash,deterioration_6h,survives_hospital,good_outcome_3mo,dead_6mo,"
+    "confidence,contributing_factors,free_notes"
+)
+
+
+def _live_hash(study_fixture_dir: Path) -> str:
+    from ehr_simulator.config import compute_config_hash
+
+    return compute_config_hash(study_fixture_dir / STUDY_CONFIG, study_fixture_dir / QUESTIONS)
+
+
+def _seed_completed_walk(
+    db: sqlite3.Connection, clinician_name: str, patient_id: str, *, live_hash: str
+) -> str:
+    from ehr_simulator.db import arm_assignments, clinicians, progress
+
+    cid = clinicians.lookup_or_create(db, clinician_name)
+    arm_assignments.assign_or_lookup(db, cid, patient_id, config_hash=live_hash)
+    for to_index in range(1, FINAL_INDEX + 1):
+        progress.unlock(
+            db,
+            clinician_id=cid,
+            patient_id=patient_id,
+            from_t_index=to_index - 1,
+            to_t_index=to_index,
+            config_hash=live_hash,
+        )
+    progress.mark_complete(
+        db,
+        clinician_id=cid,
+        patient_id=patient_id,
+        unlocked_t_index=FINAL_INDEX,
+        config_hash=live_hash,
+    )
+    return cid
+
+
+def _export_args(study_fixture_dir: Path, tmp_db_path: Path, *extra: str) -> list[str]:
+    return [
+        "export-answers",
+        str(study_fixture_dir / STUDY_CONFIG),
+        str(study_fixture_dir / QUESTIONS),
+        "--db-path",
+        str(tmp_db_path),
+        *extra,
+    ]
+
+
+def test_cli_export_answers_happy_path_writes_and_reports(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+) -> None:
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    out = tmp_path / "answers.csv"
+
+    result = runner.invoke(
+        cli.app_typer, _export_args(study_fixture_dir, tmp_db_path, "--out", str(out))
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert (
+        "Wrote 3 rows × 14 columns for 1 patient, 1 clinician (1 complete walk, 0 in progress)"
+        in result.stdout
+    )
+    assert f"to {out}" in result.stdout
+    lines = out.read_text(encoding="utf-8").splitlines()
+    assert lines[0] == EXPECTED_ANSWER_HEADER
+    assert len(lines) == 4  # header + 3 timepoint rows
+    assert lines[1].startswith("synth_001,")
+    assert "no_ai" in lines[1]
+
+
+def test_cli_export_answers_default_out_path_under_db_exports(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+) -> None:
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+
+    result = runner.invoke(cli.app_typer, _export_args(study_fixture_dir, tmp_db_path))
+
+    assert result.exit_code == 0, result.stderr
+    exports_dir = tmp_db_path.parent / "exports"
+    matches = list(exports_dir.glob("answers_*.csv"))
+    assert len(matches) == 1
+    assert "to " in result.stdout
+
+
+def test_cli_export_answers_refuses_existing_out_without_force(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+) -> None:
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    out = tmp_path / "answers.csv"
+    out.write_text("pre-existing", encoding="utf-8")
+
+    result = runner.invoke(
+        cli.app_typer, _export_args(study_fixture_dir, tmp_db_path, "--out", str(out))
+    )
+
+    assert result.exit_code == 1
+    assert "refusing to overwrite existing output" in result.stderr
+    assert out.read_text(encoding="utf-8") == "pre-existing"
+
+
+def test_cli_export_answers_force_replaces_existing_out(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+) -> None:
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    out = tmp_path / "answers.csv"
+    out.write_text("pre-existing", encoding="utf-8")
+
+    result = runner.invoke(
+        cli.app_typer, _export_args(study_fixture_dir, tmp_db_path, "--out", str(out), "--force")
+    )
+
+    assert result.exit_code == 0, result.stderr
+    first_line = out.read_text(encoding="utf-8").splitlines()[0]
+    assert first_line == EXPECTED_ANSWER_HEADER
+
+
+def test_cli_export_answers_failures_exit_1_and_leave_no_output(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+) -> None:
+    # (a) missing database
+    missing_db = tmp_path / "does_not_exist" / "db.sqlite3"
+    out_a = tmp_path / "a.csv"
+    result = runner.invoke(
+        cli.app_typer, _export_args(study_fixture_dir, missing_db, "--out", str(out_a))
+    )
+    assert result.exit_code == 1
+    assert "database not found" in result.stderr
+    assert not any(p.exists() for p in [out_a])
+
+    # (b) stale schema: only migration 1
+    from ehr_simulator.db import MIGRATIONS, connect
+
+    stale_db = tmp_path / "stale.db"
+    stale_db.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(stale_db)
+    conn.executescript(MIGRATIONS[0].up_sql)
+    conn.execute(
+        "CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL,"
+        " applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    conn.execute("INSERT INTO schema_migrations (version, name) VALUES (1, 'initial')")
+    conn.commit()
+    conn.close()
+    out_b = tmp_path / "b.csv"
+    result = runner.invoke(
+        cli.app_typer, _export_args(study_fixture_dir, stale_db, "--out", str(out_b))
+    )
+    assert result.exit_code == 1
+    assert "pending migrations" in result.stderr
+    assert not out_b.exists()
+
+    # (c) integrity failure: foreign config hash in one table
+    from ehr_simulator.db import arm_assignments, clinicians
+
+    foreign_hash = "a" * 64
+    cid = clinicians.lookup_or_create(db, "Dr. Drift")
+    arm_assignments.assign_or_lookup(db, cid, "synth_001", config_hash=foreign_hash)
+    out_c = tmp_path / "c.csv"
+    result = runner.invoke(
+        cli.app_typer, _export_args(study_fixture_dir, tmp_db_path, "--out", str(out_c))
+    )
+    assert result.exit_code == 1
+    assert "another study configuration" in result.stderr
+    assert not out_c.exists()
+
+
+def test_cli_export_answers_keyfile_writes_mode_0600(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+) -> None:
+    import hashlib
+    import stat
+
+    from ehr_simulator.db import clinicians
+
+    clinician_id = clinicians.lookup_or_create(db, "Dr. CLI")
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    keyfile = tmp_path / "keys" / "clinicians.keyfile.csv"
+
+    result = runner.invoke(
+        cli.app_typer,
+        _export_args(
+            study_fixture_dir,
+            tmp_db_path,
+            "--out",
+            str(tmp_path / "answers.csv"),
+            "--keyfile",
+            str(keyfile),
+        ),
+    )
+
+    assert result.exit_code == 0, result.stderr
+    assert stat.S_IMODE(keyfile.stat().st_mode) == 0o600
+    assert hashlib.sha256(b"dr. cli").hexdigest()[:16] == clinician_id
+    assert keyfile.read_text(encoding="utf-8") == (
+        f"clinician_id,name_normalized\n{clinician_id},dr. cli\n"
+    )
+    assert "Wrote keyfile" in result.stdout
+
+
+def test_cli_export_answers_same_path_for_out_and_keyfile_refused(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+) -> None:
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    same = tmp_path / "both.csv"
+
+    result = runner.invoke(
+        cli.app_typer,
+        _export_args(
+            study_fixture_dir,
+            tmp_db_path,
+            "--out",
+            str(same),
+            "--keyfile",
+            str(same),
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert "same path" in result.stderr
+    assert not same.exists()
+
+
+def test_cli_export_answers_keyfile_refused_on_non_posix(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    from ehr_simulator import export as export_module
+
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+
+    class _NonPosixOS:
+        """Looks like a non-POSIX ``os`` module but delegates everything else."""
+
+        name = "nt"
+
+        def __getattr__(self, item: str) -> object:
+            return getattr(os, item)
+
+    monkeypatch.setattr(export_module, "os", _NonPosixOS())
+    keyfile = tmp_path / "clinicians.keyfile.csv"
+    out = tmp_path / "answers.csv"
+
+    result = runner.invoke(
+        cli.app_typer,
+        _export_args(
+            study_fixture_dir,
+            tmp_db_path,
+            "--out",
+            str(out),
+            "--keyfile",
+            str(keyfile),
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert "keyfile" in result.stderr
+    assert not out.exists()
+    assert not keyfile.exists()
+
+
+def test_cli_export_answers_os_failure_is_exit_1(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from ehr_simulator import export as export_module
+
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    out = tmp_path / "answers.csv"
+
+    def fail_write(*_args, **_kwargs):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(export_module, "write_export", fail_write)
+
+    result = runner.invoke(
+        cli.app_typer,
+        _export_args(study_fixture_dir, tmp_db_path, "--out", str(out)),
+    )
+
+    assert result.exit_code == 1
+    assert "Error: permission denied" in result.stderr
+    assert not out.exists()
+
+
+def test_cli_export_answers_invisible_to_uncommitted_writer(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+) -> None:
+    from ehr_simulator.db import connect
+
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    live_hash = _live_hash(study_fixture_dir)
+    bob = "b" * 16
+
+    writer = connect(tmp_db_path)
+    try:
+        writer.execute("BEGIN IMMEDIATE")
+        writer.execute(
+            "INSERT INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
+            (bob, "bob"),
+        )
+        writer.execute(
+            "INSERT INTO arm_assignments "
+            "(clinician_id, patient_id, arm, arm_source, seed, config_hash) "
+            "VALUES (?, ?, ?, ?, NULL, ?)",
+            (bob, "synth_001", "no_ai", "test", live_hash),
+        )
+        writer.execute(
+            "INSERT INTO progress (clinician_id, patient_id, unlocked_t_index, config_hash) "
+            "VALUES (?, ?, ?, ?)",
+            (bob, "synth_001", 0, live_hash),
+        )
+        writer.execute(
+            "INSERT INTO answers "
+            "(clinician_id, patient_id, timepoint, question_id, value, arm, config_hash) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (bob, "synth_001", 0.0, "deterioration_6h", "Yes", "no_ai", live_hash),
+        )
+        # Deliberately no COMMIT.
+
+        out = tmp_path / "answers.csv"
+        result = runner.invoke(
+            cli.app_typer,
+            _export_args(study_fixture_dir, tmp_db_path, "--out", str(out)),
+        )
+
+        assert result.exit_code == 0, result.stderr
+        assert "Wrote 3 rows" in result.stdout
+        assert bob not in out.read_text(encoding="utf-8")
+        # The writer remains usable and still sees its own uncommitted row.
+        assert writer.execute("SELECT COUNT(*) FROM clinicians").fetchone()[0] == 2
+    finally:
+        writer.rollback()
+        writer.close()

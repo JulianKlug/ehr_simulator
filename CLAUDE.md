@@ -85,3 +85,10 @@ Key routing rules:
 - Architecture review → invoke plan-eng-review
 - Save progress, checkpoint, resume → invoke checkpoint
 - Code quality, health check → invoke health
+
+# Basics
+- Never use sudo.
+- Do not access files outside this repository.
+- Never run production migrations.
+- Ask before deleting files.
+- Do not deploy or push changes.

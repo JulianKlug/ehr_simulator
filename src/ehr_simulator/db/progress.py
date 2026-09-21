@@ -50,6 +50,21 @@ def _bump(app_state: Any) -> None:
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
 
 
+def fetch_all(conn: sqlite3.Connection) -> dict[tuple[str, str], Progress]:
+    """Every walk frontier keyed by ``(clinician_id, patient_id)``.
+
+    Query order is deterministic, so dict insertion order is deterministic too.
+    """
+    rows = conn.execute(
+        f"SELECT {_SELECT_COLUMNS} FROM progress ORDER BY clinician_id, patient_id"
+    ).fetchall()
+    result: dict[tuple[str, str], Progress] = {}
+    for row in rows:
+        item = _row_to_progress(row)
+        result[(item.clinician_id, item.patient_id)] = item
+    return result
+
+
 def fetch(conn: sqlite3.Connection, *, clinician_id: str, patient_id: str) -> Progress | None:
     """Return the pair's row, or ``None`` when the walk has not started."""
     row = conn.execute(

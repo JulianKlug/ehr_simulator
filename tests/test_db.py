@@ -912,3 +912,123 @@ def test_events_kind_taxonomy_includes_s9b_kinds(db: sqlite3.Connection) -> None
         )  # type: ignore[arg-type]
     n = db.execute("SELECT COUNT(*) FROM events").fetchone()[0]
     assert n == len(new_kinds)
+
+
+# ---------------------------------------------------------------------------
+# S9c (spec tests 63-68): export read paths — DAO fetch_all/fetch_by_ids and
+# read-only connections.
+# ---------------------------------------------------------------------------
+
+from ehr_simulator.db import AccessMode  # noqa: E402
+
+S9C_HASH = "c" * 64
+
+
+def test_answers_fetch_all_deterministic_typed_rows(db) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    answers.upsert(
+        db,
+        clinician_id=cid,
+        patient_id="p2",
+        timepoint=60.0,
+        question_id="zeta",
+        value="v",
+        arm="no_ai",
+        config_hash=S9C_HASH,
+    )
+    answers.upsert(
+        db,
+        clinician_id=cid,
+        patient_id="p1",
+        timepoint=60.0,
+        question_id="alpha",
+        value="v",
+        arm="no_ai",
+        config_hash=S9C_HASH,
+    )
+    answers.upsert(
+        db,
+        clinician_id=cid,
+        patient_id="p1",
+        timepoint=0.0,
+        question_id="zeta",
+        value="v",
+        arm="no_ai",
+        config_hash=S9C_HASH,
+    )
+    rows = answers.fetch_all(db)
+    assert isinstance(rows, tuple)
+    assert all(isinstance(r, answers.AnswerRow) for r in rows)
+    assert [(r.patient_id, r.timepoint, r.question_id) for r in rows] == [
+        ("p1", 0.0, "zeta"),
+        ("p1", 60.0, "alpha"),
+        ("p2", 60.0, "zeta"),
+    ]
+    assert all(isinstance(r.timepoint, float) for r in rows)
+
+
+def test_progress_fetch_all_keyed_by_pair(db) -> None:
+    a = clinicians.lookup_or_create(db, "Dr. Alpha")
+    b = clinicians.lookup_or_create(db, "Dr. Beta")
+    progress.unlock(
+        db, clinician_id=a, patient_id="p2", from_t_index=0, to_t_index=1, config_hash=S9C_HASH
+    )
+    progress.unlock(
+        db, clinician_id=b, patient_id="p1", from_t_index=0, to_t_index=1, config_hash=S9C_HASH
+    )
+    progress.mark_complete(
+        db,
+        clinician_id=b,
+        patient_id="p1",
+        unlocked_t_index=1,
+        config_hash=S9C_HASH,
+    )
+    rows = progress.fetch_all(db)
+    assert list(rows) == [(a, "p2"), (b, "p1")]
+    assert all(isinstance(row.unlocked_t_index, int) for row in rows.values())
+    assert rows[(a, "p2")].completed_at is None
+    assert rows[(b, "p1")].completed_at is not None
+
+
+def test_arm_assignments_fetch_all_returns_arm_source_and_hash(db) -> None:
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+    arm_assignments.assign_or_lookup(db, cid, "p1", config_hash=S9C_HASH)
+    rows = arm_assignments.fetch_all(db)
+    assert len(rows) == 1
+    row = rows[0]
+    assert (row.clinician_id, row.patient_id) == (cid, "p1")
+    assert row.arm == "no_ai"
+    assert row.arm_source == "phase1_stub"
+    assert row.config_hash == S9C_HASH
+
+
+def test_clinicians_fetch_by_ids_only_requested_in_deterministic_order(db) -> None:
+    a = clinicians.lookup_or_create(db, "Dr. Alpha")
+    b = clinicians.lookup_or_create(db, "Dr. Beta")
+    clinicians.lookup_or_create(db, "Dr. Not requested")
+    result = clinicians.fetch_by_ids(db, [b, a, a, "f" * 16])
+    assert [row[0] for row in result] == sorted({a, b})
+    assert all(row[1] for row in result)
+
+
+def test_read_only_connection_rejects_insert(db, tmp_db_path: Path) -> None:
+    ro = connect(tmp_db_path, access=AccessMode.READ_ONLY)
+    try:
+        with pytest.raises(sqlite3.OperationalError):
+            ro.execute(
+                "INSERT INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
+                ("f" * 16, "forbidden"),
+            )
+    finally:
+        ro.close()
+    n = db.execute(
+        "SELECT COUNT(*) FROM clinicians WHERE clinician_id = ?", ("f" * 16,)
+    ).fetchone()[0]
+    assert n == 0
+
+
+def test_read_only_connect_refuses_missing_db(tmp_path: Path) -> None:
+    missing = tmp_path / "sub" / "nope.db"
+    with pytest.raises(FileNotFoundError):
+        connect(missing, access=AccessMode.READ_ONLY)
+    assert not missing.exists()

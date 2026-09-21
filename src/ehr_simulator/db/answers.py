@@ -14,7 +14,21 @@ how S9b reads "unanswered").
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from typing import Any
+
+
+@dataclass(frozen=True)
+class AnswerRow:
+    """One fully materialized ``answers`` row (S9c export reads all of them)."""
+
+    clinician_id: str
+    patient_id: str
+    timepoint: float
+    question_id: str
+    value: str
+    arm: str
+    config_hash: str
 
 
 def upsert(
@@ -49,6 +63,32 @@ def upsert(
     conn.commit()
     if app_state is not None:
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
+
+
+def fetch_all(conn: sqlite3.Connection) -> tuple[AnswerRow, ...]:
+    """Every ``answers`` row, in a stable order.
+
+    S9c read path: the export takes its own snapshot transaction around this;
+    the ordering (analysis cell, then question id) is the one the pipeline
+    expects for grouping and is what makes re-runs byte-stable.
+    """
+    rows = conn.execute(
+        "SELECT clinician_id, patient_id, timepoint, question_id, value, arm, config_hash "
+        "FROM answers "
+        "ORDER BY clinician_id, patient_id, timepoint, question_id"
+    ).fetchall()
+    return tuple(
+        AnswerRow(
+            clinician_id=row[0],
+            patient_id=row[1],
+            timepoint=float(row[2]),
+            question_id=row[3],
+            value=row[4],
+            arm=row[5],
+            config_hash=row[6],
+        )
+        for row in rows
+    )
 
 
 def fetch_for_cell(

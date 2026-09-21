@@ -603,3 +603,29 @@ def test_compute_config_hash_changes_on(tmp_path: Path, mutation: str) -> None:
 
     b_s, b_q = _write_pair(b_dir, b_study, b_questions)
     assert compute_config_hash(a_s, a_q) != compute_config_hash(b_s, b_q)
+
+
+# ---------------------------------------------------------------------------
+# S9c (spec tests 61-62): pipe rejection in multi-select options (CSV
+# delimiter clash) while categorical options keep raw text.
+# ---------------------------------------------------------------------------
+
+
+def test_multi_select_rejects_option_containing_pipe() -> None:
+    with pytest.raises(ValueError, match="contains '\\|'"):
+        MultiSelectQuestion(
+            question_id="q_ms_pipe",
+            prompt="which?",
+            options=["Imaging", "Vitals|Labs"],
+            response_type="multi-select",
+        )
+
+
+def test_categorical_option_containing_pipe_is_accepted() -> None:
+    q = CategoricalQuestion(
+        question_id="q_cat_pipe",
+        prompt="which?",
+        options=["a|b", "c"],
+        response_type="categorical",
+    )
+    assert q.options == ["a|b", "c"]
