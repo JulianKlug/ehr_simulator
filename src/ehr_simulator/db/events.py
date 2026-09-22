@@ -39,6 +39,15 @@ EventKind = Literal[
     "advance.ok",
     "advance.blocked",
     "progress.reset",
+    # S10: behavioural timing. ``timepoint.enter`` fires whenever a clinician
+    # is shown a timepoint pane (GET render or the 200 advance that moves to
+    # it — refreshes duplicate the enter, the exporter prefers the first valid
+    # pairing); ``timepoint.exit`` fires exactly once per timepoint, written
+    # by the winning advance (or the completing final advance). ``server_ts``
+    # is the source of truth for the export's timing columns and the
+    # divergence figure.
+    "timepoint.enter",
+    "timepoint.exit",
 ]
 EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 
@@ -55,8 +64,17 @@ def append(
     client_ts: str | None = None,
     client_seq: int | None = None,
     app_state: Any = None,
+    commit: bool = True,
 ) -> int:
-    """Insert one ``events`` row; return its autoincrement ``event_id``."""
+    """Insert one ``events`` row; return its autoincrement ``event_id``.
+
+    S10: ``commit=False`` leaves the row in the connection's open
+    transaction (legacy ``isolation_level=""`` mode: the DML began it)
+    and defers the write-counter bump, so the caller can batch the state
+    writes and the behavioral events of one advance into a single atomic
+    ``conn.commit()`` (see ``web/gating.py``); a failed batch is discarded
+    whole by ``conn.rollback()``.
+    """
     if kind not in EVENT_KINDS:
         raise ValueError(f"unknown event kind {kind!r}")
 
@@ -78,11 +96,12 @@ def append(
                 client_seq,
             ),
         )
-        conn.commit()
     except sqlite3.IntegrityError as exc:
         raise DbError(str(exc)) from exc
+    if commit:
+        conn.commit()
     event_id = cursor.lastrowid
-    if app_state is not None:
+    if commit and app_state is not None:
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
     assert event_id is not None
     return event_id

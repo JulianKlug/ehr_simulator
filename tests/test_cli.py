@@ -560,7 +560,8 @@ QUESTIONS = "questions.yaml"
 FINAL_INDEX = 2  # len([0, 60, 180]) - 1
 
 EXPECTED_ANSWER_HEADER = (
-    "patient_id,clinician_id,t_index,timepoint_minutes,arm,completed_at,"
+    "patient_id,clinician_id,t_index,timepoint_minutes,timepoint_started_at,"
+    "timepoint_ended_at,elapsed_seconds,arm,completed_at,"
     "config_hash,deterioration_6h,survives_hospital,good_outcome_3mo,dead_6mo,"
     "confidence,contributing_factors,free_notes"
 )
@@ -625,7 +626,7 @@ def test_cli_export_answers_happy_path_writes_and_reports(
 
     assert result.exit_code == 0, result.stderr
     assert (
-        "Wrote 3 rows × 14 columns for 1 patient, 1 clinician (1 complete walk, 0 in progress)"
+        "Wrote 3 rows × 17 columns for 1 patient, 1 clinician (1 complete walk, 0 in progress)"
         in result.stdout
     )
     assert f"to {out}" in result.stdout
@@ -937,3 +938,59 @@ def test_cli_export_answers_invisible_to_uncommitted_writer(
     finally:
         writer.rollback()
         writer.close()
+
+
+# ---------------------------------------------------------------------------
+# Subprocess regression (spec S10 §8): a refusal must become OS status 1.
+# CliRunner never creates a new process, so this cannot be covered above.
+# ---------------------------------------------------------------------------
+
+
+def _console_script() -> Path:
+    import sys
+
+    exe = Path(sys.executable).parent / "ehr-simulator"
+    assert exe.is_file(), "installed console script missing"
+    return exe
+
+
+def test_cli_rejection_reaches_os_process_status_1(
+    study_fixture_dir: Path,
+) -> None:
+    import subprocess
+
+    result = subprocess.run(
+        [
+            str(_console_script()),
+            "validate-config",
+            str(study_fixture_dir / "study_broken_missing_schema_version.yaml"),
+            str(study_fixture_dir / "questions.yaml"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 1, (result.stdout, result.stderr)
+    # A clean refusal message, not an unhandled traceback.
+    assert "schema_version" in result.stderr
+    assert "Traceback (most recent call last)" not in result.stderr
+
+
+def test_cli_success_reaches_os_process_status_0(
+    study_fixture_dir: Path,
+) -> None:
+    import subprocess
+
+    result = subprocess.run(
+        [
+            str(_console_script()),
+            "validate-config",
+            str(study_fixture_dir / "study_synthetic.yaml"),
+            str(study_fixture_dir / "questions.yaml"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=180,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+    assert "Traceback (most recent call last)" not in result.stderr

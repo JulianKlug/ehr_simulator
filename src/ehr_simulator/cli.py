@@ -54,8 +54,21 @@ app_typer: typer.Typer = typer.Typer(
 
 
 def main(argv: list[str] | None = None) -> None:
-    """Entry point. Preserves the S2 argparse signature for back-compat tests."""
-    return app_typer(args=argv, standalone_mode=False)
+    """Console entry point (S10 §8: command failure must reach the OS).
+
+    With ``standalone_mode=True`` typer/click translate ``Exit`` into
+    ``SystemExit(1)`` (refusal) or ``SystemExit(2)`` (usage); success
+    paths return ``None`` so direct ``cli.main([...])`` test ergonomics
+    survive. A refusal surfaces as ``SystemExit`` with the exact code,
+    which the installed console script propagates as the process status.
+    """
+    try:
+        app_typer(args=argv, standalone_mode=True)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else (0 if exc.code is None else 1)
+        if code == 0:
+            return None
+        raise SystemExit(code) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -584,6 +597,97 @@ def export_answers(
     if keyfile is not None:
         n = len(bundle.keyfile_rows or ())
         typer.echo(f"Wrote keyfile ({n} {clin_word}, mode 600) to {keyfile}")
+
+
+# ---------------------------------------------------------------------------
+# divergence-view (S10)
+# ---------------------------------------------------------------------------
+
+
+@app_typer.command("divergence-view")
+def divergence_view(
+    study_path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="Path to study_config.yaml."
+    ),
+    questions_path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="Path to questions.yaml."
+    ),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite DB; defaults to the study's db_path / data/ehr_simulator.db.",
+    ),
+    patient: str = typer.Option(
+        ..., "--patient", help="One configured patient id; renders one figure."
+    ),
+    out: Path | None = typer.Option(
+        None,
+        "--out",
+        help="SVG destination; defaults to <db dir>/divergence_<patient>.svg.",
+    ),
+) -> None:
+    """Render the rough per-patient divergence figure (SVG) from the study DB."""
+    from ehr_simulator import divergence
+    from ehr_simulator.cli_support import OperatorError, assert_schema_current, build_dataset_loader
+    from ehr_simulator.config import (
+        compute_config_hash_from_models,
+        load_questions,
+        load_study_config,
+    )
+    from ehr_simulator.db import connect, resolve_db_path
+    from ehr_simulator.db.connection import AccessMode
+    from ehr_simulator.logging import get_logger, setup_logging
+
+    setup_logging(Path("logs"))
+
+    try:
+        study = load_study_config(study_path)
+        questions = load_questions(questions_path)
+    except ConfigError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    live_hash = compute_config_hash_from_models(study, questions)
+    target_db = resolve_db_path(study, cli_override=db_path)
+    if not target_db.exists():
+        typer.echo(f"Error: database not found: {target_db}", err=True)
+        raise typer.Exit(code=1)
+
+    try:
+        dataset = build_dataset_loader(study)()
+        conn = connect(target_db, access=AccessMode.READ_ONLY)
+        try:
+            assert_schema_current(conn)
+            fig = divergence.build_divergence_figure(
+                conn,
+                study=study,
+                questions=questions,
+                live_hash=live_hash,
+                patient_id=patient,
+                dataset=dataset,
+            )
+        finally:
+            conn.close()
+        if out is None:
+            out = target_db.parent / f"divergence_{patient}.svg"
+        fig.save(out)
+    except (
+        ConfigError,
+        divergence.DivergenceError,
+        OperatorError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    get_logger().info(
+        "divergence.written", event_kind="divergence.written", patient=patient, svg=str(out)
+    )
+    typer.echo(
+        f"Wrote divergence figure for patient {patient} to {out} "
+        f"(descriptive only; arms: study config + recorded answers)"
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover - manual smoke

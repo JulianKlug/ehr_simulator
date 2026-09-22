@@ -69,6 +69,7 @@ from ehr_simulator.web.study_session import (
     bootstrap_session,
     read_frontier,
 )
+from ehr_simulator.web.timing_events import record_enter
 
 router = APIRouter()
 
@@ -546,17 +547,35 @@ async def patient_timepoint(
         resolved=resolved,
         ctx=ctx,
     )
-
-    # A history restore is an HX request that wants the whole document back.
+    # Build/render the complete response before recording timepoint.enter.
     if _is_history_restore(request) or not _is_htmx(request):
-        return _full_document(
-            request, inner=inner, patient_id=patient_id, t_index=t_index, chrome=chrome
+        response = _full_document(
+            request,
+            inner=inner,
+            patient_id=patient_id,
+            t_index=t_index,
+            chrome=chrome,
         )
-    return HTMLResponse(
-        content=inner,
-        status_code=200,
-        headers={"HX-Push-Url": _timepoint_url(patient_id, t_index, chrome)},
-    )
+    else:
+        response = HTMLResponse(
+            content=inner,
+            status_code=200,
+            headers={"HX-Push-Url": _timepoint_url(patient_id, t_index, chrome)},
+        )
+
+    # Only a successfully rendered editable frontier counts as an enter.
+    if state.study is not None and ctx is not None and pane_mode(ctx.frontier, t_index) == "open":
+        record_enter(
+            state.db,
+            state,
+            ctx=ctx,
+            clinician_id=clinician_id or "",
+            patient_id=patient_id,
+            t_index=t_index,
+            t_minutes=float(resolved.t_minutes),
+        )
+
+    return response
 
 
 @router.post(
@@ -801,6 +820,20 @@ def _advance_response(
     status_code = (
         status.HTTP_200_OK if result.outcome == "advanced" else status.HTTP_412_PRECONDITION_FAILED
     )
+    if result.outcome == "advanced":
+        # S10: the htmx swap shows the next frontier pane without a new GET,
+        # so its enter rides on this response. The 412 "stale" reply keeps
+        # the frontier the clinician is actually on — no enter there (and
+        # the non-HTMX 303 path defers to the GET that follows).
+        record_enter(
+            request.app.state.db,
+            request.app.state,
+            ctx=target_ctx,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            t_index=target_t_index,
+            t_minutes=float(target_resolved.t_minutes),
+        )
     return HTMLResponse(content=inner, status_code=status_code, headers={"HX-Push-Url": target_url})
 
 

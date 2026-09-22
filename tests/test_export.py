@@ -188,6 +188,9 @@ def test_header_is_metadata_then_questions_yaml_order(
         "clinician_id",
         "t_index",
         "timepoint_minutes",
+        "timepoint_started_at",
+        "timepoint_ended_at",
+        "elapsed_seconds",
         "arm",
         "completed_at",
         "config_hash",
@@ -226,7 +229,7 @@ def test_answer_only_pair_frontier_is_highest_answered(
 
     frame = build(study, questions, ro_db, live_hash=live_hash).frame
     assert [r[2] for r in frame.rows] == ["0", "1"]
-    assert [r[6] for r in frame.rows] == [live_hash] * 2
+    assert [r[9] for r in frame.rows] == [live_hash] * 2
     # Answer-only pairs can never count as complete.
     assert bundle_complete_counts(frame) == (0, 1)
 
@@ -250,10 +253,10 @@ def test_progress_only_pair_yields_blank_answer_cells(
     frame = build(study, questions, ro_db, live_hash=live_hash).frame
     assert len(frame.rows) == 1
     row = frame.rows[0]
-    # Metadata cells are all populated...
-    assert row[:7] == ("synth_001", alice, "0", "0.0", "no_ai", "", live_hash)
+    # Metadata cells are all populated... (timing blank: no enter/exit events)
+    assert row[:10] == ("synth_001", alice, "0", "0.0", "", "", "", "no_ai", "", live_hash)
     # ...and every answer cell is the empty string.
-    assert row[7:] == ("",) * 7
+    assert row[10:] == ("",) * 7
 
 
 def test_only_complete_drops_incomplete_pairs_silently(
@@ -314,7 +317,7 @@ def test_completed_at_repeats_on_every_row_of_the_pair(
     seed_complete(db, alice, "synth_001", FINAL_INDEX, live_hash=live_hash)
 
     frame = build(study, questions, ro_db, live_hash=live_hash).frame
-    stamp = [r[5] for r in frame.rows]
+    stamp = [r[8] for r in frame.rows]
     assert len(stamp) == FINAL_INDEX + 1
     assert len(set(stamp)) == 1  # same wall-clock on every row of the walk
     assert stamp[0]
@@ -330,7 +333,7 @@ def test_completed_at_cell_matches_db_value(study, questions, db, ro_db, live_ha
     ).fetchone()[0]
 
     frame = build(study, questions, ro_db, live_hash=live_hash).frame
-    assert frame.rows[0][5] == stored.strftime("%Y-%m-%d %H:%M:%S")
+    assert frame.rows[0][8] == stored.strftime("%Y-%m-%d %H:%M:%S")
 
 
 def test_completed_at_cell_uses_exact_format(study, questions, db, ro_db, live_hash) -> None:
@@ -340,7 +343,7 @@ def test_completed_at_cell_uses_exact_format(study, questions, db, ro_db, live_h
     seed_complete(db, alice, "synth_001", FINAL_INDEX, live_hash=live_hash)
 
     frame = build(study, questions, ro_db, live_hash=live_hash).frame
-    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", frame.rows[0][5])
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", frame.rows[0][8])
 
 
 def test_row_order_is_patient_then_clinician_then_t_index(
@@ -715,7 +718,7 @@ def test_csv_round_trips_utf8_commas_quotes_and_newlines(
     idx = parsed[0].index("free_notes")
     assert parsed[1][idx] == 'Stable — café, "quoted" notes\nover two lines.'
     assert len(parsed) == 2
-    assert len(parsed[0]) == 14
+    assert len(parsed[0]) == 17
 
 
 def test_csv_reads_back_as_pandas_frame(study, questions, db, ro_db, tmp_path, live_hash) -> None:
@@ -978,3 +981,204 @@ def test_export_module_never_imports_web() -> None:
     for name in imported:
         parts = name.split(".")
         assert "web" not in parts, name
+
+
+# ---------------------------------------------------------------------------
+# S10 timing columns (spec §4): started/ended/elapsed derived from events
+# ---------------------------------------------------------------------------
+
+
+def seed_timing(
+    db: sqlite3.Connection,
+    clinician_id: str,
+    patient_id: str,
+    timepoint: float,
+    rows: list[tuple[str, str]],  # (kind, server_ts) in emission order
+) -> None:
+    for kind, ts in rows:
+        db.execute(
+            "INSERT INTO events "
+            "(clinician_id, patient_id, timepoint, kind, payload_json, server_ts) "
+            "VALUES (?, ?, ?, ?, '{}', ?)",
+            (clinician_id, patient_id, timepoint, kind, ts),
+        )
+    db.commit()
+
+
+def test_stale_timing_events_refused_with_current_answers(
+    study, questions, db, ro_db, live_hash
+) -> None:
+    """Regression: S10 retains S9c's config-drift refusal for timing.
+
+    The events table has no config_hash; the recording generation is pinned
+    on the sessions row. A timepoint enter/exit pair recorded in a session
+    opened under an old config must refuse the export even when the
+    answer / progress / arm-assignment rows are all at the live
+    generation — otherwise a stale wall-clock interval would silently
+    decorate a current-generation row.
+    """
+    from ehr_simulator.db import sessions
+
+    stale_hash = "ccdd" * 8
+    frank = seed_clinician(db, "Frank")
+    session_id = sessions.start_or_resume(
+        db, frank, "synth_001", arm="no_ai", config_hash=stale_hash
+    )
+    # Close so the current-generation session below can open for the pair.
+    sessions.close(db, session_id)
+    # Everything else is current: arm, frontier, and answers all at live_hash.
+    seed_arm(db, frank, "synth_001", config_hash=live_hash)
+    seed_frontier(db, frank, "synth_001", 1, live_hash=live_hash)
+    seed_answer(db, frank, "synth_001", 0, "deterioration_6h", "No", config_hash=live_hash)
+    seed_answer(db, frank, "synth_001", 1, "deterioration_6h", "Yes", config_hash=live_hash)
+    # But the enter/exit pair rode on the stale session.
+    db.execute(
+        "INSERT INTO events "
+        "(session_id, clinician_id, patient_id, timepoint, kind, payload_json, server_ts) "
+        "VALUES (?, ?, ?, 0.0, 'timepoint.enter', '{}', '2026-03-10 08:00:00')",
+        (session_id, frank, "synth_001"),
+    )
+    db.execute(
+        "INSERT INTO events "
+        "(session_id, clinician_id, patient_id, timepoint, kind, payload_json, server_ts) "
+        "VALUES (?, ?, ?, 0.0, 'timepoint.exit', '{}', '2026-03-10 08:12:00')",
+        (session_id, frank, "synth_001"),
+    )
+    db.commit()
+
+    with pytest.raises(
+        ExportError, match="timepoint enter/exit events from another study configuration"
+    ):
+        build(study, questions, ro_db, live_hash=live_hash)
+
+
+def test_timing_cells_derive_from_enter_exit_events(study, questions, db, ro_db, live_hash) -> None:
+    alice = seed_clinician(db, "Alice")
+    seed_arm(db, alice, "synth_001", config_hash=live_hash)
+    seed_frontier(db, alice, "synth_001", 1, live_hash=live_hash)
+    seed_answer(db, alice, "synth_001", 0, "deterioration_6h", "No", config_hash=live_hash)
+    seed_answer(db, alice, "synth_001", 1, "deterioration_6h", "Yes", config_hash=live_hash)
+    seed_timing(
+        db,
+        alice,
+        "synth_001",
+        0.0,
+        [("timepoint.enter", "2026-03-01 09:00:00"), ("timepoint.exit", "2026-03-01 09:01:35")],
+    )
+
+    frame = build(study, questions, ro_db, live_hash=live_hash).frame
+    assert len(frame.rows) == 2
+    by_idx = {r[2]: r for r in frame.rows}
+    # The answered timepoint with events carries derived columns.
+    assert by_idx["0"][4] == "2026-03-01 09:00:00"
+    assert by_idx["0"][5] == "2026-03-01 09:01:35"
+    assert by_idx["0"][6] == "95"  # wall-clock seconds, not dwell time
+    # The other timepoint has no events: all three cells blank.
+    assert by_idx["1"][4] == ""
+    assert by_idx["1"][5] == ""
+    assert by_idx["1"][6] == ""
+
+
+def test_no_timing_events_yields_blank_timing_cells(study, questions, db, ro_db, live_hash) -> None:
+    alice = seed_clinician(db, "Bob")
+    seed_arm(db, alice, "synth_001", config_hash=live_hash)
+    seed_answer(db, alice, "synth_001", 0, "deterioration_6h", "No", config_hash=live_hash)
+
+    frame = build(study, questions, ro_db, live_hash=live_hash).frame
+    for row in frame.rows:
+        assert row[4] == row[5] == row[6] == ""
+
+
+def test_enter_without_exit_sets_start_only(study, questions, db, ro_db, live_hash) -> None:
+    alice = seed_clinician(db, "Carol")
+    seed_arm(db, alice, "synth_001", config_hash=live_hash)
+    seed_answer(db, alice, "synth_001", 0, "deterioration_6h", "No", config_hash=live_hash)
+    seed_timing(db, alice, "synth_001", 0.0, [("timepoint.enter", "2026-03-02 14:20:05")])
+
+    frame = build(study, questions, ro_db, live_hash=live_hash).frame
+    row = frame.rows[0]
+    assert row[4] == "2026-03-02 14:20:05"
+    assert row[5] == ""
+    assert row[6] == ""
+
+
+def test_exit_before_any_enter_is_ignored(study, questions, db, ro_db, live_hash) -> None:
+    alice = seed_clinician(db, "Dave")
+    seed_arm(db, alice, "synth_001", config_hash=live_hash)
+    seed_answer(db, alice, "synth_001", 0, "deterioration_6h", "No", config_hash=live_hash)
+    seed_timing(
+        db,
+        alice,
+        "synth_001",
+        0.0,
+        [("timepoint.exit", "2026-03-03 09:50:00"), ("timepoint.enter", "2026-03-03 10:00:00")],
+    )
+
+    frame = build(study, questions, ro_db, live_hash=live_hash).frame
+    row = frame.rows[0]
+    assert row[4] == "2026-03-03 10:00:00"  # the enter, not the orphan exit
+    assert row[5] == ""
+    assert row[6] == ""
+
+
+def test_first_completed_interval_wins_over_later_enters(
+    study, questions, db, ro_db, live_hash
+) -> None:
+    alice = seed_clinician(db, "Erin")
+    seed_arm(db, alice, "synth_001", config_hash=live_hash)
+    seed_answer(db, alice, "synth_001", 0, "deterioration_6h", "No", config_hash=live_hash)
+    seed_timing(
+        db,
+        alice,
+        "synth_001",
+        0.0,
+        [
+            ("timepoint.enter", "2026-03-04 10:00:00"),
+            ("timepoint.exit", "2026-03-04 10:05:00"),
+            ("timepoint.enter", "2026-03-04 10:10:00"),
+        ],
+    )
+
+    frame = build(study, questions, ro_db, live_hash=live_hash).frame
+    row = frame.rows[0]
+    assert row[4] == "2026-03-04 10:00:00"
+    assert row[5] == "2026-03-04 10:05:00"
+    assert row[6] == "300"
+
+
+def test_timing_events_for_another_patient_are_ignored(
+    study, questions, db, ro_db, live_hash
+) -> None:
+    alice = seed_clinician(db, "Fay")
+    seed_arm(db, alice, "synth_001", config_hash=live_hash)
+    seed_answer(db, alice, "synth_001", 0, "deterioration_6h", "No", config_hash=live_hash)
+    # Events on another patient must not leak into this pair's cells.
+    seed_timing(
+        db,
+        alice,
+        "synth_002",
+        0.0,
+        [("timepoint.enter", "2026-03-05 08:00:00"), ("timepoint.exit", "2026-03-05 08:00:30")],
+    )
+
+    frame = build(study, questions, ro_db, live_hash=live_hash).frame
+    row = frame.rows[0]
+    assert row[4] == row[5] == row[6] == ""
+
+
+def test_timing_error_propagates_as_export_error(
+    study, questions, db, ro_db, live_hash, monkeypatch
+) -> None:
+    import ehr_simulator.timing as timing_mod
+
+    alice = seed_clinician(db, "Gus")
+    seed_arm(db, alice, "synth_001", config_hash=live_hash)
+    seed_answer(db, alice, "synth_001", 0, "deterioration_6h", "No", config_hash=live_hash)
+
+    def boom(*_a, **_kw):
+        raise timing_mod.TimingError("synthetic invalid history")
+
+    monkeypatch.setattr(timing_mod, "derive_timepoint_timings", boom)
+
+    with pytest.raises(ExportError, match="timing"):
+        build(study, questions, ro_db, live_hash=live_hash)
