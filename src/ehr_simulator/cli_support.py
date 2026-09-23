@@ -281,6 +281,22 @@ def render_html_for_preview(
     # collide on one scratch file.
     study = _load_study_for_app(study_path)
     scratch_db = out_dir / f"_preview_scratch_{study.study_id}.db"
+    # A repeated preview run must start from a genuinely fresh database: any
+    # scratch file left over from an earlier run (plus its WAL/SHM sidecars)
+    # is removed so no stale sessions, progress, or identity survive. The
+    # connect below then re-creates the file, and the required order holds:
+    # create/connect → apply_migrations → bind identity → seed clinician
+    # → close → app boot.
+    for suffix in ("", "-wal", "-shm"):
+        leftover = Path(str(scratch_db) + suffix)
+        if leftover.exists():
+            leftover.unlink()
+    # A repeated preview run must start from a genuinely fresh database: any
+    # scratch file left over from an earlier run (plus its WAL/SHM sidecars)
+    # is removed so no stale sessions, progress, or identity survive. The
+    # connect below then re-creates the file, and the required order holds:
+    # create/connect → apply_migrations → bind identity → seed clinician
+    # → close → app boot.
     seed_conn = connect(scratch_db)
     apply_migrations(seed_conn)
     study_identity.bind(seed_conn, study.study_id)

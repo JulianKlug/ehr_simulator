@@ -1134,3 +1134,52 @@ def test_cli_preview_scratch_db_is_bound(tmp_path: Path, study_fixture_dir: Path
         assert study_identity.fetch(conn) == "fixture_synthetic"
     finally:
         conn.close()
+
+
+def test_cli_preview_scratch_db_is_recreated_on_repeated_runs(
+    tmp_path: Path, study_fixture_dir: Path
+) -> None:
+    """A repeated preview run starts fresh: the leftover scratch file (and any
+    stale state inside it) is removed, never reused — so no old sessions,
+    progress, or foreign identity from an earlier run can survive."""
+    from ehr_simulator.db import connect, study_identity
+
+    out_dir = tmp_path / "preview"
+    runner_cli = CliRunner()
+    args = [
+        "preview",
+        str(study_fixture_dir / "study_synthetic.yaml"),
+        "--patient",
+        "synth_001",
+        "--questions",
+        str(study_fixture_dir / "questions.yaml"),
+        "--html-out",
+        str(out_dir),
+    ]
+    first = runner_cli.invoke(cli.app_typer, args)
+    assert first.exit_code == 0, first.stderr
+
+    scratch = out_dir / "_preview_scratch_fixture_synthetic.db"
+    assert scratch.exists()
+
+    # Make the leftover scratch DB look stale/foreign — identity rebound to a
+    # different study, as if the file were from a different set of runs. A
+    # reuse-only implementation would correctly be refused a second time and
+    # the next preview would fail; a fresh-create implementation recovers.
+    conn = connect(scratch)
+    try:
+        conn.execute("UPDATE study_identity SET study_id = 'other_fixture'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    second = runner_cli.invoke(cli.app_typer, args)
+    assert second.exit_code == 0, second.stderr
+
+    conn = connect(scratch)
+    try:
+        assert study_identity.fetch(conn) == "fixture_synthetic"
+        # Only this run's seeded clinician remains — the file was recreated.
+        assert conn.execute("SELECT COUNT(*) FROM clinicians").fetchone()[0] == 1
+    finally:
+        conn.close()

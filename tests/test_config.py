@@ -56,6 +56,19 @@ def test_load_study_config_rejects_wrong_schema_version(study_fixture_dir: Path)
     assert "'3'" in msg
 
 
+def test_load_study_config_rejects_v1_legacy_schema(study_fixture_dir: Path) -> None:
+    """S11a test inventory #4: a pre-S11a v1 study file must be rejected with
+    an error that explicitly names the expected version ``"2"``. There is no
+    compatibility bridge that interprets a v1 config as v2."""
+    path = study_fixture_dir / "study_broken_v1_schema.yaml"
+    with pytest.raises(ConfigError) as excinfo:
+        load_study_config(path)
+    msg = str(excinfo.value)
+    assert "expected '2'" in msg
+    assert "'1'" in msg
+    assert path.name in msg
+
+
 # ---------------------------------------------------------------------------
 # StudyConfig field validation — parametrized
 # ---------------------------------------------------------------------------
