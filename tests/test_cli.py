@@ -173,7 +173,8 @@ def test_cli_validate_adapter_non_synthetic_no_overrides_exits_1(
 ) -> None:
     config_path = tmp_path / "study.yaml"
     config_path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: cli_test
 dataset: geneva
 patient_ids: [g_001]
 time_unit: minutes
@@ -228,7 +229,8 @@ def test_cli_preflight_warns_on_empty_timepoint(
     # has no scalar_ts rows. Rare in synthetic fixture; let's use a custom yaml.
     config_path = tmp_path / "study.yaml"
     config_path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: cli_test
 dataset: synthetic
 patient_ids: [synth_001]
 time_unit: minutes
@@ -255,7 +257,8 @@ def test_cli_preflight_unknown_patient_exits_1(
 ) -> None:
     config_path = tmp_path / "study.yaml"
     config_path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: cli_test
 dataset: synthetic
 patient_ids: [synth_999]
 time_unit: minutes
@@ -285,7 +288,7 @@ def test_cli_migrate_forward_then_idempotent(runner: CliRunner, tmp_path: Path) 
     db_path = tmp_path / "x.db"
     first = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
     assert first.exit_code == 0, first.stderr
-    assert "Applied migrations: [1, 2, 3]" in first.stdout
+    assert "Applied migrations: [1, 2, 3, 4]" in first.stdout
 
     second = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
     assert second.exit_code == 0, second.stderr
@@ -382,10 +385,19 @@ def test_cli_preview_text_summary_and_html_out(
 
 def _walked_db(db_path: Path, *, unlocked: int, completed: bool) -> str:
     """``Dr. Test`` walked synth_001 to ``unlocked``; answers exist at every timepoint."""
-    from ehr_simulator.db import answers, apply_migrations, clinicians, connect, progress
+    from ehr_simulator.db import (
+        answers,
+        apply_migrations,
+        clinicians,
+        connect,
+        progress,
+        study_identity,
+    )
 
     conn = connect(db_path)
     apply_migrations(conn)
+    # S11a: bind the study identity BEFORE seeding any application rows.
+    study_identity.bind(conn, "fixture_synthetic")
     cid = clinicians.lookup_or_create(conn, "Dr. Test")
     progress.unlock(
         conn,
@@ -545,7 +557,7 @@ def test_cli_reset_progress_refuses_stale_schema(
         ],
     )
     assert result.exit_code == 1
-    assert "pending migrations [2, 3]" in result.stderr
+    assert "pending migrations [2, 3, 4]" in result.stderr
     conn = connect(db_path)
     assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
     conn.close()
@@ -576,8 +588,10 @@ def _live_hash(study_fixture_dir: Path) -> str:
 def _seed_completed_walk(
     db: sqlite3.Connection, clinician_name: str, patient_id: str, *, live_hash: str
 ) -> str:
-    from ehr_simulator.db import arm_assignments, clinicians, progress
+    from ehr_simulator.db import arm_assignments, clinicians, progress, study_identity
 
+    # S11a: claim this DB for the study BEFORE any application row lands.
+    study_identity.bind(db, "fixture_synthetic")
     cid = clinicians.lookup_or_create(db, clinician_name)
     arm_assignments.assign_or_lookup(db, cid, patient_id, config_hash=live_hash)
     for to_index in range(1, FINAL_INDEX + 1):
@@ -735,8 +749,9 @@ def test_cli_export_answers_failures_exit_1_and_leave_no_output(
     assert not out_b.exists()
 
     # (c) integrity failure: foreign config hash in one table
-    from ehr_simulator.db import arm_assignments, clinicians
+    from ehr_simulator.db import arm_assignments, clinicians, study_identity
 
+    study_identity.bind(db, "fixture_synthetic")
     foreign_hash = "a" * 64
     cid = clinicians.lookup_or_create(db, "Dr. Drift")
     arm_assignments.assign_or_lookup(db, cid, "synth_001", config_hash=foreign_hash)
@@ -759,10 +774,9 @@ def test_cli_export_answers_keyfile_writes_mode_0600(
     import hashlib
     import stat
 
-    from ehr_simulator.db import clinicians
-
-    clinician_id = clinicians.lookup_or_create(db, "Dr. CLI")
-    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    clinician_id = _seed_completed_walk(
+        db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir)
+    )
     keyfile = tmp_path / "keys" / "clinicians.keyfile.csv"
 
     result = runner.invoke(
@@ -994,3 +1008,129 @@ def test_cli_success_reaches_os_process_status_0(
     )
     assert result.returncode == 0, (result.stdout, result.stderr)
     assert "Traceback (most recent call last)" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# S11a: CLI identity gates (spec §9 items 23-27)
+# ---------------------------------------------------------------------------
+
+
+def _gate_db(db_path: Path, *, study_id: str | None) -> None:
+    """Migrated DB with one clinician row; optionally bound to ``study_id``."""
+    from ehr_simulator.db import apply_migrations, connect, study_identity
+
+    conn = connect(db_path)
+    apply_migrations(conn)
+    if study_id is not None:
+        study_identity.bind(conn, study_id)
+    conn.execute(
+        "INSERT INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
+        ("c" * 16, "dr. gate"),
+    )
+    conn.commit()
+    conn.close()
+
+
+@pytest.mark.parametrize("bound_to", [None, "some_other_study"])
+def test_cli_export_answers_refuses_identity_mismatch(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path, bound_to: str | None
+) -> None:
+    """#23: export is refused before any output, unbound OR mislabelled."""
+    db_path = tmp_path / "gate.db"
+    _gate_db(db_path, study_id=bound_to)
+    out = tmp_path / "answers.csv"
+
+    # Every gate test passes --db-path explicitly: #27 says it must NOT
+    # bypass the identity check.
+    result = runner.invoke(
+        cli.app_typer, _export_args(study_fixture_dir, db_path, "--out", str(out))
+    )
+
+    assert result.exit_code == 1
+    assert "study" in result.stderr.lower()
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("bound_to", [None, "some_other_study"])
+def test_cli_divergence_view_refuses_identity_mismatch(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path, bound_to: str | None
+) -> None:
+    """#24: divergence-view is refused before writing any SVG."""
+    db_path = tmp_path / "gate.db"
+    _gate_db(db_path, study_id=bound_to)
+    out = tmp_path / "fig.svg"
+
+    result = runner.invoke(
+        cli.app_typer,
+        [
+            "divergence-view",
+            str(study_fixture_dir / STUDY_CONFIG),
+            str(study_fixture_dir / QUESTIONS),
+            "--patient",
+            "synth_001",
+            "--db-path",
+            str(db_path),
+            "--out",
+            str(out),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "study" in result.stderr.lower()
+    assert not out.exists()
+
+
+@pytest.mark.parametrize("bound_to", [None, "some_other_study"])
+def test_cli_reset_progress_refuses_identity_mismatch(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path, bound_to: str | None
+) -> None:
+    """#25: reset-progress refuses before mutating any progress/answers row."""
+    db_path = tmp_path / "gate.db"
+    _gate_db(db_path, study_id=bound_to)
+
+    result = runner.invoke(
+        cli.app_typer,
+        [
+            "reset-progress",
+            str(study_fixture_dir / STUDY_CONFIG),
+            "--clinician",
+            "Dr. Gate",
+            "--patient",
+            "synth_001",
+            "--db-path",
+            str(db_path),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "study" in result.stderr.lower()
+
+
+def test_cli_preview_scratch_db_is_bound(tmp_path: Path, study_fixture_dir: Path) -> None:
+    """#26: the html-out scratch DB is claimed by the study before seeding."""
+    from ehr_simulator.db import connect, study_identity
+
+    out_dir = tmp_path / "preview"
+    runner_cli = CliRunner()
+    result = runner_cli.invoke(
+        cli.app_typer,
+        [
+            "preview",
+            str(study_fixture_dir / "study_synthetic.yaml"),
+            "--patient",
+            "synth_001",
+            "--questions",
+            str(study_fixture_dir / "questions.yaml"),
+            "--html-out",
+            str(out_dir),
+        ],
+    )
+    assert result.exit_code == 0, result.stderr
+
+    scratch = out_dir / "_preview_scratch_fixture_synthetic.db"
+    assert scratch.exists()
+    conn = connect(scratch)
+    try:
+        assert study_identity.fetch(conn) == "fixture_synthetic"
+    finally:
+        conn.close()

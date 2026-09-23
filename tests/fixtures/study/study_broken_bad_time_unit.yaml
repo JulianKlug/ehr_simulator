@@ -1,4 +1,5 @@
-schema_version: "1"
+schema_version: "2"
+study_id: fixture_broken
 dataset: synthetic
 patient_ids: [synth_001]
 time_unit: days

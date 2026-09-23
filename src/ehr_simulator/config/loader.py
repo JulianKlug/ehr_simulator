@@ -89,9 +89,9 @@ def load_study_config(path: Path) -> StudyConfig:
     try:
         return StudyConfig.model_validate(data, context={"yaml_dir": path.parent})
     except ValidationError as exc:
-        if observed_version is not None and observed_version != "1":
+        if observed_version is not None and observed_version != "2":
             raise ConfigError(
-                f"{path.name}: schema_version mismatch — expected '1', got {observed_version!r}"
+                f"{path.name}: schema_version mismatch — expected '2', got {observed_version!r}"
             ) from exc
         raise ConfigError.from_validation_error(exc, path=path) from exc
 

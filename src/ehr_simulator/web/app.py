@@ -43,8 +43,10 @@ from fastapi.templating import Jinja2Templates
 
 from ehr_simulator.db.backup import create_backup
 from ehr_simulator.db.connection import connect, resolve_db_path
+from ehr_simulator.db.exceptions import StudyIdentityError
 from ehr_simulator.db.ingestion_issues import record_batch as record_ingestion_issues
 from ehr_simulator.db.migrations import apply_migrations
+from ehr_simulator.db.study_identity import bind as bind_study_identity
 from ehr_simulator.ingestion.exceptions import AdapterError
 from ehr_simulator.ingestion.synthetic import load_synthetic
 from ehr_simulator.logging import (
@@ -108,6 +110,25 @@ def create_app(
         )
         app.state.db = connect(db_path_resolved)
         versions = apply_migrations(app.state.db)
+        # S11a: study mode binds the database to exactly one study. A
+        # mismatching or nonempty unbound legacy database fails startup
+        # here — before the clinician cache, ingestion issues, or any
+        # other application write (spec §Application boot).
+        study_id = getattr(app.state, "study_id", None)
+        if study_id is not None:
+            try:
+                bind_study_identity(app.state.db, study_id)
+            except StudyIdentityError as exc:
+                log.error(
+                    "study identity refused; refusing to boot",
+                    event_kind="app.boot.failed",
+                    study_id=study_id,
+                    error=repr(exc),
+                )
+                print(f"Refusing to boot: {exc}", file=sys.stderr)
+                with contextlib.suppress(Exception):
+                    app.state.db.close()
+                raise SystemExit(1) from exc
         log.info(
             "db ready",
             event_kind="db.ready",
@@ -166,6 +187,7 @@ def create_app(
     # Study mode is opt-in via app_from_study_config; bare create_app() has
     # no questions to ask, so the pane stays hidden and /answer returns 409.
     app.state.study = None
+    app.state.study_id = None
     app.state.questions = None
     app.state.config_hash = None
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
@@ -220,6 +242,7 @@ def app_from_study_config(
     app.state.study_timepoints = list(study.timepoints_minutes)
     app.state.study_patient_ids = list(study.patient_ids)
     app.state.study = study
+    app.state.study_id = study.study_id
     app.state.questions = questions
     app.state.config_hash = compute_config_hash_from_models(study, questions)
     # S9b: with no required question the advance gate is vacuous — say so.

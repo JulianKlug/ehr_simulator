@@ -45,19 +45,24 @@ def _seed_and_cookie(tmp_db_path: Path, client: TestClient) -> str:
     return clinician_id
 
 
-def _pre_seed(tmp_db_path: Path) -> str:
+def _pre_seed(tmp_db_path: Path, study_path: Path) -> str:
     """Seed the test DB *before* the app boots so the lifespan picks the
     clinician up into ``known_clinicians`` and the protected-route cache
-    lookup succeeds.
+    lookup succeeds. S11a: the study's identity is bound BEFORE the
+    clinician row is seeded — bind refuses to claim a non-empty unbound
+    DB, so seeding must follow binding.
     """
-    from ehr_simulator.db import apply_migrations, connect
+    from ehr_simulator.config import load_study_config
+    from ehr_simulator.db import apply_migrations, connect, study_identity
 
+    study = load_study_config(study_path)
     name = "Dr. Test"
     name_normalized = " ".join(name.casefold().split())
     clinician_id = hashlib.sha256(name_normalized.encode("utf-8")).hexdigest()[:16]
     tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(tmp_db_path)
     apply_migrations(conn)
+    study_identity.bind(conn, study.study_id)
     conn.execute(
         "INSERT OR IGNORE INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
         (clinician_id, name_normalized),
@@ -73,7 +78,7 @@ def test_app_from_study_config_synthetic_renders_synth_001(
     tmp_db_path: Path,
     tmp_backup_dir: Path,
 ) -> None:
-    clinician_id = _pre_seed(tmp_db_path)
+    clinician_id = _pre_seed(tmp_db_path, study_fixture_dir / "study_synthetic.yaml")
     app = app_from_study_config(
         study_fixture_dir / "study_synthetic.yaml",
         study_fixture_dir / "questions.yaml",
@@ -100,7 +105,8 @@ def test_app_from_study_config_t_index_resolves_to_study_timepoints(
     custom_dir.mkdir(parents=True, exist_ok=True)
     study_path = custom_dir / "study.yaml"
     study_path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: app_test
 dataset: synthetic
 patient_ids: [synth_001]
 time_unit: minutes
@@ -108,7 +114,7 @@ timepoints: [0, 180]
 """,
         encoding="utf-8",
     )
-    clinician_id = _pre_seed(tmp_db_path)
+    clinician_id = _pre_seed(tmp_db_path, study_path)
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",
@@ -174,7 +180,8 @@ def test_app_from_study_config_index_lists_only_study_patients(
     custom_dir.mkdir(parents=True, exist_ok=True)
     study_path = custom_dir / "study.yaml"
     study_path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: app_test
 dataset: synthetic
 patient_ids: [synth_002]
 time_unit: minutes
@@ -183,7 +190,7 @@ timepoints: [0, 60]
         encoding="utf-8",
     )
 
-    clinician_id = _pre_seed(tmp_db_path)
+    clinician_id = _pre_seed(tmp_db_path, study_path)
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",
@@ -227,7 +234,8 @@ def test_app_from_study_config_preserves_patient_id_order(
     custom_dir.mkdir(parents=True, exist_ok=True)
     study_path = custom_dir / "study.yaml"
     study_path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: app_test
 dataset: synthetic
 patient_ids: [synth_003, synth_001, synth_002]
 time_unit: minutes
@@ -236,7 +244,7 @@ timepoints: [0, 60]
         encoding="utf-8",
     )
 
-    clinician_id = _pre_seed(tmp_db_path)
+    clinician_id = _pre_seed(tmp_db_path, study_path)
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",

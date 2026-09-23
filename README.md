@@ -32,7 +32,11 @@ uv run ehr-simulator serve \
 
 `--config` and `--questions` go together. Pass neither and you get the same
 three synthetic patients without a questions pane — sign-in and the database
-are there either way.
+are there either way. A study config must declare a `study_id` (lowercase
+letters, digits, `-`, `_`): it names the study, and its answers are bound to
+exactly one database. One database holds exactly one study — the server
+refuses to boot against a database owned by another `study_id`, or a database
+that already holds unlabelled data.
 
 Then open http://localhost:8000 in any modern browser. Type your name on the
 sign-in page, pick a patient, pick a chrome variant (see below), and you're in.
@@ -42,7 +46,8 @@ stay signed in for 30 days; **Logout** in the header stripe switches clinician.
 
 The server stays in your terminal — `Ctrl-C` to stop. Logs go to
 `./logs/current.jsonl` (one JSON record per request, rolled at UTC midnight);
-answers and interaction events go to `./data/ehr_simulator.db`.
+answers and interaction events go to `./data/study_<study_id>.db` in study
+mode, or `./data/ehr_simulator.db` without a study config.
 
 ---
 
@@ -201,14 +206,17 @@ No cloud, no telemetry. Three things are written to disk:
 
 - `logs/current.jsonl` — request paths, timepoint indices, and your
   `clinician_id`. Never any free-text input.
-- `data/ehr_simulator.db` — your name (case-folded), your answers including
+- `data/ehr_simulator.db` (or `data/study_<study_id>.db` in study mode) —
+  your name (case-folded), your answers including
   free text, and one row per interaction event.
 - `data/backups/` — a copy of that database, made when a server that wrote
   something shuts down. `serve --backup-dir` moves it.
 
 Move the database with `serve --db-path`, the `EHR_SIM_DB_PATH` environment
 variable, or `db_path:` in the study config. The last two must point inside the
-working directory; `--db-path` is taken at face value.
+working directory; `--db-path` is taken at face value. In study mode the
+per-study default is `data/study_<study_id>.db` — each study gets its own
+database, and the identity check still applies to any path you name.
 
 ---
 

@@ -448,11 +448,11 @@ def test_timepoint_count_uses_study_timepoints(
 
     study_path = tmp_log_dir.parent / "study_two.yaml"
     study_path.write_text(
-        'schema_version: "1"\ndataset: synthetic\npatient_ids: [synth_001]\n'
+        'schema_version: "2"\nstudy_id: advance_two\ndataset: synthetic\npatient_ids: [synth_001]\n'
         "time_unit: minutes\ntimepoints: [0, 180]\n",
         encoding="utf-8",
     )
-    cid = _seed_clinician(tmp_db_path)
+    cid = _seed_clinician(tmp_db_path, study_id="advance_two")
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",

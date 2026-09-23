@@ -12,3 +12,13 @@ from __future__ import annotations
 
 class DbError(Exception):
     """Raised by DAO functions on integrity violations the caller handles."""
+
+
+class StudyIdentityError(ValueError):
+    """S11a: a database and a study_id disagree about identity.
+
+    Raised when a database is already bound to a *different* study, when
+    an unbound-but-populated database would be silently adopted by the
+    strict (serve) path, or when the ``study_id`` itself is malformed.
+    Subclasses :class:`ValueError` so generic handlers catch it.
+    """
