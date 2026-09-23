@@ -64,6 +64,17 @@ jobs:
           test "$(ls /tmp/ci_db_backups/*.db | wc -l)" -ge 1
       - name: Export smoke
         run: |
+          # Bind the smoke DB to the `example` study before exporting.
+          # `migrate` deliberately stays config-independent (no identity
+          # binding), so the study identity is set here via the public
+          # study_identity API. The DB was already migrated above.
+          uv run python - <<'PY'
+          from pathlib import Path
+          from ehr_simulator.db import connect, study_identity
+          conn = connect(Path("/tmp/ci_db_smoke/test.db"))
+          study_identity.bind(conn, "example")
+          conn.close()
+          PY
           uv run ehr-simulator export-answers \
             configs/example_config.yaml configs/example_questions.yaml \
             --db-path /tmp/ci_db_smoke/test.db \

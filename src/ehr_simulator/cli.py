@@ -673,11 +673,14 @@ def divergence_view(
         raise typer.Exit(code=1)
 
     try:
-        dataset = build_dataset_loader(study)()
         conn = connect(target_db, access=AccessMode.READ_ONLY)
         try:
             assert_schema_current(conn)
             require_study_identity(conn, study.study_id)
+            # S11a: the study dataset is loaded only **after** identity
+            # verification succeeds — no study data is read before the
+            # database identity has been checked.
+            dataset = build_dataset_loader(study)()
             fig = divergence.build_divergence_figure(
                 conn,
                 study=study,
