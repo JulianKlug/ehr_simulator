@@ -242,7 +242,7 @@ def test_post_answer_bad_target_unknown_patient_404(
     study_path = tmp_log_dir.parent / "study.yaml"
     study_path.write_text(yaml.safe_dump(study))
 
-    cid = _seed_clinician(tmp_db_path)
+    cid = _seed_clinician(tmp_db_path, study_id=study["study_id"])
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",

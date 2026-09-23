@@ -12,7 +12,8 @@
 # Anything under configs/ other than the committed example_*.yaml files is
 # gitignored — local pilot configs stay out of version control.
 
-schema_version: "1"
+schema_version: "2"
+study_id: example
 
 # `synthetic` ships three deterministic patients (synth_001/002/003) at
 # t = 0, 60, 180 minutes. No paths required. For real datasets switch to

@@ -88,7 +88,11 @@ def serve(
     db_path: Path | None = typer.Option(
         None,
         "--db-path",
-        help="Path to the SQLite DB. Bypasses the traversal guard (explicit operator decision).",
+        help=(
+            "Path to the SQLite DB. Defaults to data/study_<study_id>.db in study mode, "
+            "data/ehr_simulator.db otherwise. Bypasses the traversal guard (explicit operator "
+            "decision), but never bypasses the study-identity check."
+        ),
     ),
     backup_dir: Path | None = typer.Option(
         None,
@@ -440,13 +444,15 @@ def reset_progress_cmd(
     db_path: Path | None = typer.Option(
         None,
         "--db-path",
-        help="SQLite DB; defaults to the study's db_path / data/ehr_simulator.db.",
+        help="SQLite DB; defaults to the study's db_path / data/study_<study_id>.db.",
     ),
 ) -> None:
     """Rewind a clinician's walk of one patient (recovery for a mis-click on Next)."""
     from ehr_simulator.cli_support import OperatorError, assert_schema_current, reset_progress
     from ehr_simulator.config import load_study_config
     from ehr_simulator.db import connect, resolve_db_path
+    from ehr_simulator.db.exceptions import StudyIdentityError
+    from ehr_simulator.db.study_identity import require as require_study_identity
     from ehr_simulator.logging import setup_logging
 
     setup_logging(Path("logs"))
@@ -464,6 +470,7 @@ def reset_progress_cmd(
     conn = connect(resolved_db)
     try:
         assert_schema_current(conn)
+        require_study_identity(conn, study.study_id)
         report = reset_progress(
             conn,
             clinician_name=clinician,
@@ -471,7 +478,7 @@ def reset_progress_cmd(
             to_t_index=to_t_index,
             timepoints=list(study.timepoints_minutes),
         )
-    except OperatorError as exc:
+    except (OperatorError, StudyIdentityError) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
     finally:
@@ -501,7 +508,7 @@ def export_answers(
     db_path: Path | None = typer.Option(
         None,
         "--db-path",
-        help="SQLite DB; defaults to the study's db_path / data/ehr_simulator.db.",
+        help="SQLite DB; defaults to the study's db_path / data/study_<study_id>.db.",
     ),
     out: Path | None = typer.Option(
         None,
@@ -530,6 +537,8 @@ def export_answers(
     )
     from ehr_simulator.db import connect, resolve_db_path
     from ehr_simulator.db.connection import AccessMode
+    from ehr_simulator.db.exceptions import StudyIdentityError
+    from ehr_simulator.db.study_identity import require as require_study_identity
     from ehr_simulator.logging import get_logger, setup_logging
 
     setup_logging(Path("logs"))
@@ -551,6 +560,7 @@ def export_answers(
         conn = connect(target_db, access=AccessMode.READ_ONLY)
         try:
             assert_schema_current(conn)
+            require_study_identity(conn, study.study_id)
             bundle = export.build_export(
                 conn,
                 study=study,
@@ -570,7 +580,14 @@ def export_answers(
             )
         finally:
             conn.close()
-    except (ConfigError, export.ExportError, OperatorError, OSError, sqlite3.Error) as exc:
+    except (
+        ConfigError,
+        export.ExportError,
+        OperatorError,
+        StudyIdentityError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
 
@@ -615,7 +632,7 @@ def divergence_view(
     db_path: Path | None = typer.Option(
         None,
         "--db-path",
-        help="SQLite DB; defaults to the study's db_path / data/ehr_simulator.db.",
+        help="SQLite DB; defaults to the study's db_path / data/study_<study_id>.db.",
     ),
     patient: str = typer.Option(
         ..., "--patient", help="One configured patient id; renders one figure."
@@ -636,6 +653,8 @@ def divergence_view(
     )
     from ehr_simulator.db import connect, resolve_db_path
     from ehr_simulator.db.connection import AccessMode
+    from ehr_simulator.db.exceptions import StudyIdentityError
+    from ehr_simulator.db.study_identity import require as require_study_identity
     from ehr_simulator.logging import get_logger, setup_logging
 
     setup_logging(Path("logs"))
@@ -654,10 +673,14 @@ def divergence_view(
         raise typer.Exit(code=1)
 
     try:
-        dataset = build_dataset_loader(study)()
         conn = connect(target_db, access=AccessMode.READ_ONLY)
         try:
             assert_schema_current(conn)
+            require_study_identity(conn, study.study_id)
+            # S11a: the study dataset is loaded only **after** identity
+            # verification succeeds — no study data is read before the
+            # database identity has been checked.
+            dataset = build_dataset_loader(study)()
             fig = divergence.build_divergence_figure(
                 conn,
                 study=study,
@@ -675,6 +698,7 @@ def divergence_view(
         ConfigError,
         divergence.DivergenceError,
         OperatorError,
+        StudyIdentityError,
         OSError,
         sqlite3.Error,
     ) as exc:

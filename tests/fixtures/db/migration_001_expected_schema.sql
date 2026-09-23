@@ -1,10 +1,11 @@
 -- Frozen expected schema after ALL migrations (001 "initial", 002
--- "sessions_open_unique", 003 "progress"); the filename predates 002. The drift-check
--- test in tests/test_db.py reads sqlite_master.sql (the exact DDL text
--- SQLite stored) sorted by name, joins with ";\n\n", and asserts it equals
--- the contents of this file. Updating this fixture is a deliberate review
--- step — it must move in lockstep with any DDL change in
--- src/ehr_simulator/db/migrations.py (any ``_*_DDL`` string).
+-- "sessions_open_unique", 003 "progress", 004 "study_identity"); the
+-- filename predates 002. The drift-check test in tests/test_db.py reads
+-- sqlite_master.sql (the exact DDL text SQLite stored) sorted by name,
+-- joins with ";\n\n", and asserts it equals the contents of this file.
+-- Updating this fixture is a deliberate review step — it must move in
+-- lockstep with any DDL change in src/ehr_simulator/db/migrations.py
+-- (any ``_*_DDL`` string).
 
 CREATE TABLE answers (
     clinician_id  TEXT NOT NULL REFERENCES clinicians(clinician_id),
@@ -88,6 +89,12 @@ CREATE TABLE sessions (
     ended_at      TIMESTAMP,
     arm           TEXT NOT NULL,
     config_hash   TEXT NOT NULL
+);
+
+CREATE TABLE study_identity (
+    singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+    study_id    TEXT NOT NULL UNIQUE,
+    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE UNIQUE INDEX ux_sessions_open

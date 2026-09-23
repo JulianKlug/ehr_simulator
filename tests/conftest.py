@@ -88,9 +88,14 @@ def db(tmp_db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-def _seed_clinician(tmp_db_path: Path) -> str:
-    """Insert ``Dr. Test`` into a fresh DB; return the canonical id."""
-    from ehr_simulator.db import apply_migrations, connect
+def _seed_clinician(tmp_db_path: Path, *, study_id: str | None = None) -> str:
+    """Insert ``Dr. Test`` into a fresh DB; return the canonical id.
+
+    When ``study_id`` is given (study mode), the database is bound to that
+    study BEFORE the clinician row is seeded — S11a refuses to claim a DB
+    that already holds application data, so seeding must follow binding.
+    """
+    from ehr_simulator.db import apply_migrations, connect, study_identity
 
     name = "Dr. Test"
     name_normalized = " ".join(name.casefold().split())
@@ -98,6 +103,8 @@ def _seed_clinician(tmp_db_path: Path) -> str:
     tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
     seed_conn = connect(tmp_db_path)
     apply_migrations(seed_conn)
+    if study_id is not None:
+        study_identity.bind(seed_conn, study_id)
     seed_conn.execute(
         "INSERT INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
         (clinician_id, name_normalized),
@@ -163,8 +170,11 @@ def anonymous_client(
 
 
 @pytest.fixture
-def study_clinician_id(tmp_db_path: Path) -> str:
-    return _seed_clinician(tmp_db_path)
+def study_clinician_id(tmp_db_path: Path, study_fixture_dir: Path) -> str:
+    from ehr_simulator.config import load_study_config
+
+    study = load_study_config(study_fixture_dir / "study_synthetic.yaml")
+    return _seed_clinician(tmp_db_path, study_id=study.study_id)
 
 
 @pytest.fixture

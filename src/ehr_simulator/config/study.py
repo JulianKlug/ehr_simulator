@@ -9,10 +9,15 @@ directory through ``model_validate(..., context={"yaml_dir": ...})``.
 caller (URL routing, ``walk_preflight``, S6 storage) consumes it instead of
 the raw ``timepoints`` list. It decouples wire-format unit (minutes vs hours)
 from the computational unit (always minutes).
+
+S11: ``study_id`` is required — a stable, filesystem-safe identifier
+(:data:`STUDY_ID_PATTERN`) that binds this study to its database (see
+``db/study_identity.py``). ``schema_version`` is locked to ``"2"``.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,11 +25,22 @@ from pydantic import BaseModel, ConfigDict, ValidationInfo, field_validator, mod
 
 from ehr_simulator.config.exceptions import ConfigError
 
+__all__ = ["STUDY_ID_PATTERN", "StudyConfig"]
+
+#: S11: a stable, filesystem-safe study identifier. Lowercase alphanumerics,
+#: ``-`` and ``_``; must start with an alphanumeric; 1..64 characters. The
+#: charset deliberately excludes ``/``, ``.`` and whitespace so a study id
+#: can never smuggle a path segment into ``data/study_<id>.db``. The same
+#: shape is re-checked at bind time in ``db/study_identity.py``; a test keeps
+#: the two patterns in lockstep.
+STUDY_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
 
 class StudyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["1"]
+    schema_version: Literal["2"]
+    study_id: str
     dataset: Literal["synthetic", "geneva", "mimic"]
     csv_path: Path | None = None
     params_dir: Path | None = None
@@ -75,6 +91,17 @@ class StudyConfig(BaseModel):
                 f"db_path must be inside the project working directory; got {resolved}"
             ) from exc
         return self
+
+    @field_validator("study_id")
+    @classmethod
+    def _study_id_shape(cls, v: str) -> str:
+        if not isinstance(v, str) or not STUDY_ID_PATTERN.fullmatch(v):
+            raise ValueError(
+                f"must match {STUDY_ID_PATTERN.pattern!r} "
+                "(lowercase a-z, 0-9, '-' or '_', first char alphanumeric, "
+                f"at most 64 characters); got {v!r}"
+            )
+        return v
 
     @field_validator("patient_ids")
     @classmethod

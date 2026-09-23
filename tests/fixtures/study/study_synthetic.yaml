@@ -1,4 +1,5 @@
-schema_version: "1"
+schema_version: "2"
+study_id: fixture_synthetic
 dataset: synthetic
 patient_ids: [synth_001, synth_002, synth_003]
 time_unit: minutes

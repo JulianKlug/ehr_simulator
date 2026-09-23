@@ -268,16 +268,38 @@ def render_html_for_preview(
     """
     from fastapi.testclient import TestClient
 
-    from ehr_simulator.db import apply_migrations, clinicians, connect, progress
+    from ehr_simulator.db import apply_migrations, clinicians, connect, progress, study_identity
     from ehr_simulator.web.app import app_from_study_config
 
     out_dir.mkdir(parents=True, exist_ok=True)
     # Preview is a dev-only rendering tool — write to a scratch DB so the
-    # default ``data/ehr_simulator.db`` is never touched, and seed a
-    # synthetic clinician so the protected-route preamble lets us in.
-    scratch_db = out_dir / "_preview_scratch.db"
+    # default per-study database is never touched, and seed a synthetic
+    # clinician so the protected-route preamble lets us in. S11a: the
+    # scratch DB is bound to the study's identity BEFORE any application
+    # row is seeded (bind would refuse to claim a non-empty unbound DB),
+    # and is keyed by study_id so previews of different studies never
+    # collide on one scratch file.
+    study = _load_study_for_app(study_path)
+    scratch_db = out_dir / f"_preview_scratch_{study.study_id}.db"
+    # A repeated preview run must start from a genuinely fresh database: any
+    # scratch file left over from an earlier run (plus its WAL/SHM sidecars)
+    # is removed so no stale sessions, progress, or identity survive. The
+    # connect below then re-creates the file, and the required order holds:
+    # create/connect → apply_migrations → bind identity → seed clinician
+    # → close → app boot.
+    for suffix in ("", "-wal", "-shm"):
+        leftover = Path(str(scratch_db) + suffix)
+        if leftover.exists():
+            leftover.unlink()
+    # A repeated preview run must start from a genuinely fresh database: any
+    # scratch file left over from an earlier run (plus its WAL/SHM sidecars)
+    # is removed so no stale sessions, progress, or identity survive. The
+    # connect below then re-creates the file, and the required order holds:
+    # create/connect → apply_migrations → bind identity → seed clinician
+    # → close → app boot.
     seed_conn = connect(scratch_db)
     apply_migrations(seed_conn)
+    study_identity.bind(seed_conn, study.study_id)
     clinician_id = clinicians.lookup_or_create(seed_conn, "Dr. Preview")
     seed_conn.close()
 
@@ -293,7 +315,6 @@ def render_html_for_preview(
     # silently writing the t=0 body into every file.
     with TestClient(app, follow_redirects=False) as client:
         client.cookies.set("ehrsim_clinician_id", clinician_id)
-        study = _load_study_for_app(study_path)
         for idx, _ in enumerate(study.timepoints_minutes):
             # S9b: walk the frontier step-wise so each file shows the OPEN
             # pane a clinician would see at that timepoint.

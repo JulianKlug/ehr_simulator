@@ -153,11 +153,12 @@ def test_apply_migrations_forward(tmp_db_path: Path) -> None:
         ).fetchall()
     finally:
         conn.close()
-    assert versions == [1, 2, 3]
+    assert versions == [1, 2, 3, 4]
     assert [(r[0], r[1]) for r in rows] == [
         (1, "initial"),
         (2, "sessions_open_unique"),
         (3, "progress"),
+        (4, "study_identity"),
     ]
 
 
@@ -188,7 +189,7 @@ def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None
         migration_rows = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
     finally:
         conn.close()
-    assert versions == [1, 2, 3]
+    assert versions == [1, 2, 3, 4]
     expected = {
         "clinicians",
         "sessions",
@@ -631,7 +632,7 @@ def test_migration_2_rejects_second_open_session(tmp_db_path: Path) -> None:
     )
     v1.execute("INSERT INTO schema_migrations (version, name) VALUES (1, 'initial')")
     v1.commit()
-    assert apply_migrations(v1) == [2, 3]
+    assert apply_migrations(v1) == [2, 3, 4]
     assert apply_migrations(v1) == []
 
     cid = clinicians.lookup_or_create(v1, "Dr. Smith")
@@ -684,7 +685,7 @@ def _v2_db(tmp_db_path: Path) -> sqlite3.Connection:
 
 def test_migration_3_creates_progress_and_is_idempotent(tmp_db_path: Path) -> None:
     v2 = _v2_db(tmp_db_path)
-    assert apply_migrations(v2) == [3]
+    assert apply_migrations(v2) == [3, 4]
     assert apply_migrations(v2) == []
     tables = {r[0] for r in v2.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "progress" in tables
@@ -1224,3 +1225,244 @@ def test_atomic_block_persists_and_bumps_exactly_once_when_caller_commits(
     assert state.write_counter == 1
     assert progress.fetch(db, clinician_id=cid, patient_id="p1").unlocked_t_index == 1
     assert _count_events(db, "timepoint.exit") == 1
+
+
+# ---------------------------------------------------------------------------
+# S11a: study identity (spec tests 8-17)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_db_path_study_default_is_study_specific(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EHR_SIM_DB_PATH", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    class _Study:
+        db_path = None
+        study_id = "my_study"
+
+    assert resolve_db_path(_Study()) == Path("data/study_my_study.db")
+
+
+def test_migration_4_creates_exactly_study_identity_table(tmp_db_path: Path) -> None:
+    """Spec test 11: migration 4 adds only the singleton identity table,
+    never populates it, and is safe to re-apply."""
+    conn = connect(tmp_db_path)
+    try:
+        assert apply_migrations(conn) == [1, 2, 3, 4]
+        tables = {
+            r[0]
+            for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            if not r[0].startswith("sqlite_")
+        }
+        assert "study_identity" in tables
+        ddl = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='study_identity'"
+        ).fetchone()[0]
+        assert "singleton" in ddl and "CHECK(singleton=1)" in ddl.replace(" ", "")
+        assert "study_id" in ddl and "created_at" in ddl.lower()
+        # Never guessed or populated a study_id:
+        assert conn.execute("SELECT COUNT(*) FROM study_identity").fetchone()[0] == 0
+        # Idempotent re-apply:
+        assert apply_migrations(conn) == []
+        assert conn.execute("SELECT COUNT(*) FROM study_identity").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_study_id_patterns_in_lockstep() -> None:
+    """The config layer and the DB layer duplicate STUDY_ID_PATTERN on
+    purpose (db must not import config) — pin them in lockstep."""
+    from ehr_simulator.config.study import STUDY_ID_PATTERN as CONFIG_PATTERN
+    from ehr_simulator.db import study_identity
+
+    assert study_identity.STUDY_ID_PATTERN.pattern == CONFIG_PATTERN.pattern
+
+
+class TestStudyIdentityDao:
+    """Spec tests 12-16: bind / require / fetch / has_persistent_data."""
+
+    def _migrated(self, tmp_db_path: Path) -> sqlite3.Connection:
+        conn = connect(tmp_db_path)
+        apply_migrations(conn)
+        return conn
+
+    def test_fetch_returns_none_when_unbound(self, tmp_db_path: Path) -> None:
+        from ehr_simulator.db import study_identity as si
+
+        conn = self._migrated(tmp_db_path)
+        try:
+            assert si.fetch(conn) is None
+            assert si.has_persistent_data(conn) is False
+        finally:
+            conn.close()
+
+    def test_bind_writes_identity_to_empty_migrated_db(self, tmp_db_path: Path) -> None:
+        from ehr_simulator.db import study_identity as si
+
+        conn = self._migrated(tmp_db_path)
+        try:
+            si.bind(conn, "alpha")
+            assert si.fetch(conn) == "alpha"
+            # Singleton: exactly one row, keyed 1.
+            rows = conn.execute("SELECT singleton, study_id FROM study_identity").fetchall()
+            assert [(r["singleton"], r["study_id"]) for r in rows] == [(1, "alpha")]
+        finally:
+            conn.close()
+
+    def test_rebind_same_study_is_noop(self, tmp_db_path: Path) -> None:
+        from ehr_simulator.db import study_identity as si
+
+        conn = self._migrated(tmp_db_path)
+        try:
+            si.bind(conn, "alpha")
+            row = conn.execute("SELECT created_at FROM study_identity").fetchone()
+            si.bind(conn, "alpha")
+            assert conn.execute("SELECT COUNT(*) FROM study_identity").fetchone()[0] == 1
+            assert conn.execute("SELECT created_at FROM study_identity").fetchone() == row
+            assert si.fetch(conn) == "alpha"
+        finally:
+            conn.close()
+
+    def test_bind_different_study_refused_and_unchanged(self, tmp_db_path: Path) -> None:
+        from ehr_simulator.db import exceptions
+        from ehr_simulator.db import study_identity as si
+
+        conn = self._migrated(tmp_db_path)
+        try:
+            si.bind(conn, "alpha")
+            with pytest.raises(exceptions.StudyIdentityError) as exc:
+                si.bind(conn, "beta")
+            # Both identities named; stored identity unchanged.
+            msg = str(exc.value)
+            assert "alpha" in msg and "beta" in msg
+            assert si.fetch(conn) == "alpha"
+        finally:
+            conn.close()
+
+    def test_bind_nonempty_unbound_db_refused(self, tmp_db_path: Path) -> None:
+        from ehr_simulator.db import exceptions
+        from ehr_simulator.db import study_identity as si
+
+        conn = self._migrated(tmp_db_path)
+        try:
+            # One application row is enough to count as nonempty.
+            conn.execute(
+                "INSERT INTO clinicians (clinician_id, name_normalized) VALUES ('c1', 'dr')"
+            )
+            conn.commit()
+            assert si.has_persistent_data(conn) is True
+            with pytest.raises(exceptions.StudyIdentityError):
+                si.bind(conn, "alpha")
+            assert si.fetch(conn) is None
+            assert si.has_persistent_data(conn) is True
+        finally:
+            conn.close()
+
+    @pytest.mark.parametrize(
+        "table,sql",
+        [
+            (
+                "clinicians",
+                "INSERT INTO clinicians (clinician_id, name_normalized) VALUES ('c1', 'dr')",
+            ),
+            (
+                "sessions",
+                "INSERT INTO sessions (session_id, clinician_id, patient_id, arm, config_hash) "
+                "VALUES ('s1', 'c1', 'p1', 'no_ai', 'h')",
+            ),
+            (
+                "answers",
+                "INSERT INTO answers (clinician_id, patient_id, timepoint, question_id, value, arm, config_hash) "  # noqa: E501
+                "VALUES ('c1', 'p1', 0.0, 'q1', 'Yes', 'no_ai', 'h')",
+            ),
+        ],
+    )
+    def test_nonempty_detection_covers_application_tables(
+        self, tmp_db_path: Path, table: str, sql: str
+    ) -> None:
+        from ehr_simulator.db import study_identity as si
+
+        conn = self._migrated(tmp_db_path)
+        try:
+            # Satisfy the FK from the parameterized table to clinicians.
+            if table != "clinicians":
+                conn.execute(
+                    "INSERT INTO clinicians (clinician_id, name_normalized) VALUES ('c1', 'dr')"
+                )
+            conn.execute(sql)
+            conn.commit()
+            # schema_migrations rows alone do NOT count...
+            assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 4
+            # ...but a row in any application table does:
+            assert si.has_persistent_data(conn) is True
+        finally:
+            conn.close()
+
+    def test_require_matches_succeeds_without_writing(self, tmp_db_path: Path) -> None:
+        from ehr_simulator.db import study_identity as si
+
+        conn = self._migrated(tmp_db_path)
+        try:
+            si.bind(conn, "alpha")
+            # require is pure: no row changes, no new rows.
+            before = conn.execute("SELECT COUNT(*) FROM study_identity").fetchone()[0]
+            si.require(conn, "alpha")
+            assert conn.execute("SELECT COUNT(*) FROM study_identity").fetchone()[0] == before
+        finally:
+            conn.close()
+
+    def test_require_refuses_unbound_database(self, tmp_db_path: Path) -> None:
+        from ehr_simulator.db import exceptions
+        from ehr_simulator.db import study_identity as si
+
+        conn = self._migrated(tmp_db_path)
+        try:
+            with pytest.raises(exceptions.StudyIdentityError):
+                si.require(conn, "alpha")
+            assert si.fetch(conn) is None  # no write performed
+        finally:
+            conn.close()
+
+    def test_require_refuses_mismatch(self, tmp_db_path: Path) -> None:
+        from ehr_simulator.db import exceptions
+        from ehr_simulator.db import study_identity as si
+
+        conn = self._migrated(tmp_db_path)
+        try:
+            si.bind(conn, "alpha")
+            with pytest.raises(exceptions.StudyIdentityError) as exc:
+                si.require(conn, "beta")
+            assert "alpha" in str(exc.value) and "beta" in str(exc.value)
+        finally:
+            conn.close()
+
+    @pytest.mark.parametrize(
+        "good",
+        ["a", "z9", "my-study_2", "a" * 64, "abc_def-ghi"],
+    )
+    def test_validate_study_id_accepts(self, good: str) -> None:
+        from ehr_simulator.db import study_identity as si
+
+        assert si.validate_study_id(good) == good
+
+    @pytest.mark.parametrize(
+        "bad",
+        ["UPPER", "has space", "seg/a", "a" * 65, "-lead", "_lead", "dot.id", "", 123, None],
+    )
+    def test_validate_study_id_rejects(self, bad: object, tmp_db_path: Path) -> None:
+        """Invalid ids are refused by the validator AND by bind (before it
+        touches the connection)."""
+        from ehr_simulator.db import exceptions
+        from ehr_simulator.db import study_identity as si
+
+        with pytest.raises(exceptions.StudyIdentityError):
+            si.validate_study_id(bad)
+        conn = self._migrated(tmp_db_path)
+        try:
+            with pytest.raises(exceptions.StudyIdentityError):
+                si.bind(conn, bad)
+            assert si.fetch(conn) is None
+        finally:
+            conn.close()

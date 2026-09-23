@@ -126,10 +126,27 @@ CREATE TABLE IF NOT EXISTS progress (
 """
 
 
+# S11a: one database == one study. ``study_identity`` is a singleton table —
+# the CHECK on ``singleton`` allows at most one row (always 1). Migration 4
+# creates ONLY this table: no ALTER of existing tables, no new columns or
+# indexes elsewhere (spec 14). Populated by ``db.study_identity.bind``
+# on a fresh, empty database; read-verified by ``db.study_identity.require``.
+# No inline SQL comments: sqlite_master stores the DDL verbatim and the
+# schema-snapshot test compares it byte-for-byte.
+_STUDY_IDENTITY_DDL = """
+CREATE TABLE IF NOT EXISTS study_identity (
+    singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
+    study_id    TEXT NOT NULL UNIQUE,
+    created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
     Migration(version=3, name="progress", up_sql=_PROGRESS_DDL),
+    Migration(version=4, name="study_identity", up_sql=_STUDY_IDENTITY_DDL),
 )
 
 

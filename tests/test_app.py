@@ -45,19 +45,24 @@ def _seed_and_cookie(tmp_db_path: Path, client: TestClient) -> str:
     return clinician_id
 
 
-def _pre_seed(tmp_db_path: Path) -> str:
+def _pre_seed(tmp_db_path: Path, study_path: Path) -> str:
     """Seed the test DB *before* the app boots so the lifespan picks the
     clinician up into ``known_clinicians`` and the protected-route cache
-    lookup succeeds.
+    lookup succeeds. S11a: the study's identity is bound BEFORE the
+    clinician row is seeded — bind refuses to claim a non-empty unbound
+    DB, so seeding must follow binding.
     """
-    from ehr_simulator.db import apply_migrations, connect
+    from ehr_simulator.config import load_study_config
+    from ehr_simulator.db import apply_migrations, connect, study_identity
 
+    study = load_study_config(study_path)
     name = "Dr. Test"
     name_normalized = " ".join(name.casefold().split())
     clinician_id = hashlib.sha256(name_normalized.encode("utf-8")).hexdigest()[:16]
     tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(tmp_db_path)
     apply_migrations(conn)
+    study_identity.bind(conn, study.study_id)
     conn.execute(
         "INSERT OR IGNORE INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
         (clinician_id, name_normalized),
@@ -73,7 +78,7 @@ def test_app_from_study_config_synthetic_renders_synth_001(
     tmp_db_path: Path,
     tmp_backup_dir: Path,
 ) -> None:
-    clinician_id = _pre_seed(tmp_db_path)
+    clinician_id = _pre_seed(tmp_db_path, study_fixture_dir / "study_synthetic.yaml")
     app = app_from_study_config(
         study_fixture_dir / "study_synthetic.yaml",
         study_fixture_dir / "questions.yaml",
@@ -100,7 +105,8 @@ def test_app_from_study_config_t_index_resolves_to_study_timepoints(
     custom_dir.mkdir(parents=True, exist_ok=True)
     study_path = custom_dir / "study.yaml"
     study_path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: app_test
 dataset: synthetic
 patient_ids: [synth_001]
 time_unit: minutes
@@ -108,7 +114,7 @@ timepoints: [0, 180]
 """,
         encoding="utf-8",
     )
-    clinician_id = _pre_seed(tmp_db_path)
+    clinician_id = _pre_seed(tmp_db_path, study_path)
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",
@@ -174,7 +180,8 @@ def test_app_from_study_config_index_lists_only_study_patients(
     custom_dir.mkdir(parents=True, exist_ok=True)
     study_path = custom_dir / "study.yaml"
     study_path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: app_test
 dataset: synthetic
 patient_ids: [synth_002]
 time_unit: minutes
@@ -183,7 +190,7 @@ timepoints: [0, 60]
         encoding="utf-8",
     )
 
-    clinician_id = _pre_seed(tmp_db_path)
+    clinician_id = _pre_seed(tmp_db_path, study_path)
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",
@@ -227,7 +234,8 @@ def test_app_from_study_config_preserves_patient_id_order(
     custom_dir.mkdir(parents=True, exist_ok=True)
     study_path = custom_dir / "study.yaml"
     study_path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: app_test
 dataset: synthetic
 patient_ids: [synth_003, synth_001, synth_002]
 time_unit: minutes
@@ -236,7 +244,7 @@ timepoints: [0, 60]
         encoding="utf-8",
     )
 
-    clinician_id = _pre_seed(tmp_db_path)
+    clinician_id = _pre_seed(tmp_db_path, study_path)
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",
@@ -441,3 +449,219 @@ questions:
             backup_dir=tmp_backup_dir,
         )
     assert not any(log.get("event_kind") == "questions.none_required" for log in quiet)
+
+
+# ---------------------------------------------------------------------------
+# S11a: study-identity lifespan integration
+#
+# The four boot outcomes a study-mode app can hit when it meets an existing
+# database: bound-to-me (fresh bind), bound-to-me (restart), bound-to-
+# another study (refused), and unbound with preexisting data (refused).
+# Refusals are asserted through their observable effects — the ``R9``
+# pattern: TestClient routes the lifespan ``SystemExit(1)`` through
+# anyio's portal as an unhandled task exception rather than re-raising it
+# on context entry.
+# ---------------------------------------------------------------------------
+
+
+def _study_paths(study_fixture_dir: Path) -> tuple[Path, Path]:
+    return (
+        study_fixture_dir / "study_synthetic.yaml",
+        study_fixture_dir / "questions.yaml",
+    )
+
+
+def _other_study_path(tmp_log_dir: Path) -> Path:
+    """Inline study config on the same synthetic dataset, different identity."""
+    p = tmp_log_dir.parent / "study_other_fixture.yaml"
+    p.write_text(
+        """schema_version: "2"
+study_id: other_fixture
+dataset: synthetic
+patient_ids: [synth_001]
+time_unit: minutes
+timepoints: [0, 60, 180]
+""",
+        encoding="utf-8",
+    )
+    return p
+
+
+def _seed_clinician_row(db_path: Path, *, bound_study_id: str | None = None) -> str:
+    import hashlib
+
+    from ehr_simulator.db import apply_migrations, connect, study_identity
+
+    name = "Dr. Preexisting"
+    nn = " ".join(name.casefold().split())
+    cid = hashlib.sha256(nn.encode("utf-8")).hexdigest()[:16]
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(db_path)
+    apply_migrations(conn)
+    if bound_study_id is not None:
+        # Bind FIRST: bind refuses to claim a non-empty unbound DB, so the
+        # preexisting clinician row only exists after the identity is set.
+        study_identity.bind(conn, bound_study_id)
+    conn.execute(
+        "INSERT INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
+        (cid, nn),
+    )
+    conn.commit()
+    conn.close()
+    return cid
+
+
+def _boot_expect_refused(app: object, log_dir: Path) -> list[dict]:
+    """Enter/exit the app lifespan expecting a boot refusal; return the
+    ``app.boot.failed`` log records so the caller can assert the reason."""
+    import json
+    import logging as _stdlogging
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            with TestClient(app):  # type: ignore[arg-type]
+                pass
+        except BaseException:  # noqa: BLE001
+            pass
+
+    for h in _stdlogging.getLogger("ehr_simulator").handlers:
+        h.flush()
+    records: list[dict] = []
+    log_file = log_dir / "current.jsonl"
+    if log_file.exists():
+        for line in log_file.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                r = json.loads(line)
+                if r.get("event_kind") == "app.boot.failed":
+                    records.append(r)
+    assert records, "expected an app.boot.failed log record on refused boot"
+    assert any("study identity refused" in rec.get("event", "") for rec in records)
+    assert any("StudyIdentityError" in rec.get("error", "") for rec in records)
+    return records
+
+
+def test_lifespan_binds_fresh_study_db_on_first_boot(
+    study_fixture_dir: Path, tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
+) -> None:
+    """S11a: a fresh, empty database is BOUND to the study on first boot and
+    the identity survives the shutdown."""
+    from ehr_simulator.db import connect, study_identity
+
+    study_path, questions_path = _study_paths(study_fixture_dir)
+    app = app_from_study_config(
+        study_path,
+        questions_path,
+        log_dir=tmp_log_dir,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
+    with TestClient(app) as client:
+        assert client.get("/login").status_code == 200
+        assert app.state.known_clinicians == set()
+
+    conn = connect(tmp_db_path)
+    assert study_identity.fetch(conn) == "fixture_synthetic"
+    conn.close()
+
+
+def test_lifespan_same_study_restarts_successfully(
+    study_fixture_dir: Path, tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
+) -> None:
+    """S11a: booting the same study again against its own database must
+    succeed — the identity is stable across restarts."""
+    from ehr_simulator.db import connect, study_identity
+
+    study_path, questions_path = _study_paths(study_fixture_dir)
+    first = app_from_study_config(
+        study_path,
+        questions_path,
+        log_dir=tmp_log_dir,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
+    with TestClient(first) as client:
+        assert client.get("/login").status_code == 200
+
+    conn = connect(tmp_db_path)
+    assert study_identity.fetch(conn) == "fixture_synthetic"
+    conn.close()
+
+    second = app_from_study_config(
+        study_path,
+        questions_path,
+        log_dir=tmp_log_dir,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
+    with TestClient(second) as client:
+        assert client.get("/login").status_code == 200
+
+    conn = connect(tmp_db_path)
+    assert study_identity.fetch(conn) == "fixture_synthetic"
+    conn.close()
+
+
+def test_lifespan_different_study_against_same_db_refused(
+    study_fixture_dir: Path, tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
+) -> None:
+    """S11a: a database already bound to one study must refuse to boot for a
+    different study — before the clinician cache is populated."""
+    from ehr_simulator.db import connect, study_identity
+
+    cid = _seed_clinician_row(tmp_db_path, bound_study_id="fixture_synthetic")
+
+    other_study = _other_study_path(tmp_log_dir)
+    app = app_from_study_config(
+        other_study,
+        study_fixture_dir / "questions.yaml",
+        log_dir=tmp_log_dir,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
+    _boot_expect_refused(app, tmp_log_dir)
+
+    # Refused BEFORE the clinician state load: the preexisting row must not
+    # have been picked up into the protected-route cache.
+    assert app.state.known_clinicians == set()
+    assert cid not in app.state.known_clinicians
+
+    conn = connect(tmp_db_path)
+    assert study_identity.fetch(conn) == "fixture_synthetic"  # identity untouched
+    assert conn.execute("SELECT COUNT(*) FROM ingestion_issues").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM clinicians").fetchone()[0] == 1  # unmodified
+    conn.close()
+
+
+def test_lifespan_nonempty_unbound_legacy_db_refused_before_app_reads_writes(
+    study_fixture_dir: Path, tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
+) -> None:
+    """S11a: a nonempty pre-S11a (unbound) database is refused before ANY
+    application read or write — the app must not silently claim it or
+    invent an identity."""
+    from ehr_simulator.db import connect, study_identity
+
+    cid = _seed_clinician_row(tmp_db_path)  # no identify bound at all
+
+    study_path, questions_path = _study_paths(study_fixture_dir)
+    app = app_from_study_config(
+        study_path,
+        questions_path,
+        log_dir=tmp_log_dir,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
+    _boot_expect_refused(app, tmp_log_dir)
+
+    # The clinician cache load happens after the bind and did not run.
+    assert app.state.known_clinicians == set()
+    assert cid not in app.state.known_clinicians
+
+    conn = connect(tmp_db_path)
+    assert study_identity.fetch(conn) is None  # identity NOT invented
+    assert conn.execute("SELECT COUNT(*) FROM clinicians").fetchone()[0] == 1
+    assert conn.execute("SELECT COUNT(*) FROM ingestion_issues").fetchone()[0] == 0
+    assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+    conn.close()

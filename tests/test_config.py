@@ -52,8 +52,21 @@ def test_load_study_config_rejects_wrong_schema_version(study_fixture_dir: Path)
     with pytest.raises(ConfigError) as excinfo:
         load_study_config(path)
     msg = str(excinfo.value)
-    assert "'1'" in msg
     assert "'2'" in msg
+    assert "'3'" in msg
+
+
+def test_load_study_config_rejects_v1_legacy_schema(study_fixture_dir: Path) -> None:
+    """S11a test inventory #4: a pre-S11a v1 study file must be rejected with
+    an error that explicitly names the expected version ``"2"``. There is no
+    compatibility bridge that interprets a v1 config as v2."""
+    path = study_fixture_dir / "study_broken_v1_schema.yaml"
+    with pytest.raises(ConfigError) as excinfo:
+        load_study_config(path)
+    msg = str(excinfo.value)
+    assert "expected '2'" in msg
+    assert "'1'" in msg
+    assert path.name in msg
 
 
 # ---------------------------------------------------------------------------
@@ -66,7 +79,8 @@ def test_load_study_config_rejects_wrong_schema_version(study_fixture_dir: Path)
     [
         pytest.param(
             """
-schema_version: "1"
+schema_version: "2"
+study_id: cfg_test
 dataset: omop
 patient_ids: [pid_001]
 time_unit: minutes
@@ -77,7 +91,8 @@ timepoints: [0, 60]
         ),
         pytest.param(
             """
-schema_version: "1"
+schema_version: "2"
+study_id: cfg_test
 dataset: synthetic
 patient_ids: [synth_001]
 time_unit: days
@@ -88,7 +103,8 @@ timepoints: [0, 60]
         ),
         pytest.param(
             """
-schema_version: "1"
+schema_version: "2"
+study_id: cfg_test
 dataset: synthetic
 patient_ids: [synth_001, synth_002, synth_001]
 time_unit: minutes
@@ -99,7 +115,8 @@ timepoints: [0, 60]
         ),
         pytest.param(
             """
-schema_version: "1"
+schema_version: "2"
+study_id: cfg_test
 dataset: geneva
 csv_path: /tmp/x.csv
 patient_ids: [g_001]
@@ -111,7 +128,8 @@ timepoints: [0, 60]
         ),
         pytest.param(
             """
-schema_version: "1"
+schema_version: "2"
+study_id: cfg_test
 dataset: synthetic
 csv_path: /tmp/x.csv
 params_dir: /tmp
@@ -124,7 +142,8 @@ timepoints: [0, 60]
         ),
         pytest.param(
             """
-schema_version: "1"
+schema_version: "2"
+study_id: cfg_test
 dataset: synthetic
 patient_ids: [synth_001]
 time_unit: minutes
@@ -135,7 +154,8 @@ timepoints: [-1, 60]
         ),
         pytest.param(
             """
-schema_version: "1"
+schema_version: "2"
+study_id: cfg_test
 dataset: synthetic
 patient_ids: [synth_001]
 time_unit: minutes
@@ -167,7 +187,8 @@ def test_study_config_patient_ids_coerce_yaml_numeric_literals(tmp_path: Path) -
     """
     path = tmp_path / "study.yaml"
     path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: cfg_test
 dataset: synthetic
 patient_ids: [100023_4784, 1002417_9090]
 time_unit: minutes
@@ -181,7 +202,8 @@ timepoints: [0]
 
 def test_study_config_timepoints_minutes_property() -> None:
     study = StudyConfig(
-        schema_version="1",
+        schema_version="2",
+        study_id="cfg",
         dataset="synthetic",
         patient_ids=["synth_001"],
         time_unit="hours",
@@ -199,7 +221,8 @@ def test_study_config_extra_forbid_rejects_unknown_keys(tmp_path: Path) -> None:
     path = tmp_path / "study.yaml"
     path.write_text(
         """
-schema_version: "1"
+schema_version: "2"
+study_id: cfg_test
 dataset: synthetic
 patient_ids: [synth_001]
 time_unit: minutes
@@ -222,7 +245,8 @@ def test_study_config_resolves_db_path_against_yaml_dir(
     (tmp_path / "data").mkdir()
     study_path = tmp_path / "study.yaml"
     study_path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: cfg_test
 dataset: synthetic
 db_path: data/local.db
 patient_ids: [synth_001]
@@ -242,7 +266,8 @@ def test_study_config_rejects_db_path_traversal(
     monkeypatch.chdir(tmp_path)
     study_path = tmp_path / "study.yaml"
     study_path.write_text(
-        """schema_version: "1"
+        """schema_version: "2"
+study_id: cfg_test
 dataset: synthetic
 db_path: ../../etc/passwd.db
 patient_ids: [synth_001]
@@ -264,7 +289,8 @@ def test_load_study_config_resolves_relative_paths_against_yaml_dir(tmp_path: Pa
     study_path = tmp_path / "study.yaml"
     study_path.write_text(
         """
-schema_version: "1"
+schema_version: "2"
+study_id: cfg_test
 dataset: geneva
 csv_path: data/foo.csv
 params_dir: data
@@ -502,7 +528,8 @@ def _write_pair(tmp_path: Path, study_yaml: str, questions_yaml: str) -> tuple[P
     return s, q
 
 
-_BASE_STUDY = """schema_version: "1"
+_BASE_STUDY = """schema_version: "2"
+study_id: cfg_test
 dataset: synthetic
 patient_ids: [synth_001, synth_002]
 time_unit: minutes
@@ -551,7 +578,8 @@ def test_compute_config_hash_invariant_under(tmp_path: Path, mutation: str) -> N
 time_unit: minutes
 patient_ids: [synth_001, synth_002]
 dataset: synthetic
-schema_version: "1"
+schema_version: "2"
+study_id: cfg_test
 """
         b_questions = _BASE_QUESTIONS
     else:
@@ -629,3 +657,86 @@ def test_categorical_option_containing_pipe_is_accepted() -> None:
         response_type="categorical",
     )
     assert q.options == ["a|b", "c"]
+
+
+# ---------------------------------------------------------------------------
+# S11a: study_id contract (spec tests 2, 3, 6)
+# ---------------------------------------------------------------------------
+
+
+def _study_yaml(study_id_line: str = "study_id: cfg_test") -> str:
+    return f"""schema_version: "2"
+{study_id_line}
+dataset: synthetic
+patient_ids: [synth_001]
+time_unit: minutes
+timepoints: [0, 60]
+"""
+
+
+def test_missing_study_id_rejected(tmp_path: Path) -> None:
+    path = tmp_path / "study.yaml"
+    path.write_text(
+        """schema_version: "2"
+dataset: synthetic
+patient_ids: [synth_001]
+time_unit: minutes
+timepoints: [0, 60]
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        load_study_config(path)
+    assert "study_id" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "UPPER_CASE",  # lowercase only
+        "has space",  # no whitespace
+        "seg/a",  # no path separators
+        "a" * 65,  # max 64 chars
+        "-leading-punct",  # must start alphanumeric
+        "_underscore",
+        "dot.id",
+        123,  # must be a string
+    ],
+    ids=[
+        "uppercase",
+        "whitespace",
+        "path_separator",
+        "too_long",
+        "leading_dash",
+        "leading_underscore",
+        "internal_dot",
+        "non_string",
+    ],
+)
+def test_invalid_study_id_rejected(tmp_path: Path, raw: object) -> None:
+    path = tmp_path / "study.yaml"
+    path.write_text(
+        _study_yaml(study_id_line=f"study_id: {raw!r}".replace("'\"", '"')),
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as excinfo:
+        load_study_config(path)
+    assert "study_id" in str(excinfo.value)
+
+
+def test_valid_study_id_parses_v2(tmp_path: Path) -> None:
+    path = tmp_path / "study.yaml"
+    path.write_text(_study_yaml("study_id: example_synthetic"), encoding="utf-8")
+    study = load_study_config(path)
+    assert study.study_id == "example_synthetic"
+
+
+def test_study_id_alone_changes_config_hash(tmp_path: Path) -> None:
+    a_dir = tmp_path / "a"
+    b_dir = tmp_path / "b"
+    a_dir.mkdir()
+    b_dir.mkdir()
+    a_s, a_q = _write_pair(a_dir, _BASE_STUDY, _BASE_QUESTIONS)
+    b_study = _BASE_STUDY.replace("study_id: cfg_test", "study_id: cfg_test_v2")
+    b_s, b_q = _write_pair(b_dir, b_study, _BASE_QUESTIONS)
+    assert compute_config_hash(a_s, a_q) != compute_config_hash(b_s, b_q)

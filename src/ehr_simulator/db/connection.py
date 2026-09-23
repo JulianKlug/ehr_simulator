@@ -94,6 +94,12 @@ def resolve_db_path(
         return _db_path_traversal_guard(Path(env_override))
     if study is not None and getattr(study, "db_path", None) is not None:
         return study.db_path
+    if study is not None:
+        study_id = getattr(study, "study_id", None)
+        if isinstance(study_id, str) and study_id:
+            # S11a: study configs default to a per-study database file so two
+            # studies can never share a file by accident.
+            return Path("data") / f"study_{study_id}.db"
     return _DEFAULT_DB_PATH
 
 
