@@ -1254,6 +1254,64 @@ def test_cli_activate_config_noop_rerun(
     assert "already registered" in r2.stdout
 
 
+def test_cli_activate_config_replay_of_older_version_reports_real_active(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path
+) -> None:
+    """Replaying v1 after v2 is a no-op; the output must name v2 as active."""
+    db_path = tmp_path / "cfg.db"
+    v1_args = ["--version", "v1", "--description", "Initial"]
+    _invoke_activate(runner.invoke, study_fixture_dir, v1_args, db=db_path)
+    _invoke_activate(
+        runner.invoke, study_fixture_dir, ["--version", "v2", "--description", "Next"], db=db_path
+    )
+
+    replay = _invoke_activate(runner.invoke, study_fixture_dir, v1_args, db=db_path)
+
+    assert replay.exit_code == 0, replay.stderr
+    assert "No change was made" in replay.stdout
+    assert "Active configuration remains 'v2'" in replay.stdout
+
+
+def test_cli_activate_config_failure_leaves_fresh_db_unbound(
+    study_fixture_dir: Path, tmp_path: Path
+) -> None:
+    """Identity bind, history insert and active pointer are one transaction:
+    a SQLite failure after the identity insert persists none of them."""
+    from ehr_simulator.cli_support import OperatorError, activate_for_cli
+    from ehr_simulator.config import load_questions, load_study_config
+    from ehr_simulator.db import apply_migrations
+
+    db_path = tmp_path / "cfg.db"
+    conn = connect(db_path)
+    apply_migrations(conn)
+    conn.execute(
+        "CREATE TRIGGER fail_history BEFORE INSERT ON configuration_history "
+        "BEGIN SELECT RAISE(ABORT, 'injected failure'); END"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(OperatorError, match="injected failure"):
+        activate_for_cli(
+            study=load_study_config(study_fixture_dir / "study_synthetic.yaml"),
+            questions=load_questions(study_fixture_dir / "questions.yaml"),
+            db_path=db_path,
+            version="v1",
+            description="Initial",
+            reason=None,
+        )
+
+    conn = connect(db_path)
+    try:
+        counts = [
+            conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("study_identity", "configuration_history", "active_configuration")
+        ]
+    finally:
+        conn.close()
+    assert counts == [0, 0, 0]
+
+
 def test_cli_activate_config_collision_refused(
     runner: CliRunner, study_fixture_dir: Path, tmp_path: Path
 ) -> None:

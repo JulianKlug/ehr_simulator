@@ -12,10 +12,10 @@ Case provenance anchors (``arm_assignments``, ``sessions``, ``progress``,
 missing one is an integrity error the service layer refuses — never
 guessed (spec §S11a database upgrade).
 
-Atomicity: :func:`activate` performs all of its writes (optional S11a
-backfill, the history INSERT, the active pointer) and commits exactly
-once; a ``sqlite3.Error`` mid-way rolls the whole activation back and
-nothing partial becomes visible.
+Atomicity: :func:`activate` performs all of its writes (study identity
+bind, optional S11a backfill, the history INSERT, the active pointer) and
+commits exactly once; any failure mid-way rolls the whole activation back
+and nothing partial becomes visible — a fresh database stays unbound.
 """
 
 from __future__ import annotations
@@ -34,6 +34,7 @@ from ehr_simulator.config.snapshot import (
     validate_reason,
 )
 from ehr_simulator.config.study import StudyConfig
+from ehr_simulator.db import study_identity
 from ehr_simulator.db.exceptions import (
     ConfigurationActivationError,
     ConfigurationProvenanceError,
@@ -289,6 +290,11 @@ def activate(
             colliding/reused version label, a dataset change within one
             study, an unparseable stored snapshot, or an ambiguous S11a
             provenance backfill. Nothing is written when this is raised.
+        StudyIdentityError: the database is bound to another study, or is
+            unbound but already holds application data. Nothing is written.
+
+    The study identity is bound (or verified) first, inside the same
+    transaction: ``configuration_history.study_id`` references it.
     """
     if study_id != study.study_id:
         raise ConfigurationActivationError(
@@ -307,6 +313,7 @@ def activate(
         raise ConfigurationActivationError(str(exc)) from exc
 
     try:
+        study_identity.bind_in_transaction(conn, study_id)
         existing = conn.execute(f"SELECT {_SELECT_COLUMNS} FROM configuration_history").fetchall()
 
         if existing:
@@ -348,7 +355,8 @@ def activate(
         )
         _set_active(conn, version)
         conn.commit()
-    except sqlite3.Error:
+    except Exception:
+        # Refusals too: a pending identity insert must not outlive them.
         conn.rollback()
         raise
 

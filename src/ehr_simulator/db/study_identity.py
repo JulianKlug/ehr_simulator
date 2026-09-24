@@ -144,6 +144,18 @@ def bind(conn: sqlite3.Connection, study_id: object) -> None:
     Raises:
         StudyIdentityError: malformed id, mismatch, or non-empty unbound DB.
     """
+    bind_in_transaction(conn, study_id)
+    conn.commit()
+
+
+def bind_in_transaction(conn: sqlite3.Connection, study_id: object) -> None:
+    """:func:`bind` without the commit: the insert joins the caller's open
+    transaction, e.g. S11b activation commits identity + history + active
+    pointer together, or rolls all three back.
+
+    Raises:
+        StudyIdentityError: malformed id, mismatch, or non-empty unbound DB.
+    """
     valid = validate_study_id(study_id)
     existing = fetch(conn)
     if existing == valid:
@@ -161,7 +173,6 @@ def bind(conn: sqlite3.Connection, study_id: object) -> None:
             "or explicitly adopt it (S11b, CLI --adopt-study-id)"
         )
     conn.execute("INSERT INTO study_identity (singleton, study_id) VALUES (1, ?)", (valid,))
-    conn.commit()
 
 
 def adopt(conn: sqlite3.Connection, study_id: object) -> None:

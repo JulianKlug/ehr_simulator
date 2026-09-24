@@ -30,6 +30,7 @@ from ehr_simulator.config import (
 from ehr_simulator.db import (
     ConfigurationActivationError,
     ConfigurationProvenanceError,
+    StudyIdentityError,
     answers,
     arm_assignments,
     config_history,
@@ -406,7 +407,8 @@ def test_history_belongs_to_one_study(
     )
     other = load_study_config(study_fixture_dir / "study_mimic.yaml")
     other_hash = compute_config_hash_from_models(other, questions)
-    with pytest.raises(ConfigurationActivationError, match="belongs to study"):
+    # The identity bind inside the activation transaction refuses first.
+    with pytest.raises(StudyIdentityError, match="already bound"):
         config_history.activate(
             db,
             study_id=other.study_id,
@@ -417,6 +419,7 @@ def test_history_belongs_to_one_study(
             study=other,
             questions=questions,
         )
+    assert [r.config_version for r in config_history.list_all(db)] == ["v1"]
 
 
 # ---------------------------------------------------------------------------

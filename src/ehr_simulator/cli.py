@@ -785,9 +785,10 @@ def activate_config_cmd(
 
     if report.was_noop:
         typer.echo(
-            f"Configuration {report.config_version!r} was already registered with the "
-            f"identical hash and metadata — no change. It remains the active "
-            f"configuration for study {study.study_id!r}."
+            f"Configuration {report.config_version!r} is already registered with "
+            "identical hash and metadata.\n"
+            f"No change was made. Active configuration remains {report.active_version!r} "
+            f"for study {study.study_id!r}."
         )
         return
     typer.echo(

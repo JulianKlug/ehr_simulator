@@ -523,13 +523,16 @@ class ActivationReport:
     ``was_noop`` is True when the version label was already registered
     with the identical hash, description, and reason — ``activate``
     verified it and left the row untouched (a collision with a different
-    hash or metadata would have refused instead).
+    hash or metadata would have refused instead). ``active_version`` is
+    the version active afterwards: on a no-op replay of an older version
+    it differs from ``config_version`` (v1 replayed while v2 stays active).
     """
 
     config_version: str
     config_hash: str
     change_description: str
     was_noop: bool
+    active_version: str
 
 
 def activate_for_cli(
@@ -543,14 +546,13 @@ def activate_for_cli(
 ) -> ActivationReport:
     """Register the config as version ``version`` and make it active.
 
-    Operator order (S11b): migrations → bind-or-verify the study
-    identity → ``config_history.activate`` (metadata validation, dataset
-    invariant, S11a backfill probe, snapshot storage, active pointer,
-    one atomic commit). The identity is bound *before* activation because
-    the ``configuration_history.study_id`` foreign key requires the
-    singleton row to already exist. A legacy S11a database (unbound,
-    already walked) is refused here — the explicit
-    ``study_identity.adopt`` escape hatch is the only way to claim it.
+    Operator order (S11b): migrations → ``config_history.activate``
+    (bind-or-verify the study identity, metadata validation, dataset
+    invariant, S11a backfill probe, snapshot storage, active pointer —
+    one atomic commit, so a failed activation leaves a fresh database
+    unbound). A legacy S11a database (unbound, already walked) is refused
+    — the explicit ``study_identity.adopt`` escape hatch is the only way
+    to claim it.
 
     Raises:
         StudyIdentityError: identity mismatch or refused adoption.
@@ -560,14 +562,13 @@ def activate_for_cli(
     import sqlite3
 
     from ehr_simulator.config import compute_config_hash_from_models
-    from ehr_simulator.db import apply_migrations, config_history, connect, study_identity
+    from ehr_simulator.db import apply_migrations, config_history, connect
 
     db_path.parent.mkdir(parents=True, exist_ok=True)
     config_hash = compute_config_hash_from_models(study, questions)
     conn = connect(db_path)
     try:
         apply_migrations(conn)
-        study_identity.bind(conn, study.study_id)
         existing = config_history.fetch_version(conn, version)
         row = config_history.activate(
             conn,
@@ -579,6 +580,7 @@ def activate_for_cli(
             study=study,
             questions=questions,
         )
+        active = config_history.fetch_active(conn)
     except sqlite3.Error as exc:
         conn.rollback()
         raise OperatorError(f"activation could not be applied atomically: {exc}") from exc
@@ -591,4 +593,5 @@ def activate_for_cli(
         config_hash=row.config_hash,
         change_description=row.change_description,
         was_noop=existing is not None,
+        active_version=active.config_version if active is not None else row.config_version,
     )

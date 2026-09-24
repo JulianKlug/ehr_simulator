@@ -20,6 +20,7 @@ import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ehr_simulator.db import MIGRATIONS
@@ -768,4 +769,70 @@ def test_lifespan_refuses_hash_mismatch_against_active_configuration(
     assert any(
         "differs from the active configuration hash" in rec.get("error", "") for rec in failed
     )
+    assert getattr(app.state, "config_version", None) is None
+
+
+def _tamper_prompt(questions_json: str) -> str:
+    """Valid JSON that no longer hashes to the stored config_hash."""
+    import json
+
+    doc = json.loads(questions_json)
+    doc["questions"][0]["prompt"] += " (tampered)"
+    return json.dumps(doc)
+
+
+@pytest.mark.parametrize(
+    ("column", "corrupt"),
+    [
+        ("study_json", lambda _: "{not json"),
+        ("questions_json", lambda _: "{not json"),
+        ("questions_json", _tamper_prompt),
+    ],
+    ids=["study-unparseable", "questions-unparseable", "questions-rehash-mismatch"],
+)
+def test_lifespan_refuses_corrupted_active_snapshot(
+    study_fixture_dir: Path,
+    tmp_log_dir: Path,
+    tmp_db_path: Path,
+    tmp_backup_dir: Path,
+    column: str,
+    corrupt: object,
+) -> None:
+    """S11b boot test #11: a corrupted stored snapshot refuses boot."""
+    import json
+    import warnings
+
+    from ehr_simulator.db import connect
+
+    study_path, questions_path = _study_paths(study_fixture_dir)
+    _pre_seed(tmp_db_path, study_path, questions_path)
+    conn = connect(tmp_db_path)
+    stored = conn.execute(f"SELECT {column} FROM configuration_history").fetchone()[0]
+    conn.execute(f"UPDATE configuration_history SET {column} = ?", (corrupt(stored),))  # type: ignore[operator]
+    conn.commit()
+    conn.close()
+
+    app = app_from_study_config(
+        study_path,
+        questions_path,
+        log_dir=tmp_log_dir,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
+    refused = False
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            with TestClient(app):
+                pass
+        except BaseException:  # noqa: BLE001 — lifespan SystemExit(1) routed via the portal
+            refused = True
+
+    assert refused
+    failed = [
+        json.loads(line)
+        for line in (tmp_log_dir / "current.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line).get("event_kind") == "app.boot.failed"
+    ]
+    assert any("failed to validate active configuration" in r.get("event", "") for r in failed)
     assert getattr(app.state, "config_version", None) is None
