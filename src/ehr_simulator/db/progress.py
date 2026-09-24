@@ -23,6 +23,7 @@ from datetime import datetime
 from typing import Any
 
 from ehr_simulator.db.answers import _require_version_provenance
+from ehr_simulator.db.exceptions import ConfigurationProvenanceError
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,34 @@ def _row_to_progress(row: tuple) -> Progress:
 def _bump(app_state: Any) -> None:
     if app_state is not None:
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
+
+
+def _require_row_provenance(
+    conn: sqlite3.Connection,
+    *,
+    clinician_id: str,
+    patient_id: str,
+    config_hash: str,
+    config_version: str | None,
+) -> None:
+    """Refuse to move a walk pinned to another configuration (S11b).
+
+    E.g. a walk started under v1/h1 cannot be unlocked or completed by a
+    v2/h2 caller. No row yet → nothing to check.
+
+    Raises:
+        ConfigurationProvenanceError: stored (version, hash) differ.
+    """
+    row = fetch(conn, clinician_id=clinician_id, patient_id=patient_id)
+    if row is None:
+        return
+
+    if row.config_hash != config_hash or row.config_version != config_version:
+        raise ConfigurationProvenanceError(
+            "refusing to modify progress recorded under a different configuration "
+            f"provenance (clinician={clinician_id}, patient={patient_id}, "
+            f"stored version={row.config_version!r}, write version={config_version!r})"
+        )
 
 
 def fetch_all(conn: sqlite3.Connection) -> dict[tuple[str, str], Progress]:
@@ -105,6 +134,13 @@ def unlock(
     (a failed event write rolls the frontier move back with it).
     """
     _require_version_provenance(conn, config_version)
+    _require_row_provenance(
+        conn,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        config_hash=config_hash,
+        config_version=config_version,
+    )
     cursor = conn.execute(
         "UPDATE progress SET unlocked_t_index = ?, updated_at = CURRENT_TIMESTAMP "
         "WHERE clinician_id = ? AND patient_id = ? AND unlocked_t_index = ?",
@@ -146,6 +182,13 @@ def mark_complete(
     transaction (see ``web/gating.py``).
     """
     _require_version_provenance(conn, config_version)
+    _require_row_provenance(
+        conn,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        config_hash=config_hash,
+        config_version=config_version,
+    )
     conn.execute(
         "INSERT INTO progress "
         "(clinician_id, patient_id, unlocked_t_index, completed_at, config_hash, config_version) "

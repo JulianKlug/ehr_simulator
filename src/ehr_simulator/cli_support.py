@@ -23,7 +23,7 @@ be unit-tested without spinning up Typer. The three helpers:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -32,8 +32,15 @@ from ehr_simulator.config import ConfigError, Questions, StudyConfig
 from ehr_simulator.web.panels import DatasetLike, slice_to_timepoint
 
 
-def build_dataset_loader(study: StudyConfig) -> Callable[[], DatasetLike]:
+def build_dataset_loader(
+    study: StudyConfig,
+    extra_patient_ids: Callable[[], Iterable[str]] = tuple,
+) -> Callable[[], DatasetLike]:
     """Return a zero-arg loader closure routing to the right adapter.
+
+    ``extra_patient_ids`` is called at load time and its ids are loaded
+    after ``study.patient_ids`` (S11b: patients of cases pinned to an older
+    configuration, e.g. ``[B]`` once v2 drops B from ``[A, B]``).
 
     For ``dataset == "synthetic"``: ignore any inline paths (forbidden by
     StudyConfig validators) and return ``load_synthetic``.
@@ -59,18 +66,21 @@ def build_dataset_loader(study: StudyConfig) -> Callable[[], DatasetLike]:
 
     csv_path = Path(study.csv_path)
     params_dir = Path(study.params_dir)
+
     # Filter at ingestion time so a pilot config (3-50 patients) doesn't
     # pay the full-dataset memory + load-time cost (~600 MB / 51 s on
     # Geneva real data). Skipped (None) only when no study config is in
     # scope — `validate-adapter` and friends always pass a study, so the
     # filter is always active when the CLI builds the loader.
-    pids = tuple(study.patient_ids)
+    def _pids() -> tuple[str, ...]:
+        # dict.fromkeys: ordered de-duplication, active patients first.
+        return tuple(dict.fromkeys([*study.patient_ids, *extra_patient_ids()]))
 
     if dataset_name == "geneva":
         from ehr_simulator.ingestion.geneva import load_geneva
 
         def _load_geneva() -> DatasetLike:
-            return load_geneva(csv_path, params_dir, strict=False, patient_ids=pids)
+            return load_geneva(csv_path, params_dir, strict=False, patient_ids=_pids())
 
         return _load_geneva
 
@@ -78,7 +88,7 @@ def build_dataset_loader(study: StudyConfig) -> Callable[[], DatasetLike]:
         from ehr_simulator.ingestion.mimic import load_mimic
 
         def _load_mimic() -> DatasetLike:
-            return load_mimic(csv_path, params_dir, strict=False, patient_ids=pids)
+            return load_mimic(csv_path, params_dir, strict=False, patient_ids=_pids())
 
         return _load_mimic
 

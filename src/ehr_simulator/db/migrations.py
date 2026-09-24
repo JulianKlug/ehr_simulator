@@ -8,8 +8,9 @@ table. Idempotent (no-op when no pending migrations).
 Atomicity note: :meth:`sqlite3.Connection.executescript` issues implicit
 COMMIT both on entry and exit, so wrapping it in ``with conn:`` does NOT
 give transactional rollback. Instead, every CREATE statement in the DDL
-uses ``IF NOT EXISTS``. A mid-DDL crash leaves a partial schema that a
-subsequent ``apply_migrations`` call cleanly extends — the
+uses ``IF NOT EXISTS`` and column additions go through
+``Migration.add_columns`` (skipped when already present). A mid-DDL crash
+leaves a partial schema that a subsequent ``apply_migrations`` call cleanly extends — the
 ``schema_migrations`` row is the source-of-truth lock (per review-fix R2).
 """
 
@@ -25,6 +26,9 @@ class Migration(NamedTuple):
     version: int
     name: str
     up_sql: str
+    # (table, column, declaration) added only when missing: SQLite has no
+    # ``ADD COLUMN IF NOT EXISTS``, so a raw ALTER would wedge the retry.
+    add_columns: tuple[tuple[str, str, str], ...] = ()
 
 
 _INITIAL_DDL = """
@@ -168,12 +172,12 @@ CREATE TABLE IF NOT EXISTS active_configuration (
     singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
     config_version  TEXT NOT NULL REFERENCES configuration_history(config_version)
 );
-
-ALTER TABLE arm_assignments ADD COLUMN config_version TEXT;
-ALTER TABLE sessions       ADD COLUMN config_version TEXT;
-ALTER TABLE progress       ADD COLUMN config_version TEXT;
-ALTER TABLE answers        ADD COLUMN config_version TEXT;
 """
+
+_S11B_PROVENANCE_COLUMNS = tuple(
+    (table, "config_version", "TEXT")
+    for table in ("arm_assignments", "sessions", "progress", "answers")
+)
 
 
 MIGRATIONS: tuple[Migration, ...] = (
@@ -181,8 +185,24 @@ MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
     Migration(version=3, name="progress", up_sql=_PROGRESS_DDL),
     Migration(version=4, name="study_identity", up_sql=_STUDY_IDENTITY_DDL),
-    Migration(version=5, name="s11b_config_version_history", up_sql=_S11B_CONFIG_HISTORY),
+    Migration(
+        version=5,
+        name="s11b_config_version_history",
+        up_sql=_S11B_CONFIG_HISTORY,
+        add_columns=_S11B_PROVENANCE_COLUMNS,
+    ),
 )
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection, table: str, column: str, declaration: str
+) -> None:
+    """Retry-safe ``ALTER TABLE … ADD COLUMN`` (identifiers are module constants)."""
+    existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    if column in existing:
+        return
+
+    conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def apply_migrations(conn: sqlite3.Connection) -> list[int]:
@@ -208,6 +228,8 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
     versions: list[int] = []
     for m in pending:
         conn.executescript(m.up_sql)
+        for table, column, declaration in m.add_columns:
+            _add_column_if_missing(conn, table, column, declaration)
         conn.execute(
             "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
             (m.version, m.name),

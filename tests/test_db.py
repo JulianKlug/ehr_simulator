@@ -26,6 +26,7 @@ from structlog.testing import capture_logs
 from ehr_simulator.config.exceptions import ConfigError
 from ehr_simulator.db import (
     MIGRATIONS,
+    ConfigurationProvenanceError,
     DbError,
     Migration,
     answers,
@@ -203,6 +204,42 @@ def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None
     }
     assert expected.issubset(tables)
     assert migration_rows == len(MIGRATIONS)
+
+
+def test_apply_migrations_recovers_from_partial_migration_5(tmp_db_path: Path) -> None:
+    """A crash between migration 5's ALTERs must not wedge the retry on a
+    duplicate-column error: the rerun adds only the columns still missing.
+    """
+    # Half-applied state: migrations 1-4 recorded, only two of 5's ALTERs landed.
+    half = connect(tmp_db_path)
+    half.execute(
+        "CREATE TABLE schema_migrations ("
+        " version INTEGER PRIMARY KEY,"
+        " name TEXT NOT NULL,"
+        " applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    for m in MIGRATIONS[:4]:
+        half.executescript(m.up_sql)
+        half.execute(
+            "INSERT INTO schema_migrations (version, name) VALUES (?, ?)", (m.version, m.name)
+        )
+    half.executescript(
+        "ALTER TABLE arm_assignments ADD COLUMN config_version TEXT;"
+        "ALTER TABLE sessions ADD COLUMN config_version TEXT;"
+    )
+    half.commit()
+
+    try:
+        versions = apply_migrations(half)
+        columns = {
+            table: [row[1] for row in half.execute(f"PRAGMA table_info({table})")]
+            for table in ("arm_assignments", "sessions", "progress", "answers")
+        }
+    finally:
+        half.close()
+
+    assert versions == [5]
+    assert all(cols.count("config_version") == 1 for cols in columns.values()), columns
 
 
 def test_apply_migrations_idempotent(tmp_db_path: Path) -> None:
@@ -602,8 +639,9 @@ def test_answers_delete_one_rowcount_and_write_counter(db: sqlite3.Connection) -
     cid = clinicians.lookup_or_create(db, "Dr. Smith")
     answers.upsert(db, clinician_id=cid, value="Yes", arm="no_ai", config_hash="h", **_cell())
 
-    first = answers.delete_one(db, clinician_id=cid, app_state=state, **_cell())
-    second = answers.delete_one(db, clinician_id=cid, app_state=state, **_cell())
+    provenance = {"config_hash": "h", "config_version": None}
+    first = answers.delete_one(db, clinician_id=cid, app_state=state, **provenance, **_cell())
+    second = answers.delete_one(db, clinician_id=cid, app_state=state, **provenance, **_cell())
     assert (first, second) == (1, 0)
     assert state.write_counter == 1
     assert db.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 0
@@ -740,16 +778,18 @@ def test_progress_unlock_upserts_and_is_monotonic(db: sqlite3.Connection) -> Non
 
 
 def test_progress_unlock_preserves_original_config_hash(db: sqlite3.Connection) -> None:
-    """review-fix R11: the row records the hash the walk started under."""
+    """review-fix R11 + S11b: the row keeps the hash the walk started under;
+    a write under another hash is refused, not applied."""
     cid = clinicians.lookup_or_create(db, "Dr. Smith")
     progress.unlock(
         db, clinician_id=cid, patient_id="p1", from_t_index=0, to_t_index=1, config_hash="h1"
     )
-    progress.unlock(
-        db, clinician_id=cid, patient_id="p1", from_t_index=1, to_t_index=2, config_hash="h2"
-    )
+    with pytest.raises(ConfigurationProvenanceError, match="provenance"):
+        progress.unlock(
+            db, clinician_id=cid, patient_id="p1", from_t_index=1, to_t_index=2, config_hash="h2"
+        )
     row = progress.fetch(db, clinician_id=cid, patient_id="p1")
-    assert (row.unlocked_t_index, row.config_hash) == (2, "h1")
+    assert (row.unlocked_t_index, row.config_hash) == (1, "h1")
 
 
 def test_progress_unlock_compare_and_set_rejects_stale_from_index(db: sqlite3.Connection) -> None:

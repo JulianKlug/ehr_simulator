@@ -37,6 +37,42 @@ def _require_version_provenance(conn: sqlite3.Connection, config_version: str | 
         )
 
 
+def _require_cell_provenance(
+    conn: sqlite3.Connection,
+    *,
+    clinician_id: str,
+    patient_id: str,
+    timepoint: float,
+    question_id: str,
+    config_hash: str,
+    config_version: str | None,
+) -> None:
+    """Refuse to touch a stored answer pinned to another configuration (S11b).
+
+    Runs before any UPDATE or DELETE: e.g. a v1/h1 answer must not be
+    overwritten or cleared by a v2/h2 write. No stored row → nothing to check.
+
+    Raises:
+        ConfigurationProvenanceError: stored (version, hash) differ from
+            the write's.
+    """
+    row = conn.execute(
+        "SELECT config_hash, config_version FROM answers "
+        "WHERE clinician_id = ? AND patient_id = ? AND timepoint = ? AND question_id = ?",
+        (clinician_id, patient_id, timepoint, question_id),
+    ).fetchone()
+    if row is None:
+        return
+
+    if row[0] != config_hash or row[1] != config_version:
+        raise ConfigurationProvenanceError(
+            "refusing to modify an answer recorded under a different configuration "
+            f"provenance (clinician={clinician_id}, patient={patient_id}, "
+            f"timepoint={timepoint}, question_id={question_id}, "
+            f"stored version={row[1]!r}, write version={config_version!r})"
+        )
+
+
 @dataclass(frozen=True)
 class AnswerRow:
     """One fully materialized ``answers`` row (S9c export reads all of them)."""
@@ -77,9 +113,19 @@ def upsert(
 
     Raises:
         ConfigurationProvenanceError (S11b): the study has activated
-            configurations but ``config_version`` is omitted.
+            configurations but ``config_version`` is omitted, or the stored
+            row carries a different (version, hash) — nothing is written.
     """
     _require_version_provenance(conn, config_version)
+    _require_cell_provenance(
+        conn,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        timepoint=timepoint,
+        question_id=question_id,
+        config_hash=config_hash,
+        config_version=config_version,
+    )
     conn.execute(
         "INSERT INTO answers "
         "(clinician_id, patient_id, timepoint, question_id, value, arm, "
@@ -152,12 +198,27 @@ def delete_one(
     patient_id: str,
     timepoint: float,
     question_id: str,
+    config_hash: str,
+    config_version: str | None,
     app_state: Any = None,
 ) -> int:
     """Delete one cell; return the rowcount (0 or 1).
 
     Bumps ``write_counter`` only when a row was actually removed.
+
+    Raises:
+        ConfigurationProvenanceError (S11b): the stored row carries a
+            different (version, hash) — nothing is deleted.
     """
+    _require_cell_provenance(
+        conn,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        timepoint=timepoint,
+        question_id=question_id,
+        config_hash=config_hash,
+        config_version=config_version,
+    )
     cursor = conn.execute(
         "DELETE FROM answers "
         "WHERE clinician_id = ? AND patient_id = ? AND timepoint = ? AND question_id = ?",

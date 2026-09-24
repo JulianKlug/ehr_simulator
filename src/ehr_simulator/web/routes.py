@@ -247,6 +247,23 @@ def _error_flash(message: str) -> str:
     return f'<div class="error-flash" role="alert">{message}</div>'
 
 
+async def provenance_error_response(
+    request: Request, exc: ConfigurationProvenanceError
+) -> HTMLResponse:
+    """App-wide handler: a case row pinned to another configuration is an
+    integrity error — refuse with 500, never a crash or a silent fallback.
+    """
+    get_logger().error(
+        "case provenance mismatch; request refused",
+        event_kind="case.provenance.refused",
+        path=request.url.path,
+        error=str(exc),
+    )
+    return HTMLResponse(
+        content=_error_flash(str(exc)), status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+    )
+
+
 def _answer_status(
     request: Request,
     *,
@@ -785,6 +802,15 @@ async def patient_answer(
             question_id=question_id,
             error=str(exc),
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+    except ConfigurationProvenanceError as exc:
+        # The stored answer is pinned to another configuration: integrity error.
+        return _answer_status(
+            request,
+            state="error",
+            question_id=question_id,
+            error=str(exc),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
 
     # The CTA rides out-of-band so its remaining-count is always the server's.

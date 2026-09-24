@@ -164,7 +164,13 @@ def record_answer(
     }
 
     if value is None:
-        deleted = answers.delete_one(conn, **cell, app_state=app_state)
+        deleted = answers.delete_one(
+            conn,
+            **cell,
+            config_hash=ctx.config_hash,
+            config_version=ctx.config_version,
+            app_state=app_state,
+        )
         outcome: AnswerOutcome = "cleared"
         detail: dict[str, Any] = {"deleted": deleted > 0}
     else:

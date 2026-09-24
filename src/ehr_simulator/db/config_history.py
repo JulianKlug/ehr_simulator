@@ -278,8 +278,8 @@ def activate(
     existing state               result
     ===========================  =======================================
     new version                  register and activate
-    same version, same hash AND  no-op (active pointer (re)landed on the
-    metadata exact               existing row and returned)
+    same version, same hash AND  no-op (existing row returned; the active
+    metadata exact               pointer is NOT moved)
     same version, different hash or metadata → refuse
     new version, reused hash     allowed (a rollback must use a new version)
     ===========================  =======================================
@@ -323,8 +323,8 @@ def activate(
                         "config_hash or metadata; refusing to reuse the label "
                         "(a rollback must use a new config_version)"
                     )
-                _set_active(conn, version)
-                conn.commit()
+                # Pure no-op: the active pointer stays where it is, so an
+                # exact replay of an older version can never roll back.
                 return _to_row(prior)  # type: ignore[return-value]
         else:
             _s11a_backfill(conn, version, config_hash)

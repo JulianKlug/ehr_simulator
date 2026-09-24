@@ -225,6 +225,30 @@ def test_activate_rerun_exact_match_is_noop(
     assert config_history.fetch_active(db).config_version == "v1"  # type: ignore[union-attr]
 
 
+def test_activate_exact_replay_of_older_version_keeps_active(
+    db: sqlite3.Connection,
+    study: StudyConfig,
+    questions: Questions,
+    config_hash: str,
+) -> None:
+    """Replaying v1 verbatim after v2 is a no-op — never a rollback to v1."""
+    _activate(db, study=study, questions=questions, config_hash=config_hash)
+    _activate(
+        db,
+        study=study,
+        questions=questions,
+        config_hash=config_hash,
+        version="v2",
+        description="second activation",
+    )
+
+    replay = _activate(db, study=study, questions=questions, config_hash=config_hash)
+
+    assert replay.config_version == "v1"
+    assert config_history.fetch_active(db).config_version == "v2"  # type: ignore[union-attr]
+    assert [r.config_version for r in config_history.list_all(db)] == ["v1", "v2"]
+
+
 def test_activate_same_version_different_hash_refused(
     db: sqlite3.Connection,
     study: StudyConfig,
@@ -602,3 +626,72 @@ def test_null_version_still_allowed_while_history_empty(db: sqlite3.Connection) 
         config_hash="d" * 64,
     )
     assert db.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# Answer provenance: a mismatched write is refused before any mutation
+# ---------------------------------------------------------------------------
+
+
+_CELL = {"clinician_id": "c1", "patient_id": "p1", "timepoint": 0.0, "question_id": "q1"}
+
+
+def _seed_v1_answer(db: sqlite3.Connection, config_hash: str) -> None:
+    _seed_clinician(db, "c1")
+    answers.upsert(
+        db, **_CELL, value="No", arm="no_ai", config_hash=config_hash, config_version="v1"
+    )
+
+
+def _stored_answer(db: sqlite3.Connection) -> tuple[str, str, str]:
+    row = db.execute("SELECT value, config_hash, config_version FROM answers").fetchone()
+    return (row[0], row[1], row[2])
+
+
+@pytest.mark.parametrize(
+    ("version", "hash_value"),
+    [("v2", "e" * 64), ("v2", None), ("v1", "e" * 64)],
+    ids=["version-and-hash", "version-only", "hash-only"],
+)
+def test_answer_upsert_refuses_mismatched_provenance_without_mutation(
+    db: sqlite3.Connection,
+    activated: str,
+    version: str,
+    hash_value: str | None,
+) -> None:
+    _seed_v1_answer(db, activated)
+
+    with pytest.raises(ConfigurationProvenanceError, match="provenance"):
+        answers.upsert(
+            db,
+            **_CELL,
+            value="Yes",
+            arm="no_ai",
+            config_hash=hash_value or activated,
+            config_version=version,
+        )
+
+    assert _stored_answer(db) == ("No", activated, "v1")
+
+
+def test_answer_delete_refuses_mismatched_provenance_without_mutation(
+    db: sqlite3.Connection, activated: str
+) -> None:
+    _seed_v1_answer(db, activated)
+
+    with pytest.raises(ConfigurationProvenanceError, match="provenance"):
+        answers.delete_one(db, **_CELL, config_hash="e" * 64, config_version="v2")
+
+    assert _stored_answer(db) == ("No", activated, "v1")
+
+
+def test_answer_upsert_with_matching_provenance_updates_value(
+    db: sqlite3.Connection, activated: str
+) -> None:
+    _seed_v1_answer(db, activated)
+
+    answers.upsert(
+        db, **_CELL, value="Yes", arm="no_ai", config_hash=activated, config_version="v1"
+    )
+
+    assert _stored_answer(db) == ("Yes", activated, "v1")

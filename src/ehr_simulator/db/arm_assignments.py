@@ -57,6 +57,24 @@ def fetch_all(conn: sqlite3.Connection) -> tuple[ArmAssignment, ...]:
     )
 
 
+def assigned_patient_ids(conn: sqlite3.Connection) -> tuple[str, ...]:
+    """Every patient holding an assignment, sorted; ``()`` before migration 1.
+
+    S11b: a case pinned to an older configuration keeps its patient even
+    after the active ``patient_ids`` drops it, so dataset loading needs this list.
+    """
+    has_table = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'arm_assignments'"
+    ).fetchone()
+    if has_table is None:
+        return ()
+
+    rows = conn.execute(
+        "SELECT DISTINCT patient_id FROM arm_assignments ORDER BY patient_id"
+    ).fetchall()
+    return tuple(row[0] for row in rows)
+
+
 def assign_or_lookup(
     conn: sqlite3.Connection,
     clinician_id: str,

@@ -41,9 +41,10 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from ehr_simulator.db import arm_assignments
 from ehr_simulator.db.backup import create_backup
-from ehr_simulator.db.connection import connect, resolve_db_path
-from ehr_simulator.db.exceptions import StudyIdentityError
+from ehr_simulator.db.connection import AccessMode, connect, resolve_db_path
+from ehr_simulator.db.exceptions import ConfigurationProvenanceError, StudyIdentityError
 from ehr_simulator.db.ingestion_issues import record_batch as record_ingestion_issues
 from ehr_simulator.db.migrations import apply_migrations
 from ehr_simulator.db.study_identity import bind as bind_study_identity
@@ -213,9 +214,10 @@ def create_app(
     app.state.active_configuration = None
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
-    from ehr_simulator.web.routes import router
+    from ehr_simulator.web.routes import provenance_error_response, router
 
     app.include_router(router)
+    app.add_exception_handler(ConfigurationProvenanceError, provenance_error_response)
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(CSPMiddleware)
     return app
@@ -278,6 +280,21 @@ def _verify_active_configuration(app: FastAPI) -> None:
     app.state.active_configuration = active
 
 
+def _assigned_patient_ids(db_path: Path) -> tuple[str, ...]:
+    """Patients of existing cases, read before the lifespan opens the DB.
+
+    Read-only and never creates the file: a fresh study has no cases yet.
+    """
+    if not db_path.exists():
+        return ()
+
+    conn = connect(db_path, access=AccessMode.READ_ONLY)
+    try:
+        return arm_assignments.assigned_patient_ids(conn)
+    finally:
+        conn.close()
+
+
 def app_from_study_config(
     study_path: Path,
     questions_path: Path,
@@ -309,8 +326,10 @@ def app_from_study_config(
 
     study = load_study_config(study_path)
     questions = load_questions(questions_path)
-    loader = build_dataset_loader(study)
     resolved_db_path = db_path if db_path is not None else resolve_db_path(study)
+    loader = build_dataset_loader(
+        study, extra_patient_ids=lambda: _assigned_patient_ids(resolved_db_path)
+    )
     app = create_app(
         log_dir=log_dir,
         dataset_loader=loader,
