@@ -1,6 +1,6 @@
 """Command-line entry point for ``ehr-simulator``.
 
-Nine commands after S9c:
+Ten commands after S11b:
 
 - ``serve`` — boot uvicorn against the FastAPI app. ``--config STUDY``
   + ``--questions Q`` wires a study-driven loader; without ``--config`` the
@@ -29,6 +29,13 @@ Nine commands after S9c:
   ``--keyfile``/``--only-complete``/``--force`` round it out. Exit 0 on
   success (including a 0-row export), 1 with ``Error: <reason>`` on any
   rejection; nothing is ever written before every validation passes.
+- ``activate-config`` (S11b) — register the given study + questions YAML
+  as a new configuration version (``--version``/``--description``
+  required, ``--reason`` optional) and make it the study's active
+  configuration. Binds the database's study identity first (refusing a
+  non-empty unbound legacy database), then applies one atomic commit.
+  Exit 0 on success (including a same-registered no-op), 1 on any
+  refusal.
 
 The ``main(argv: list[str] | None = None) -> None`` signature is preserved
 from the S2 argparse skeleton so ``test_cli.py``'s monkeypatch idiom carries
@@ -711,6 +718,83 @@ def divergence_view(
     typer.echo(
         f"Wrote divergence figure for patient {patient} to {out} "
         f"(descriptive only; arms: study config + recorded answers)"
+    )
+
+
+# ---------------------------------------------------------------------------
+# activate-config (S11b)
+# ---------------------------------------------------------------------------
+
+
+@app_typer.command("activate-config")
+def activate_config_cmd(
+    study_path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="Path to study_config.yaml."
+    ),
+    questions_path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="Path to questions.yaml."
+    ),
+    version: str = typer.Option(
+        ..., "--version", help="Configuration version label (e.g. v1, baseline, 20260924)."
+    ),
+    description: str = typer.Option(
+        ..., "--description", help="What this configuration changes or establishes (max 500 chars)."
+    ),
+    reason: str | None = typer.Option(
+        None, "--reason", help="Why the change was made now (optional, max 1000 chars)."
+    ),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite DB; defaults to the study's db_path / data/study_<study_id>.db.",
+    ),
+) -> None:
+    """Register the given config as a new configuration version and make it active."""
+    from ehr_simulator.cli_support import OperatorError, activate_for_cli
+    from ehr_simulator.config import load_questions, load_study_config
+    from ehr_simulator.db import resolve_db_path
+    from ehr_simulator.db.exceptions import ConfigurationActivationError, StudyIdentityError
+    from ehr_simulator.logging import setup_logging
+
+    setup_logging(Path("logs"))
+    try:
+        study = load_study_config(study_path)
+        questions = load_questions(questions_path)
+    except ConfigError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    resolved_db = db_path if db_path is not None else resolve_db_path(study)
+    try:
+        report = activate_for_cli(
+            study=study,
+            questions=questions,
+            db_path=resolved_db,
+            version=version,
+            description=description,
+            reason=reason,
+        )
+    except (
+        OperatorError,
+        ConfigurationActivationError,
+        StudyIdentityError,
+        sqlite3.Error,
+    ) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if report.was_noop:
+        typer.echo(
+            f"Configuration {report.config_version!r} was already registered with the "
+            f"identical hash and metadata — no change. It remains the active "
+            f"configuration for study {study.study_id!r}."
+        )
+        return
+    typer.echo(
+        f"Activated configuration {report.config_version!r} "
+        f"(config_hash {report.config_hash[:12]}…, "
+        f"{report.change_description!r}) as the active configuration for "
+        f"study {study.study_id!r}."
     )
 
 

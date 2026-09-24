@@ -23,3 +23,13 @@ class ConfigError(Exception):
             loc = ".".join(str(part) for part in err["loc"]) or "<root>"
             lines.append(f"  - {loc}: {err['msg']}")
         return cls("\n".join(lines))
+
+
+class ConfigValidationError(ValueError):
+    """A config value failed an explicit rule (S11b activation metadata).
+
+    Raised by :mod:`ehr_simulator.config.snapshot` for malformed
+    ``config_version`` / change-description / change-reason input. The DB
+    layer wraps it as :class:`ConfigurationActivationError`; the CLI
+    catches it directly and exits 1.
+    """

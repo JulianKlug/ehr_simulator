@@ -17,6 +17,25 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
+from ehr_simulator.db.config_history import has_any
+from ehr_simulator.db.exceptions import ConfigurationProvenanceError
+
+
+def _require_version_provenance(conn: sqlite3.Connection, config_version: str | None) -> None:
+    """Write-side provenance guard (S11b): once the study has any activated
+    configuration, every new case row must carry its ``config_version``.
+
+    Raises:
+        ConfigurationProvenanceError: ``config_version`` is NULL but
+            ``configuration_history`` is non-empty.
+    """
+    if config_version is None and has_any(conn):
+        raise ConfigurationProvenanceError(
+            "refusing to write a case row without a config_version: the study "
+            "has activated configurations in its history; every new case row "
+            "must pin the version under which it was started"
+        )
+
 
 @dataclass(frozen=True)
 class AnswerRow:
@@ -29,6 +48,7 @@ class AnswerRow:
     value: str
     arm: str
     config_hash: str
+    config_version: str | None = None
 
 
 def upsert(
@@ -41,24 +61,34 @@ def upsert(
     value: str,
     arm: str,
     config_hash: str,
+    config_version: str | None = None,
     write_counter: dict[str, int] | None = None,
     app_state: Any = None,
 ) -> None:
     """Insert-or-update one ``answers`` row.
 
-    On conflict on ``ux_answers_cell``, ``value``/``arm``/``config_hash`` are
-    overwritten and ``ts_recorded`` is bumped to ``CURRENT_TIMESTAMP``.
+    On conflict on ``ux_answers_cell``, ``value``/``arm`` are overwritten and
+    ``ts_recorded`` is bumped to ``CURRENT_TIMESTAMP``. The provenance pair
+    (``config_version``, ``config_hash``) is written on INSERT only and is
+    never rewritten on conflict — a case row is pinned to the configuration
+    under which it started (S11b).
     Increments ``app_state.write_counter`` after a successful execute so the
     shutdown-time backup gate (review-fix R8) trips on real research writes.
+
+    Raises:
+        ConfigurationProvenanceError (S11b): the study has activated
+            configurations but ``config_version`` is omitted.
     """
+    _require_version_provenance(conn, config_version)
     conn.execute(
         "INSERT INTO answers "
-        "(clinician_id, patient_id, timepoint, question_id, value, arm, config_hash) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "(clinician_id, patient_id, timepoint, question_id, value, arm, "
+        "config_hash, config_version) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(clinician_id, patient_id, timepoint, question_id) "
         "DO UPDATE SET value=excluded.value, arm=excluded.arm, "
-        "config_hash=excluded.config_hash, ts_recorded=CURRENT_TIMESTAMP",
-        (clinician_id, patient_id, timepoint, question_id, value, arm, config_hash),
+        "ts_recorded=CURRENT_TIMESTAMP",
+        (clinician_id, patient_id, timepoint, question_id, value, arm, config_hash, config_version),
     )
     conn.commit()
     if app_state is not None:
@@ -73,7 +103,8 @@ def fetch_all(conn: sqlite3.Connection) -> tuple[AnswerRow, ...]:
     expects for grouping and is what makes re-runs byte-stable.
     """
     rows = conn.execute(
-        "SELECT clinician_id, patient_id, timepoint, question_id, value, arm, config_hash "
+        "SELECT clinician_id, patient_id, timepoint, question_id, value, "
+        "arm, config_hash, config_version "
         "FROM answers "
         "ORDER BY clinician_id, patient_id, timepoint, question_id"
     ).fetchall()
@@ -86,6 +117,7 @@ def fetch_all(conn: sqlite3.Connection) -> tuple[AnswerRow, ...]:
             value=row[4],
             arm=row[5],
             config_hash=row[6],
+            config_version=row[7],
         )
         for row in rows
     )
@@ -97,20 +129,20 @@ def fetch_for_cell(
     clinician_id: str,
     patient_id: str,
     timepoint: float,
-) -> dict[str, tuple[str, str]]:
-    """Return ``{question_id: (value, config_hash)}`` for one cell.
+) -> dict[str, tuple[str, str | None, str | None]]:
+    """Return ``{question_id: (value, config_hash, config_version)}`` for one cell.
 
     Served by the implicit index behind ``ux_answers_cell`` — its
     ``(clinician_id, patient_id, timepoint)`` prefix matches the WHERE.
-    ``config_hash`` rides along so the caller can detect rows recorded under
-    a different study config (S9a §8.5).
+    ``config_hash`` / ``config_version`` ride along so the caller can detect
+    rows recorded under a different study configuration (S9a §8.5, S11b §Provenance).
     """
     rows = conn.execute(
-        "SELECT question_id, value, config_hash FROM answers "
+        "SELECT question_id, value, config_hash, config_version FROM answers "
         "WHERE clinician_id = ? AND patient_id = ? AND timepoint = ?",
         (clinician_id, patient_id, timepoint),
     ).fetchall()
-    return {row[0]: (row[1], row[2]) for row in rows}
+    return {row[0]: (row[1], row[2], row[3]) for row in rows}
 
 
 def delete_one(

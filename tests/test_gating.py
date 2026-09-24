@@ -30,11 +30,28 @@ REQUIRED_IDS = (
     "contributing_factors",
 )
 
+_FIXTURES = Path(__file__).parent / "fixtures" / "study"
+
+
+def _load_study():
+    from ehr_simulator.config import load_study_config
+
+    return load_study_config(_FIXTURES / "study_synthetic.yaml")
+
+
+def _load_questions():
+    return load_questions(_FIXTURES / "questions.yaml")
+
 
 class _AppState:
     write_counter = 0
     config_hash = "cfg"
     study_timepoints = list(TIMEPOINTS)
+    # S11b: bootstrap resolves the case configuration through app.state's
+    # models when no activation history exists (legacy S11a path), so the
+    # stub needs real ones.
+    study = _load_study()
+    questions = _load_questions()
 
 
 @pytest.fixture

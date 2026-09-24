@@ -114,6 +114,48 @@ def _seed_clinician(tmp_db_path: Path, *, study_id: str | None = None) -> str:
     return clinician_id
 
 
+def _activate_configuration(
+    tmp_db_path: Path,
+    study_yaml: Path,
+    questions_yaml: Path,
+    *,
+    version: str,
+    description: str,
+    reason: str | None = None,
+) -> None:
+    """Register + activate one configuration on a fixture database (S11b).
+
+    Runs on a dedicated connection that is closed before the app's lifespan
+    boots, matching the operator order: activate, then start the server.
+    """
+    from ehr_simulator.config import (
+        compute_config_hash_from_models,
+        load_questions,
+        load_study_config,
+    )
+    from ehr_simulator.db import apply_migrations, config_history, connect
+
+    study = load_study_config(study_yaml)
+    questions = load_questions(questions_yaml)
+    config_hash = compute_config_hash_from_models(study, questions)
+    tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
+    conn = connect(tmp_db_path)
+    try:
+        apply_migrations(conn)
+        config_history.activate(
+            conn,
+            study_id=study.study_id,
+            config_version=version,
+            config_hash=config_hash,
+            description=description,
+            reason=reason,
+            study=study,
+            questions=questions,
+        )
+    finally:
+        conn.close()
+
+
 @pytest.fixture
 def client(
     tmp_log_dir: Path,
@@ -174,7 +216,17 @@ def study_clinician_id(tmp_db_path: Path, study_fixture_dir: Path) -> str:
     from ehr_simulator.config import load_study_config
 
     study = load_study_config(study_fixture_dir / "study_synthetic.yaml")
-    return _seed_clinician(tmp_db_path, study_id=study.study_id)
+    clinician_id = _seed_clinician(tmp_db_path, study_id=study.study_id)
+    # S11b: study mode refuses to boot without an active configuration, so
+    # the fixture database gets one registered before the app's lifespan runs.
+    _activate_configuration(
+        tmp_db_path,
+        study_fixture_dir / "study_synthetic.yaml",
+        study_fixture_dir / "questions.yaml",
+        version="v1",
+        description="test activation",
+    )
+    return clinician_id
 
 
 @pytest.fixture
@@ -249,6 +301,7 @@ def seed_progress(
     db = client.app.state.db  # type: ignore[attr-defined]
     clinician_id = client.cookies.get("ehrsim_clinician_id")  # type: ignore[attr-defined]
     config_hash = client.app.state.config_hash  # type: ignore[attr-defined]
+    config_version = getattr(client.app.state, "config_version", None)  # type: ignore[attr-defined]
     if unlocked_t_index > 0:
         # A second seed for the same pair would miss the compare-and-set and
         # silently write nothing; fail loudly instead.
@@ -259,6 +312,7 @@ def seed_progress(
             from_t_index=0,
             to_t_index=unlocked_t_index,
             config_hash=config_hash,
+            config_version=config_version,
         )
         assert moved, "seed_progress: frontier already moved for this pair"
     if completed:
@@ -268,4 +322,5 @@ def seed_progress(
             patient_id=patient_id,
             unlocked_t_index=unlocked_t_index,
             config_hash=config_hash,
+            config_version=config_version,
         )

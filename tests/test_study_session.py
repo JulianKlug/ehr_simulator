@@ -15,10 +15,31 @@ from ehr_simulator.web.study_session import (
 )
 
 
+def _load_study():
+    from pathlib import Path
+
+    from ehr_simulator.config import load_study_config
+
+    return load_study_config(Path(__file__).parent / "fixtures" / "study" / "study_synthetic.yaml")
+
+
+def _load_questions():
+    from pathlib import Path
+
+    from ehr_simulator.config import load_questions
+
+    return load_questions(Path(__file__).parent / "fixtures" / "study" / "questions.yaml")
+
+
 class _AppState:
     write_counter = 0
     config_hash = "cfg"
     study_timepoints = [0.0, 60.0, 180.0]
+    # S11b: bootstrap resolves the case configuration through app.state's
+    # models when no activation history exists (legacy S11a path), so the
+    # stub needs real ones.
+    study = _load_study()
+    questions = _load_questions()
 
 
 def _counts(db: sqlite3.Connection) -> tuple[int, int, int]:

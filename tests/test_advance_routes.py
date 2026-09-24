@@ -444,7 +444,7 @@ def test_timepoint_count_uses_study_timepoints(
 ) -> None:
     """REGRESSION: the summary total and data-t-count follow the study, not the dataset."""
     from ehr_simulator.web.app import app_from_study_config
-    from tests.conftest import _seed_clinician
+    from tests.conftest import _activate_configuration, _seed_clinician
 
     study_path = tmp_log_dir.parent / "study_two.yaml"
     study_path.write_text(
@@ -453,6 +453,9 @@ def test_timepoint_count_uses_study_timepoints(
         encoding="utf-8",
     )
     cid = _seed_clinician(tmp_db_path, study_id="advance_two")
+    _activate_configuration(
+        tmp_db_path, study_path, study_fixture_dir / "questions.yaml", version="v1", description="t"
+    )
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",

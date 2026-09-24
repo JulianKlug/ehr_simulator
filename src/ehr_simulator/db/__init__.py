@@ -22,6 +22,7 @@ from ehr_simulator.db import (
     arm_assignments,
     backup,
     clinicians,
+    config_history,
     cookies,
     events,
     ingestion_issues,
@@ -30,19 +31,32 @@ from ehr_simulator.db import (
     study_identity,
 )
 from ehr_simulator.db.connection import AccessMode, connect, resolve_db_path
-from ehr_simulator.db.exceptions import DbError, StudyIdentityError
+from ehr_simulator.db.exceptions import (
+    ConfigurationActivationError,
+    ConfigurationError,
+    ConfigurationProvenanceError,
+    DbError,
+    StaleConfigurationError,
+    StudyIdentityError,
+)
 from ehr_simulator.db.migrations import MIGRATIONS, Migration, apply_migrations
 
 __all__ = [
     "MIGRATIONS",
-    "DbError",
     "AccessMode",
+    "ConfigurationActivationError",
+    "ConfigurationError",
+    "ConfigurationProvenanceError",
+    "DbError",
     "Migration",
+    "StaleConfigurationError",
+    "StudyIdentityError",
     "answers",
     "apply_migrations",
     "arm_assignments",
     "backup",
     "clinicians",
+    "config_history",
     "connect",
     "cookies",
     "events",
@@ -50,6 +64,5 @@ __all__ = [
     "progress",
     "resolve_db_path",
     "sessions",
-    "StudyIdentityError",
     "study_identity",
 ]

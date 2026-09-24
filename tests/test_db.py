@@ -153,12 +153,13 @@ def test_apply_migrations_forward(tmp_db_path: Path) -> None:
         ).fetchall()
     finally:
         conn.close()
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
     assert [(r[0], r[1]) for r in rows] == [
         (1, "initial"),
         (2, "sessions_open_unique"),
         (3, "progress"),
         (4, "study_identity"),
+        (5, "s11b_config_version_history"),
     ]
 
 
@@ -189,7 +190,7 @@ def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None
         migration_rows = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
     finally:
         conn.close()
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
     expected = {
         "clinicians",
         "sessions",
@@ -583,14 +584,14 @@ def test_answers_fetch_for_cell_returns_mapping(db: sqlite3.Connection) -> None:
     answers.upsert(db, clinician_id=other, value="No", **_cell(), **common)
 
     got = answers.fetch_for_cell(db, clinician_id=cid, patient_id="p1", timepoint=60.0)
-    assert {qid: value for qid, (value, _hash) in got.items()} == {"q1": "Yes", "q2": "42"}
+    assert {qid: value for qid, (value, _h, _v) in got.items()} == {"q1": "Yes", "q2": "42"}
 
 
 def test_answers_fetch_for_cell_returns_config_hash(db: sqlite3.Connection) -> None:
     cid = clinicians.lookup_or_create(db, "Dr. Smith")
     answers.upsert(db, clinician_id=cid, value="Yes", arm="no_ai", config_hash="old", **_cell())
     got = answers.fetch_for_cell(db, clinician_id=cid, patient_id="p1", timepoint=60.0)
-    assert got == {"q1": ("Yes", "old")}
+    assert got == {"q1": ("Yes", "old", None)}
 
 
 def test_answers_delete_one_rowcount_and_write_counter(db: sqlite3.Connection) -> None:
@@ -632,7 +633,7 @@ def test_migration_2_rejects_second_open_session(tmp_db_path: Path) -> None:
     )
     v1.execute("INSERT INTO schema_migrations (version, name) VALUES (1, 'initial')")
     v1.commit()
-    assert apply_migrations(v1) == [2, 3, 4]
+    assert apply_migrations(v1) == [2, 3, 4, 5]
     assert apply_migrations(v1) == []
 
     cid = clinicians.lookup_or_create(v1, "Dr. Smith")
@@ -685,7 +686,7 @@ def _v2_db(tmp_db_path: Path) -> sqlite3.Connection:
 
 def test_migration_3_creates_progress_and_is_idempotent(tmp_db_path: Path) -> None:
     v2 = _v2_db(tmp_db_path)
-    assert apply_migrations(v2) == [3, 4]
+    assert apply_migrations(v2) == [3, 4, 5]
     assert apply_migrations(v2) == []
     tables = {r[0] for r in v2.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "progress" in tables
@@ -1250,7 +1251,7 @@ def test_migration_4_creates_exactly_study_identity_table(tmp_db_path: Path) -> 
     never populates it, and is safe to re-apply."""
     conn = connect(tmp_db_path)
     try:
-        assert apply_migrations(conn) == [1, 2, 3, 4]
+        assert apply_migrations(conn) == [1, 2, 3, 4, 5]
         tables = {
             r[0]
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -1394,7 +1395,7 @@ class TestStudyIdentityDao:
             conn.execute(sql)
             conn.commit()
             # schema_migrations rows alone do NOT count...
-            assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 4
+            assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 5
             # ...but a row in any application table does:
             assert si.has_persistent_data(conn) is True
         finally:

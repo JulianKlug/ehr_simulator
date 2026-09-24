@@ -268,7 +268,14 @@ def render_html_for_preview(
     """
     from fastapi.testclient import TestClient
 
-    from ehr_simulator.db import apply_migrations, clinicians, connect, progress, study_identity
+    from ehr_simulator.db import (
+        apply_migrations,
+        clinicians,
+        config_history,
+        connect,
+        progress,
+        study_identity,
+    )
     from ehr_simulator.web.app import app_from_study_config
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -276,10 +283,15 @@ def render_html_for_preview(
     # default per-study database is never touched, and seed a synthetic
     # clinician so the protected-route preamble lets us in. S11a: the
     # scratch DB is bound to the study's identity BEFORE any application
-    # row is seeded (bind would refuse to claim a non-empty unbound DB),
-    # and is keyed by study_id so previews of different studies never
-    # collide on one scratch file.
+    # row is seeded (bind refuses to claim a non-empty unbound DB), and is
+    # keyed by study_id so previews of different studies never collide on
+    # one scratch file. S11b: boot refuses without an active configuration,
+    # so the scratch DB gets a first activation (version "preview") after
+    # binding and before any application row is seeded.
+    from ehr_simulator.config import compute_config_hash_from_models, load_questions
+
     study = _load_study_for_app(study_path)
+    questions = load_questions(questions_path)
     scratch_db = out_dir / f"_preview_scratch_{study.study_id}.db"
     # A repeated preview run must start from a genuinely fresh database: any
     # scratch file left over from an earlier run (plus its WAL/SHM sidecars)
@@ -300,6 +312,16 @@ def render_html_for_preview(
     seed_conn = connect(scratch_db)
     apply_migrations(seed_conn)
     study_identity.bind(seed_conn, study.study_id)
+    config_history.activate(
+        seed_conn,
+        study_id=study.study_id,
+        config_version="preview",
+        config_hash=compute_config_hash_from_models(study, questions),
+        description="scratch activation for preview --html-out",
+        reason=None,
+        study=study,
+        questions=questions,
+    )
     clinician_id = clinicians.lookup_or_create(seed_conn, "Dr. Preview")
     seed_conn.close()
 
@@ -326,6 +348,7 @@ def render_html_for_preview(
                     from_t_index=idx - 1,
                     to_t_index=idx,
                     config_hash=app.state.config_hash,
+                    config_version=app.state.config_version,
                 )
             response = client.get(f"/patient/{patient_id}/timepoint/{idx}")
             response.raise_for_status()
@@ -476,3 +499,86 @@ def _has_migrations_table(conn: Any) -> bool:
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
     ).fetchone()
     return row is not None
+
+
+# ---------------------------------------------------------------------------
+# activate-config (S11b)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ActivationReport:
+    """The observable result of a successful ``activate-config`` run.
+
+    ``was_noop`` is True when the version label was already registered
+    with the identical hash, description, and reason — ``activate``
+    verified it and left the row untouched (a collision with a different
+    hash or metadata would have refused instead).
+    """
+
+    config_version: str
+    config_hash: str
+    change_description: str
+    was_noop: bool
+
+
+def activate_for_cli(
+    *,
+    study: StudyConfig,
+    questions: Questions,
+    db_path: Path,
+    version: str,
+    description: str,
+    reason: str | None,
+) -> ActivationReport:
+    """Register the config as version ``version`` and make it active.
+
+    Operator order (S11b): migrations → bind-or-verify the study
+    identity → ``config_history.activate`` (metadata validation, dataset
+    invariant, S11a backfill probe, snapshot storage, active pointer,
+    one atomic commit). The identity is bound *before* activation because
+    the ``configuration_history.study_id`` foreign key requires the
+    singleton row to already exist. A legacy S11a database (unbound,
+    already walked) is refused here — the explicit
+    ``study_identity.adopt`` escape hatch is the only way to claim it.
+
+    Raises:
+        StudyIdentityError: identity mismatch or refused adoption.
+        ConfigurationActivationError: metadata/dataset/collision refusal.
+        OperatorError: the transaction could not be applied atomically.
+    """
+    import sqlite3
+
+    from ehr_simulator.config import compute_config_hash_from_models
+    from ehr_simulator.db import apply_migrations, config_history, connect, study_identity
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    config_hash = compute_config_hash_from_models(study, questions)
+    conn = connect(db_path)
+    try:
+        apply_migrations(conn)
+        study_identity.bind(conn, study.study_id)
+        existing = config_history.fetch_version(conn, version)
+        row = config_history.activate(
+            conn,
+            study_id=study.study_id,
+            config_version=version,
+            config_hash=config_hash,
+            description=description,
+            reason=reason,
+            study=study,
+            questions=questions,
+        )
+    except sqlite3.Error as exc:
+        conn.rollback()
+        raise OperatorError(f"activation could not be applied atomically: {exc}") from exc
+    finally:
+        conn.close()
+    # A surviving row means activate either inserted it or verified the
+    # exact same one (any hash/metadata drift raises before returning).
+    return ActivationReport(
+        config_version=row.config_version,
+        config_hash=row.config_hash,
+        change_description=row.change_description,
+        was_noop=existing is not None,
+    )

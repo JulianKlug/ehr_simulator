@@ -142,11 +142,46 @@ CREATE TABLE IF NOT EXISTS study_identity (
 """
 
 
+# S11b: configuration version history + per-case provenance.
+# ``configuration_history`` is the append-only register of explicit
+# activations (one row per ``config_version``) carrying the immutable study
+# and question snapshots; ``active_configuration`` is a two-column singleton
+# pointing at exactly one registered version. The four case tables gain a
+# nullable ``config_version`` (nullable only for S11a migration
+# compatibility — the DAOs refuse a NULL once history exists). Existing
+# ``config_hash`` values are never rewritten and gain no uniqueness.
+# No inline SQL comments: sqlite_master stores the DDL verbatim and the
+# schema-snapshot test compares it byte-for-byte.
+_S11B_CONFIG_HISTORY = """
+CREATE TABLE IF NOT EXISTS configuration_history (
+    config_version      TEXT PRIMARY KEY,
+    study_id            TEXT NOT NULL REFERENCES study_identity(study_id),
+    config_hash         TEXT NOT NULL,
+    activated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    change_description  TEXT NOT NULL,
+    change_reason       TEXT,
+    study_json          TEXT NOT NULL,
+    questions_json      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS active_configuration (
+    singleton       INTEGER PRIMARY KEY CHECK (singleton = 1),
+    config_version  TEXT NOT NULL REFERENCES configuration_history(config_version)
+);
+
+ALTER TABLE arm_assignments ADD COLUMN config_version TEXT;
+ALTER TABLE sessions       ADD COLUMN config_version TEXT;
+ALTER TABLE progress       ADD COLUMN config_version TEXT;
+ALTER TABLE answers        ADD COLUMN config_version TEXT;
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
     Migration(version=3, name="progress", up_sql=_PROGRESS_DDL),
     Migration(version=4, name="study_identity", up_sql=_STUDY_IDENTITY_DDL),
+    Migration(version=5, name="s11b_config_version_history", up_sql=_S11B_CONFIG_HISTORY),
 )
 
 
