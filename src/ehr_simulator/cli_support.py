@@ -23,7 +23,7 @@ be unit-tested without spinning up Typer. The three helpers:
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -32,8 +32,15 @@ from ehr_simulator.config import ConfigError, Questions, StudyConfig
 from ehr_simulator.web.panels import DatasetLike, slice_to_timepoint
 
 
-def build_dataset_loader(study: StudyConfig) -> Callable[[], DatasetLike]:
+def build_dataset_loader(
+    study: StudyConfig,
+    extra_patient_ids: Callable[[], Iterable[str]] = tuple,
+) -> Callable[[], DatasetLike]:
     """Return a zero-arg loader closure routing to the right adapter.
+
+    ``extra_patient_ids`` is called at load time and its ids are loaded
+    after ``study.patient_ids`` (S11b: patients of cases pinned to an older
+    configuration, e.g. ``[B]`` once v2 drops B from ``[A, B]``).
 
     For ``dataset == "synthetic"``: ignore any inline paths (forbidden by
     StudyConfig validators) and return ``load_synthetic``.
@@ -59,18 +66,21 @@ def build_dataset_loader(study: StudyConfig) -> Callable[[], DatasetLike]:
 
     csv_path = Path(study.csv_path)
     params_dir = Path(study.params_dir)
+
     # Filter at ingestion time so a pilot config (3-50 patients) doesn't
     # pay the full-dataset memory + load-time cost (~600 MB / 51 s on
     # Geneva real data). Skipped (None) only when no study config is in
     # scope — `validate-adapter` and friends always pass a study, so the
     # filter is always active when the CLI builds the loader.
-    pids = tuple(study.patient_ids)
+    def _pids() -> tuple[str, ...]:
+        # dict.fromkeys: ordered de-duplication, active patients first.
+        return tuple(dict.fromkeys([*study.patient_ids, *extra_patient_ids()]))
 
     if dataset_name == "geneva":
         from ehr_simulator.ingestion.geneva import load_geneva
 
         def _load_geneva() -> DatasetLike:
-            return load_geneva(csv_path, params_dir, strict=False, patient_ids=pids)
+            return load_geneva(csv_path, params_dir, strict=False, patient_ids=_pids())
 
         return _load_geneva
 
@@ -78,7 +88,7 @@ def build_dataset_loader(study: StudyConfig) -> Callable[[], DatasetLike]:
         from ehr_simulator.ingestion.mimic import load_mimic
 
         def _load_mimic() -> DatasetLike:
-            return load_mimic(csv_path, params_dir, strict=False, patient_ids=pids)
+            return load_mimic(csv_path, params_dir, strict=False, patient_ids=_pids())
 
         return _load_mimic
 
@@ -268,7 +278,14 @@ def render_html_for_preview(
     """
     from fastapi.testclient import TestClient
 
-    from ehr_simulator.db import apply_migrations, clinicians, connect, progress, study_identity
+    from ehr_simulator.db import (
+        apply_migrations,
+        clinicians,
+        config_history,
+        connect,
+        progress,
+        study_identity,
+    )
     from ehr_simulator.web.app import app_from_study_config
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -276,10 +293,15 @@ def render_html_for_preview(
     # default per-study database is never touched, and seed a synthetic
     # clinician so the protected-route preamble lets us in. S11a: the
     # scratch DB is bound to the study's identity BEFORE any application
-    # row is seeded (bind would refuse to claim a non-empty unbound DB),
-    # and is keyed by study_id so previews of different studies never
-    # collide on one scratch file.
+    # row is seeded (bind refuses to claim a non-empty unbound DB), and is
+    # keyed by study_id so previews of different studies never collide on
+    # one scratch file. S11b: boot refuses without an active configuration,
+    # so the scratch DB gets a first activation (version "preview") after
+    # binding and before any application row is seeded.
+    from ehr_simulator.config import compute_config_hash_from_models, load_questions
+
     study = _load_study_for_app(study_path)
+    questions = load_questions(questions_path)
     scratch_db = out_dir / f"_preview_scratch_{study.study_id}.db"
     # A repeated preview run must start from a genuinely fresh database: any
     # scratch file left over from an earlier run (plus its WAL/SHM sidecars)
@@ -300,6 +322,16 @@ def render_html_for_preview(
     seed_conn = connect(scratch_db)
     apply_migrations(seed_conn)
     study_identity.bind(seed_conn, study.study_id)
+    config_history.activate(
+        seed_conn,
+        study_id=study.study_id,
+        config_version="preview",
+        config_hash=compute_config_hash_from_models(study, questions),
+        description="scratch activation for preview --html-out",
+        reason=None,
+        study=study,
+        questions=questions,
+    )
     clinician_id = clinicians.lookup_or_create(seed_conn, "Dr. Preview")
     seed_conn.close()
 
@@ -326,6 +358,7 @@ def render_html_for_preview(
                     from_t_index=idx - 1,
                     to_t_index=idx,
                     config_hash=app.state.config_hash,
+                    config_version=app.state.config_version,
                 )
             response = client.get(f"/patient/{patient_id}/timepoint/{idx}")
             response.raise_for_status()
@@ -476,3 +509,89 @@ def _has_migrations_table(conn: Any) -> bool:
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
     ).fetchone()
     return row is not None
+
+
+# ---------------------------------------------------------------------------
+# activate-config (S11b)
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ActivationReport:
+    """The observable result of a successful ``activate-config`` run.
+
+    ``was_noop`` is True when the version label was already registered
+    with the identical hash, description, and reason — ``activate``
+    verified it and left the row untouched (a collision with a different
+    hash or metadata would have refused instead). ``active_version`` is
+    the version active afterwards: on a no-op replay of an older version
+    it differs from ``config_version`` (v1 replayed while v2 stays active).
+    """
+
+    config_version: str
+    config_hash: str
+    change_description: str
+    was_noop: bool
+    active_version: str
+
+
+def activate_for_cli(
+    *,
+    study: StudyConfig,
+    questions: Questions,
+    db_path: Path,
+    version: str,
+    description: str,
+    reason: str | None,
+) -> ActivationReport:
+    """Register the config as version ``version`` and make it active.
+
+    Operator order (S11b): migrations → ``config_history.activate``
+    (bind-or-verify the study identity, metadata validation, dataset
+    invariant, S11a backfill probe, snapshot storage, active pointer —
+    one atomic commit, so a failed activation leaves a fresh database
+    unbound). A legacy S11a database (unbound, already walked) is refused
+    — the explicit ``study_identity.adopt`` escape hatch is the only way
+    to claim it.
+
+    Raises:
+        StudyIdentityError: identity mismatch or refused adoption.
+        ConfigurationActivationError: metadata/dataset/collision refusal.
+        OperatorError: the transaction could not be applied atomically.
+    """
+    import sqlite3
+
+    from ehr_simulator.config import compute_config_hash_from_models
+    from ehr_simulator.db import apply_migrations, config_history, connect
+
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    config_hash = compute_config_hash_from_models(study, questions)
+    conn = connect(db_path)
+    try:
+        apply_migrations(conn)
+        existing = config_history.fetch_version(conn, version)
+        row = config_history.activate(
+            conn,
+            study_id=study.study_id,
+            config_version=version,
+            config_hash=config_hash,
+            description=description,
+            reason=reason,
+            study=study,
+            questions=questions,
+        )
+        active = config_history.fetch_active(conn)
+    except sqlite3.Error as exc:
+        conn.rollback()
+        raise OperatorError(f"activation could not be applied atomically: {exc}") from exc
+    finally:
+        conn.close()
+    # A surviving row means activate either inserted it or verified the
+    # exact same one (any hash/metadata drift raises before returning).
+    return ActivationReport(
+        config_version=row.config_version,
+        config_hash=row.config_hash,
+        change_description=row.change_description,
+        was_noop=existing is not None,
+        active_version=active.config_version if active is not None else row.config_version,
+    )

@@ -16,7 +16,40 @@ discipline.
 from __future__ import annotations
 
 import sqlite3
+from dataclasses import dataclass
 from uuid import uuid4
+
+from ehr_simulator.db.answers import _require_version_provenance
+
+
+@dataclass(frozen=True)
+class SessionRow:
+    """One materialized ``sessions`` row (S11b provenance reads)."""
+
+    session_id: str
+    clinician_id: str
+    patient_id: str
+    arm: str
+    config_hash: str
+    config_version: str | None = None
+    ended_at: object | None = None
+
+
+_FETCH_PAIR_SQL = (
+    "SELECT session_id, clinician_id, patient_id, arm, config_hash, config_version, ended_at "
+    "FROM sessions WHERE clinician_id = ? AND patient_id = ? "
+    "ORDER BY started_at DESC, rowid DESC LIMIT 1"
+)
+
+
+def fetch_for_pair(
+    conn: sqlite3.Connection, clinician_id: str, patient_id: str
+) -> SessionRow | None:
+    """The pair's most recent session (open or closed), with provenance."""
+    row = conn.execute(_FETCH_PAIR_SQL, (clinician_id, patient_id)).fetchone()
+    if row is None:
+        return None
+    return SessionRow(*row)
 
 
 def find_open(conn: sqlite3.Connection, clinician_id: str, patient_id: str) -> str | None:
@@ -37,18 +70,26 @@ def start_or_resume(
     *,
     arm: str,
     config_hash: str,
+    config_version: str | None = None,
 ) -> str:
     """Return the open ``session_id`` for ``(clinician_id, patient_id)``,
-    creating a new row if no open session exists."""
+    creating a new row if no open session exists.
+
+    S11b: the new row is stamped with the case's provenance pair
+    (``config_version``, ``config_hash``); an existing open session is
+    returned as-is (its provenance was fixed when it opened).
+    """
     existing = find_open(conn, clinician_id, patient_id)
     if existing is not None:
         return existing
 
+    _require_version_provenance(conn, config_version)
     session_id = uuid4().hex
     conn.execute(
-        "INSERT INTO sessions (session_id, clinician_id, patient_id, arm, config_hash) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (session_id, clinician_id, patient_id, arm, config_hash),
+        "INSERT INTO sessions (session_id, clinician_id, patient_id, arm, "
+        "config_hash, config_version) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (session_id, clinician_id, patient_id, arm, config_hash, config_version),
     )
     conn.commit()
     return session_id

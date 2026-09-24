@@ -235,7 +235,7 @@ def test_post_answer_bad_target_unknown_patient_404(
     import yaml
 
     from ehr_simulator.web.app import app_from_study_config
-    from tests.conftest import _seed_clinician
+    from tests.conftest import _activate_configuration, _seed_clinician
 
     study = yaml.safe_load((study_fixture_dir / "study_synthetic.yaml").read_text())
     study["patient_ids"].append("ghost_patient")
@@ -243,6 +243,14 @@ def test_post_answer_bad_target_unknown_patient_404(
     study_path.write_text(yaml.safe_dump(study))
 
     cid = _seed_clinician(tmp_db_path, study_id=study["study_id"])
+    # S11b: study mode refuses to boot without an active configuration.
+    _activate_configuration(
+        tmp_db_path,
+        study_path,
+        study_fixture_dir / "questions.yaml",
+        version="v1",
+        description="test activation",
+    )
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",
@@ -311,7 +319,8 @@ def _seed_cell(client: TestClient, clinician_id: str, t_minutes: float) -> None:
         "patient_id": PID,
         "timepoint": t_minutes,
         "arm": "no_ai",
-        "config_hash": "h",
+        "config_hash": client.app.state.config_hash,  # type: ignore[attr-defined]
+        "config_version": client.app.state.config_version,  # type: ignore[attr-defined]
     }
     db = _db(client)
     answers.upsert(db, question_id="deterioration_6h", value="No", **common)

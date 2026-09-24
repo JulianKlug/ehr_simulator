@@ -26,6 +26,7 @@ from structlog.testing import capture_logs
 from ehr_simulator.config.exceptions import ConfigError
 from ehr_simulator.db import (
     MIGRATIONS,
+    ConfigurationProvenanceError,
     DbError,
     Migration,
     answers,
@@ -153,12 +154,13 @@ def test_apply_migrations_forward(tmp_db_path: Path) -> None:
         ).fetchall()
     finally:
         conn.close()
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
     assert [(r[0], r[1]) for r in rows] == [
         (1, "initial"),
         (2, "sessions_open_unique"),
         (3, "progress"),
         (4, "study_identity"),
+        (5, "s11b_config_version_history"),
     ]
 
 
@@ -189,7 +191,7 @@ def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None
         migration_rows = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
     finally:
         conn.close()
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
     expected = {
         "clinicians",
         "sessions",
@@ -202,6 +204,42 @@ def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None
     }
     assert expected.issubset(tables)
     assert migration_rows == len(MIGRATIONS)
+
+
+def test_apply_migrations_recovers_from_partial_migration_5(tmp_db_path: Path) -> None:
+    """A crash between migration 5's ALTERs must not wedge the retry on a
+    duplicate-column error: the rerun adds only the columns still missing.
+    """
+    # Half-applied state: migrations 1-4 recorded, only two of 5's ALTERs landed.
+    half = connect(tmp_db_path)
+    half.execute(
+        "CREATE TABLE schema_migrations ("
+        " version INTEGER PRIMARY KEY,"
+        " name TEXT NOT NULL,"
+        " applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+    )
+    for m in MIGRATIONS[:4]:
+        half.executescript(m.up_sql)
+        half.execute(
+            "INSERT INTO schema_migrations (version, name) VALUES (?, ?)", (m.version, m.name)
+        )
+    half.executescript(
+        "ALTER TABLE arm_assignments ADD COLUMN config_version TEXT;"
+        "ALTER TABLE sessions ADD COLUMN config_version TEXT;"
+    )
+    half.commit()
+
+    try:
+        versions = apply_migrations(half)
+        columns = {
+            table: [row[1] for row in half.execute(f"PRAGMA table_info({table})")]
+            for table in ("arm_assignments", "sessions", "progress", "answers")
+        }
+    finally:
+        half.close()
+
+    assert versions == [5]
+    assert all(cols.count("config_version") == 1 for cols in columns.values()), columns
 
 
 def test_apply_migrations_idempotent(tmp_db_path: Path) -> None:
@@ -583,14 +621,14 @@ def test_answers_fetch_for_cell_returns_mapping(db: sqlite3.Connection) -> None:
     answers.upsert(db, clinician_id=other, value="No", **_cell(), **common)
 
     got = answers.fetch_for_cell(db, clinician_id=cid, patient_id="p1", timepoint=60.0)
-    assert {qid: value for qid, (value, _hash) in got.items()} == {"q1": "Yes", "q2": "42"}
+    assert {qid: value for qid, (value, _h, _v) in got.items()} == {"q1": "Yes", "q2": "42"}
 
 
 def test_answers_fetch_for_cell_returns_config_hash(db: sqlite3.Connection) -> None:
     cid = clinicians.lookup_or_create(db, "Dr. Smith")
     answers.upsert(db, clinician_id=cid, value="Yes", arm="no_ai", config_hash="old", **_cell())
     got = answers.fetch_for_cell(db, clinician_id=cid, patient_id="p1", timepoint=60.0)
-    assert got == {"q1": ("Yes", "old")}
+    assert got == {"q1": ("Yes", "old", None)}
 
 
 def test_answers_delete_one_rowcount_and_write_counter(db: sqlite3.Connection) -> None:
@@ -601,8 +639,9 @@ def test_answers_delete_one_rowcount_and_write_counter(db: sqlite3.Connection) -
     cid = clinicians.lookup_or_create(db, "Dr. Smith")
     answers.upsert(db, clinician_id=cid, value="Yes", arm="no_ai", config_hash="h", **_cell())
 
-    first = answers.delete_one(db, clinician_id=cid, app_state=state, **_cell())
-    second = answers.delete_one(db, clinician_id=cid, app_state=state, **_cell())
+    provenance = {"config_hash": "h", "config_version": None}
+    first = answers.delete_one(db, clinician_id=cid, app_state=state, **provenance, **_cell())
+    second = answers.delete_one(db, clinician_id=cid, app_state=state, **provenance, **_cell())
     assert (first, second) == (1, 0)
     assert state.write_counter == 1
     assert db.execute("SELECT COUNT(*) FROM answers").fetchone()[0] == 0
@@ -632,7 +671,7 @@ def test_migration_2_rejects_second_open_session(tmp_db_path: Path) -> None:
     )
     v1.execute("INSERT INTO schema_migrations (version, name) VALUES (1, 'initial')")
     v1.commit()
-    assert apply_migrations(v1) == [2, 3, 4]
+    assert apply_migrations(v1) == [2, 3, 4, 5]
     assert apply_migrations(v1) == []
 
     cid = clinicians.lookup_or_create(v1, "Dr. Smith")
@@ -685,7 +724,7 @@ def _v2_db(tmp_db_path: Path) -> sqlite3.Connection:
 
 def test_migration_3_creates_progress_and_is_idempotent(tmp_db_path: Path) -> None:
     v2 = _v2_db(tmp_db_path)
-    assert apply_migrations(v2) == [3, 4]
+    assert apply_migrations(v2) == [3, 4, 5]
     assert apply_migrations(v2) == []
     tables = {r[0] for r in v2.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "progress" in tables
@@ -739,16 +778,18 @@ def test_progress_unlock_upserts_and_is_monotonic(db: sqlite3.Connection) -> Non
 
 
 def test_progress_unlock_preserves_original_config_hash(db: sqlite3.Connection) -> None:
-    """review-fix R11: the row records the hash the walk started under."""
+    """review-fix R11 + S11b: the row keeps the hash the walk started under;
+    a write under another hash is refused, not applied."""
     cid = clinicians.lookup_or_create(db, "Dr. Smith")
     progress.unlock(
         db, clinician_id=cid, patient_id="p1", from_t_index=0, to_t_index=1, config_hash="h1"
     )
-    progress.unlock(
-        db, clinician_id=cid, patient_id="p1", from_t_index=1, to_t_index=2, config_hash="h2"
-    )
+    with pytest.raises(ConfigurationProvenanceError, match="provenance"):
+        progress.unlock(
+            db, clinician_id=cid, patient_id="p1", from_t_index=1, to_t_index=2, config_hash="h2"
+        )
     row = progress.fetch(db, clinician_id=cid, patient_id="p1")
-    assert (row.unlocked_t_index, row.config_hash) == (2, "h1")
+    assert (row.unlocked_t_index, row.config_hash) == (1, "h1")
 
 
 def test_progress_unlock_compare_and_set_rejects_stale_from_index(db: sqlite3.Connection) -> None:
@@ -1250,7 +1291,7 @@ def test_migration_4_creates_exactly_study_identity_table(tmp_db_path: Path) -> 
     never populates it, and is safe to re-apply."""
     conn = connect(tmp_db_path)
     try:
-        assert apply_migrations(conn) == [1, 2, 3, 4]
+        assert apply_migrations(conn) == [1, 2, 3, 4, 5]
         tables = {
             r[0]
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -1394,7 +1435,7 @@ class TestStudyIdentityDao:
             conn.execute(sql)
             conn.commit()
             # schema_migrations rows alone do NOT count...
-            assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 4
+            assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 5
             # ...but a row in any application table does:
             assert si.has_persistent_data(conn) is True
         finally:

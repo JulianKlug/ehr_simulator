@@ -15,6 +15,7 @@ import pytest
 from typer.testing import CliRunner
 
 from ehr_simulator import cli
+from ehr_simulator.db import connect
 
 
 @pytest.fixture
@@ -288,7 +289,7 @@ def test_cli_migrate_forward_then_idempotent(runner: CliRunner, tmp_path: Path) 
     db_path = tmp_path / "x.db"
     first = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
     assert first.exit_code == 0, first.stderr
-    assert "Applied migrations: [1, 2, 3, 4]" in first.stdout
+    assert "Applied migrations: [1, 2, 3, 4, 5]" in first.stdout
 
     second = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
     assert second.exit_code == 0, second.stderr
@@ -557,7 +558,7 @@ def test_cli_reset_progress_refuses_stale_schema(
         ],
     )
     assert result.exit_code == 1
-    assert "pending migrations [2, 3, 4]" in result.stderr
+    assert "pending migrations [2, 3, 4, 5]" in result.stderr
     conn = connect(db_path)
     assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
     conn.close()
@@ -1168,6 +1169,11 @@ def test_cli_preview_scratch_db_is_recreated_on_repeated_runs(
     # the next preview would fail; a fresh-create implementation recovers.
     conn = connect(scratch)
     try:
+        # S11b: the scratch DB also carries a configuration_history row that
+        # foreign-keys to the identity; evict it before simulating the
+        # foreign rebind.
+        conn.execute("DELETE FROM active_configuration")
+        conn.execute("DELETE FROM configuration_history")
         conn.execute("UPDATE study_identity SET study_id = 'other_fixture'")
         conn.commit()
     finally:
@@ -1183,3 +1189,246 @@ def test_cli_preview_scratch_db_is_recreated_on_repeated_runs(
         assert conn.execute("SELECT COUNT(*) FROM clinicians").fetchone()[0] == 1
     finally:
         conn.close()
+
+
+# ---------------------------------------------------------------------------
+# activate-config (S11b)
+# ---------------------------------------------------------------------------
+
+
+def _invoke_activate(
+    invoke, study_fixture_dir: Path, args_extra: list[str], db: Path | None = None
+):
+    args = [
+        "activate-config",
+        str(study_fixture_dir / "study_synthetic.yaml"),
+        str(study_fixture_dir / "questions.yaml"),
+    ]
+    if db is not None:
+        args += ["--db-path", str(db)]
+    return invoke(cli.app_typer, args + args_extra)
+
+
+def test_cli_activate_config_registers_and_activates(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path
+) -> None:
+    from ehr_simulator.db import connect
+
+    db_path = tmp_path / "cfg.db"
+    result = _invoke_activate(
+        runner.invoke,
+        study_fixture_dir,
+        ["--version", "v1", "--description", "Initial study config", "--reason", "baseline"],
+        db=db_path,
+    )
+    assert result.exit_code == 0, result.stderr
+    assert "Activated configuration 'v1'" in result.stdout
+
+    conn = connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT config_version, study_id, change_description, change_reason "
+            "FROM configuration_history"
+        ).fetchone()
+        assert row[0] == "v1"
+        assert row[2] == "Initial study config"
+        assert row[3] == "baseline"
+        active = conn.execute("SELECT config_version FROM active_configuration").fetchone()
+        assert active[0] == "v1"
+        study_id = conn.execute("SELECT study_id FROM study_identity").fetchone()[0]
+        assert row[1] == study_id
+    finally:
+        conn.close()
+
+
+def test_cli_activate_config_noop_rerun(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path
+) -> None:
+    first_args = ["--version", "v1", "--description", "Initial"]
+    db_path = tmp_path / "cfg.db"
+    r1 = _invoke_activate(runner.invoke, study_fixture_dir, first_args, db=db_path)
+    assert r1.exit_code == 0, r1.stderr
+
+    r2 = _invoke_activate(runner.invoke, study_fixture_dir, first_args, db=db_path)
+    assert r2.exit_code == 0, r2.stderr
+    assert "already registered" in r2.stdout
+
+
+def test_cli_activate_config_replay_of_older_version_reports_real_active(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path
+) -> None:
+    """Replaying v1 after v2 is a no-op; the output must name v2 as active."""
+    db_path = tmp_path / "cfg.db"
+    v1_args = ["--version", "v1", "--description", "Initial"]
+    _invoke_activate(runner.invoke, study_fixture_dir, v1_args, db=db_path)
+    _invoke_activate(
+        runner.invoke, study_fixture_dir, ["--version", "v2", "--description", "Next"], db=db_path
+    )
+
+    replay = _invoke_activate(runner.invoke, study_fixture_dir, v1_args, db=db_path)
+
+    assert replay.exit_code == 0, replay.stderr
+    assert "No change was made" in replay.stdout
+    assert "Active configuration remains 'v2'" in replay.stdout
+
+
+def test_cli_activate_config_failure_leaves_fresh_db_unbound(
+    study_fixture_dir: Path, tmp_path: Path
+) -> None:
+    """Identity bind, history insert and active pointer are one transaction:
+    a SQLite failure after the identity insert persists none of them."""
+    from ehr_simulator.cli_support import OperatorError, activate_for_cli
+    from ehr_simulator.config import load_questions, load_study_config
+    from ehr_simulator.db import apply_migrations
+
+    db_path = tmp_path / "cfg.db"
+    conn = connect(db_path)
+    apply_migrations(conn)
+    conn.execute(
+        "CREATE TRIGGER fail_history BEFORE INSERT ON configuration_history "
+        "BEGIN SELECT RAISE(ABORT, 'injected failure'); END"
+    )
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(OperatorError, match="injected failure"):
+        activate_for_cli(
+            study=load_study_config(study_fixture_dir / "study_synthetic.yaml"),
+            questions=load_questions(study_fixture_dir / "questions.yaml"),
+            db_path=db_path,
+            version="v1",
+            description="Initial",
+            reason=None,
+        )
+
+    conn = connect(db_path)
+    try:
+        counts = [
+            conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("study_identity", "configuration_history", "active_configuration")
+        ]
+    finally:
+        conn.close()
+    assert counts == [0, 0, 0]
+
+
+def test_cli_activate_config_collision_refused(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "cfg.db"
+    _invoke_activate(
+        runner.invoke,
+        study_fixture_dir,
+        ["--version", "v1", "--description", "Initial"],
+        db=db_path,
+    )
+    r = _invoke_activate(
+        runner.invoke,
+        study_fixture_dir,
+        ["--version", "v1", "--description", "CHANGED"],
+        db=db_path,
+    )
+    assert r.exit_code == 1
+    assert "refusing" in r.stderr
+
+    conn = connect(db_path)
+    # The original v1 row is untouched.
+    assert (
+        conn.execute(
+            "SELECT change_description FROM configuration_history WHERE config_version='v1'"
+        ).fetchone()[0]
+        == "Initial"
+    )
+    conn.close()
+
+
+@pytest.mark.parametrize(
+    ("bad_version", "fragment"),
+    [
+        ("bad label!", "config_version must match"),
+        ("-leading", "config_version must match"),
+        ("a" * 65, "config_version must match"),
+    ],
+    ids=["punctuation", "leading-dash", "too-long"],
+)
+def test_cli_activate_config_invalid_version_refused(
+    runner: CliRunner,
+    study_fixture_dir: Path,
+    tmp_path: Path,
+    bad_version: str,
+    fragment: str,
+) -> None:
+    db_path = tmp_path / "cfg.db"
+    r = _invoke_activate(
+        runner.invoke,
+        study_fixture_dir,
+        ["--version", bad_version, "--description", "ok"],
+        db=db_path,
+    )
+    assert r.exit_code == 1
+    assert fragment in r.stderr
+
+
+def test_cli_activate_config_blank_reason_refused(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path
+) -> None:
+    db_path = tmp_path / "cfg.db"
+    r = _invoke_activate(
+        runner.invoke,
+        study_fixture_dir,
+        ["--version", "v1", "--description", "ok", "--reason", "   "],
+        db=db_path,
+    )
+    assert r.exit_code == 1
+    assert "reason" in r.stderr
+    conn = connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM configuration_history").fetchone()[0] == 0
+    conn.close()
+
+
+def test_cli_activate_config_dataset_change_refused(
+    runner: CliRunner, study_fixture_dir: Path, tmp_path: Path
+) -> None:
+    import yaml
+
+    from ehr_simulator.config import load_study_config
+
+    synthetic = load_study_config(study_fixture_dir / "study_synthetic.yaml")
+    other_path = tmp_path / "study_other_dataset.yaml"
+    payload = synthetic.model_dump(mode="json")
+    payload["dataset"] = "geneva"
+    other_path.write_text(yaml.safe_dump(payload))
+
+    db_path = tmp_path / "cfg.db"
+    args_v1 = [
+        "activate-config",
+        str(study_fixture_dir / "study_synthetic.yaml"),
+        str(study_fixture_dir / "questions.yaml"),
+        "--version",
+        "v1",
+        "--description",
+        "Initial",
+        "--db-path",
+        str(db_path),
+    ]
+    assert runner.invoke(cli.app_typer, args_v1).exit_code == 0
+
+    r = runner.invoke(
+        cli.app_typer,
+        [
+            "activate-config",
+            str(other_path),
+            str(study_fixture_dir / "questions.yaml"),
+            "--version",
+            "v2",
+            "--description",
+            "switch dataset",
+            "--db-path",
+            str(db_path),
+        ],
+    )
+    assert r.exit_code == 1
+    assert "dataset" in r.stderr
+    conn = connect(db_path)
+    assert conn.execute("SELECT COUNT(*) FROM configuration_history").fetchone()[0] == 1
+    conn.close()

@@ -13,9 +13,10 @@ from pathlib import Path
 import pytest
 from structlog.testing import capture_logs
 
-from ehr_simulator.config import load_questions
+from ehr_simulator.config import load_questions, load_study_config
 from ehr_simulator.config.questions import Question, Questions
 from ehr_simulator.db import answers, clinicians
+from ehr_simulator.db.exceptions import ConfigurationProvenanceError
 from ehr_simulator.web.answer_capture import (
     FREE_TEXT_MAX_CHARS,
     AnswerValidationError,
@@ -29,10 +30,25 @@ from ehr_simulator.web.study_session import Frontier, bootstrap_session
 
 _T = 60.0
 
+_FIXTURES = Path(__file__).parent / "fixtures" / "study"
+
+
+def _load_study():
+    return load_study_config(_FIXTURES / "study_synthetic.yaml")
+
+
+def _load_study_questions():
+    return load_questions(_FIXTURES / "questions.yaml")
+
 
 class _AppState:
     write_counter = 0
     config_hash = "cfg"
+    # S11b: bootstrap resolves the case configuration through app.state's
+    # models when no activation history exists (legacy S11a path), so the
+    # stub needs real ones.
+    study = _load_study()
+    questions = _load_study_questions()
 
 
 _QUESTIONS_YAML = Path(__file__).parent / "fixtures" / "study" / "questions.yaml"
@@ -246,9 +262,10 @@ def test_saved_answers_deserializes_per_type(db: sqlite3.Connection, questions: 
     assert got == {"contributing_factors": ["Imaging", "Labs"], "good_outcome_3mo": "65"}
 
 
-def test_saved_answers_warns_on_config_hash_drift(
+def test_saved_answers_refuses_config_hash_drift(
     db: sqlite3.Connection, questions: Questions
 ) -> None:
+    """S11b: a row under a different version/hash is an integrity error, not a warning."""
     cid = clinicians.lookup_or_create(db, "Dr. Smith")
     answers.upsert(
         db,
@@ -262,16 +279,12 @@ def test_saved_answers_warns_on_config_hash_drift(
     )
     common = {"clinician_id": cid, "patient_id": "p1", "t_minutes": _T, "questions": questions}
 
-    with capture_logs() as cap:
-        got = saved_answers(db, config_hash="new", **common)
-    drift = [e for e in cap if e.get("event_kind") == "answer.config_hash.drift"]
-    assert got == {"confidence": "3"}
-    assert len(drift) == 1
-    assert drift[0]["question_ids"] == ["confidence"]
+    with pytest.raises(ConfigurationProvenanceError):
+        saved_answers(db, config_hash="new", **common)
 
-    with capture_logs() as cap_same:
-        saved_answers(db, config_hash="old", **common)
-    assert not [e for e in cap_same if e.get("event_kind") == "answer.config_hash.drift"]
+    # Provenance that matches exactly is fine.
+    got = saved_answers(db, config_hash="old", **common)
+    assert got == {"confidence": "3"}
 
 
 # ---------------------------------------------------------------------------

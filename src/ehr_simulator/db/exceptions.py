@@ -22,3 +22,37 @@ class StudyIdentityError(ValueError):
     strict (serve) path, or when the ``study_id`` itself is malformed.
     Subclasses :class:`ValueError` so generic handlers catch it.
     """
+
+
+class ConfigurationError(Exception):
+    """S11b: base for configuration version-history/provenance failures."""
+
+
+class ConfigurationActivationError(ConfigurationError):
+    """An explicit activation was refused.
+
+    Raised for malformed ``config_version`` / activation metadata,
+    colliding or reused version labels, a dataset change within one
+    study, and ambiguous S11a provenance that a first activation cannot
+    backfill. Nothing is written when this is raised.
+    """
+
+
+class ConfigurationProvenanceError(ConfigurationError):
+    """Case-configuration provenance disagrees with the pinned case.
+
+    Raised when a stored row (answer, session, progress, assignment) carries
+    a ``config_version``/``config_hash`` that does not match the case's
+    registered history, a row missing provenance is read after history
+    exists, or a write would omit provenance the schema now requires. An
+    operator integrity condition — never guessed, never repaired in place.
+    """
+
+
+class StaleConfigurationError(ConfigurationError):
+    """The running server's active configuration no longer matches the DB.
+
+    An external activation landed after this process started; creating a new
+    case is refused until the server is restarted (existing pinned cases may
+    keep using their historical snapshots).
+    """

@@ -22,6 +22,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from ehr_simulator.db.answers import _require_version_provenance
+from ehr_simulator.db.exceptions import ConfigurationProvenanceError
+
 
 @dataclass(frozen=True)
 class Progress:
@@ -30,9 +33,12 @@ class Progress:
     unlocked_t_index: int
     completed_at: datetime | None
     config_hash: str
+    config_version: str | None = None
 
 
-_SELECT_COLUMNS = "clinician_id, patient_id, unlocked_t_index, completed_at, config_hash"
+_SELECT_COLUMNS = (
+    "clinician_id, patient_id, unlocked_t_index, completed_at, config_hash, config_version"
+)
 
 
 def _row_to_progress(row: tuple) -> Progress:
@@ -42,12 +48,41 @@ def _row_to_progress(row: tuple) -> Progress:
         unlocked_t_index=int(row[2]),
         completed_at=row[3],
         config_hash=row[4],
+        config_version=row[5],
     )
 
 
 def _bump(app_state: Any) -> None:
     if app_state is not None:
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
+
+
+def _require_row_provenance(
+    conn: sqlite3.Connection,
+    *,
+    clinician_id: str,
+    patient_id: str,
+    config_hash: str,
+    config_version: str | None,
+) -> None:
+    """Refuse to move a walk pinned to another configuration (S11b).
+
+    E.g. a walk started under v1/h1 cannot be unlocked or completed by a
+    v2/h2 caller. No row yet → nothing to check.
+
+    Raises:
+        ConfigurationProvenanceError: stored (version, hash) differ.
+    """
+    row = fetch(conn, clinician_id=clinician_id, patient_id=patient_id)
+    if row is None:
+        return
+
+    if row.config_hash != config_hash or row.config_version != config_version:
+        raise ConfigurationProvenanceError(
+            "refusing to modify progress recorded under a different configuration "
+            f"provenance (clinician={clinician_id}, patient={patient_id}, "
+            f"stored version={row.config_version!r}, write version={config_version!r})"
+        )
 
 
 def fetch_all(conn: sqlite3.Connection) -> dict[tuple[str, str], Progress]:
@@ -82,6 +117,7 @@ def unlock(
     from_t_index: int,
     to_t_index: int,
     config_hash: str,
+    config_version: str | None = None,
     app_state: Any = None,
     commit: bool = True,
 ) -> bool:
@@ -97,6 +133,14 @@ def unlock(
     this to commit the unlock and the ``timepoint.exit`` event atomically
     (a failed event write rolls the frontier move back with it).
     """
+    _require_version_provenance(conn, config_version)
+    _require_row_provenance(
+        conn,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        config_hash=config_hash,
+        config_version=config_version,
+    )
     cursor = conn.execute(
         "UPDATE progress SET unlocked_t_index = ?, updated_at = CURRENT_TIMESTAMP "
         "WHERE clinician_id = ? AND patient_id = ? AND unlocked_t_index = ?",
@@ -107,8 +151,9 @@ def unlock(
     if not moved and from_t_index == 0:
         cursor = conn.execute(
             "INSERT OR IGNORE INTO progress "
-            "(clinician_id, patient_id, unlocked_t_index, config_hash) VALUES (?, ?, ?, ?)",
-            (clinician_id, patient_id, to_t_index, config_hash),
+            "(clinician_id, patient_id, unlocked_t_index, config_hash, config_version) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (clinician_id, patient_id, to_t_index, config_hash, config_version),
         )
         moved = cursor.rowcount == 1
 
@@ -126,6 +171,7 @@ def mark_complete(
     patient_id: str,
     unlocked_t_index: int,
     config_hash: str,
+    config_version: str | None = None,
     app_state: Any = None,
     commit: bool = True,
 ) -> None:
@@ -135,14 +181,22 @@ def mark_complete(
     ``advance.ok`` / ``timepoint.exit`` / ``session.end`` ride the same
     transaction (see ``web/gating.py``).
     """
+    _require_version_provenance(conn, config_version)
+    _require_row_provenance(
+        conn,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        config_hash=config_hash,
+        config_version=config_version,
+    )
     conn.execute(
         "INSERT INTO progress "
-        "(clinician_id, patient_id, unlocked_t_index, completed_at, config_hash) "
-        "VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?) "
+        "(clinician_id, patient_id, unlocked_t_index, completed_at, config_hash, config_version) "
+        "VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?) "
         "ON CONFLICT(clinician_id, patient_id) DO UPDATE SET "
         "completed_at = COALESCE(progress.completed_at, CURRENT_TIMESTAMP), "
         "updated_at = CURRENT_TIMESTAMP",
-        (clinician_id, patient_id, unlocked_t_index, config_hash),
+        (clinician_id, patient_id, unlocked_t_index, config_hash, config_version),
     )
     if commit:
         conn.commit()

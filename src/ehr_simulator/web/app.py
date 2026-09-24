@@ -41,9 +41,10 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
+from ehr_simulator.db import arm_assignments
 from ehr_simulator.db.backup import create_backup
-from ehr_simulator.db.connection import connect, resolve_db_path
-from ehr_simulator.db.exceptions import StudyIdentityError
+from ehr_simulator.db.connection import AccessMode, connect, resolve_db_path
+from ehr_simulator.db.exceptions import ConfigurationProvenanceError, StudyIdentityError
 from ehr_simulator.db.ingestion_issues import record_batch as record_ingestion_issues
 from ehr_simulator.db.migrations import apply_migrations
 from ehr_simulator.db.study_identity import bind as bind_study_identity
@@ -136,6 +137,25 @@ def create_app(
             migrations=versions,
         )
 
+        # S11b: study mode must boot against the active configuration. Bare
+        # non-study mode (app.state.study is None) is unchanged and skips this.
+        if getattr(app.state, "study", None) is not None:
+            try:
+                _verify_active_configuration(app)
+            except Exception as exc:  # noqa: BLE001
+                log.error(
+                    "failed to validate active configuration",
+                    event_kind="app.boot.failed",
+                    error=repr(exc),
+                )
+                print(
+                    f"Refusing to boot: {exc}",
+                    file=sys.stderr,
+                )
+                with contextlib.suppress(Exception):
+                    app.state.db.close()
+                raise SystemExit(1) from exc
+
         app.state.known_clinicians = {
             row[0] for row in app.state.db.execute("SELECT clinician_id FROM clinicians")
         }
@@ -190,14 +210,89 @@ def create_app(
     app.state.study_id = None
     app.state.questions = None
     app.state.config_hash = None
+    app.state.config_version = None
+    app.state.active_configuration = None
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
-    from ehr_simulator.web.routes import router
+    from ehr_simulator.web.routes import provenance_error_response, router
 
     app.include_router(router)
+    app.add_exception_handler(ConfigurationProvenanceError, provenance_error_response)
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(CSPMiddleware)
     return app
+
+
+def _verify_active_configuration(app: FastAPI) -> None:
+    """S11b boot gate: study mode boots against the active configuration.
+
+    Refuses (raises) when:
+
+    * no active configuration exists;
+    * the supplied YAML's computed hash differs from the active hash;
+    * the active history row belongs to another ``study_id``;
+    * a persisted snapshot does not revalidate (integrity error);
+    * the snapshot models' recomputed hash disagrees with the stored hash.
+
+    On success sets ``app.state.config_version``, ``app.state.config_hash``
+    (unchanged, but re-asserted equal) and ``app.state.active_configuration``.
+    """
+    from ehr_simulator.config import compute_config_hash_from_models
+    from ehr_simulator.config.snapshot import (
+        parse_questions_snapshot,
+        parse_study_snapshot,
+    )
+    from ehr_simulator.db import config_history
+
+    conn = app.state.db
+    active = config_history.fetch_active(conn)
+    if active is None:
+        raise ValueError(
+            "no active configuration: run "
+            "`uv run ehr-simulator activate-config STUDY_CONFIG QUESTIONS "
+            "--version ... --description ...` before starting the application"
+        )
+    supplied = app.state.config_hash
+    if active.config_hash != supplied:
+        raise ValueError(
+            f"supplied config hash ({supplied}) differs from the active "
+            f"configuration hash ({active.config_hash}); start the app on "
+            "the configuration files matching "
+            f"{active.config_version!r} or activate a new version"
+        )
+    if active.study_id != app.state.study_id:
+        raise ValueError(
+            f"active configuration belongs to study {active.study_id!r}, not {app.state.study_id!r}"
+        )
+    # Invalid stored snapshots are database integrity errors — never a fallback.
+    study_snap = parse_study_snapshot(active.study_json)
+    questions_snap = parse_questions_snapshot(active.questions_json)
+    recomputed = compute_config_hash_from_models(study_snap, questions_snap)
+    if recomputed != active.config_hash:
+        raise ValueError(
+            "stored configuration snapshots do not hash to the recorded "
+            "config_hash (database integrity error)"
+        )
+    if recomputed != supplied:
+        raise ValueError("supplied YAML no longer hashes to the active configuration")
+    app.state.config_version = active.config_version
+    app.state.config_hash = active.config_hash
+    app.state.active_configuration = active
+
+
+def _assigned_patient_ids(db_path: Path) -> tuple[str, ...]:
+    """Patients of existing cases, read before the lifespan opens the DB.
+
+    Read-only and never creates the file: a fresh study has no cases yet.
+    """
+    if not db_path.exists():
+        return ()
+
+    conn = connect(db_path, access=AccessMode.READ_ONLY)
+    try:
+        return arm_assignments.assigned_patient_ids(conn)
+    finally:
+        conn.close()
 
 
 def app_from_study_config(
@@ -231,8 +326,10 @@ def app_from_study_config(
 
     study = load_study_config(study_path)
     questions = load_questions(questions_path)
-    loader = build_dataset_loader(study)
     resolved_db_path = db_path if db_path is not None else resolve_db_path(study)
+    loader = build_dataset_loader(
+        study, extra_patient_ids=lambda: _assigned_patient_ids(resolved_db_path)
+    )
     app = create_app(
         log_dir=log_dir,
         dataset_loader=loader,

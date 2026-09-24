@@ -38,7 +38,8 @@ from typing import Literal
 from fastapi import APIRouter, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from ehr_simulator.db import clinicians, cookies, events
+from ehr_simulator.db import arm_assignments, clinicians, cookies, events
+from ehr_simulator.db.exceptions import ConfigurationProvenanceError, StaleConfigurationError
 from ehr_simulator.logging import get_logger, update_request_context
 from ehr_simulator.web.answer_capture import (
     FREE_TEXT_AUTOSAVE_DELAY_MS,
@@ -64,10 +65,12 @@ from ehr_simulator.web.panels import (
     slice_to_timepoint,
 )
 from ehr_simulator.web.study_session import (
+    CaseConfiguration,
     Frontier,
     SessionContext,
     bootstrap_session,
     read_frontier,
+    resolve_case_configuration,
 )
 from ehr_simulator.web.timing_events import record_enter
 
@@ -93,6 +96,46 @@ def _is_history_restore(request: Request) -> bool:
 
 def _timepoint_url(patient_id: str, t_index: int, chrome: str) -> str:
     return f"/patient/{patient_id}/timepoint/{t_index}?chrome={chrome}"
+
+
+def _try_resolve_case(
+    request: Request, clinician_id: str, patient_id: str
+) -> tuple[CaseConfiguration | None, str | None, int]:
+    """Resolve the pinned case, or the active snapshot for a new case (S11b).
+
+    Non-study mode resolves to ``None``. Returns ``(case, message, status)``:
+    a message means the route must refuse — ``StaleConfigurationError`` is a
+    409 (restart required), a provenance mismatch is an integrity error (500).
+    """
+    state = request.app.state
+    if state.study is None:
+        return None, None, 200
+    try:
+        case = resolve_case_configuration(
+            state.db, state, clinician_id=clinician_id, patient_id=patient_id
+        )
+    except StaleConfigurationError as exc:
+        return None, str(exc), status.HTTP_409_CONFLICT
+    except ConfigurationProvenanceError as exc:
+        return None, str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR
+    return case, None, 200
+
+
+def _transitional_patient_ids(request: Request, clinician_id: str) -> list[str]:
+    """S11b transitional index: active-config patients in configured order, then
+
+    this clinician's already-assigned patients that the active version no
+    longer lists (existing cases stay reachable).
+    """
+    state = request.app.state
+    active = list(getattr(state, "study_patient_ids", None) or [])
+    seen = set(active)
+    if clinician_id:
+        for assignment in arm_assignments.fetch_all(state.db):
+            if assignment.clinician_id == clinician_id and assignment.patient_id not in seen:
+                seen.add(assignment.patient_id)
+                active.append(assignment.patient_id)
+    return active
 
 
 def _htmx_aware_redirect(request: Request, url: str) -> Response:
@@ -154,16 +197,27 @@ class ResolvedTimepoint:
 
 
 def _resolve_timepoint(
-    request: Request, patient_id: str, t_index: int
+    request: Request,
+    patient_id: str,
+    t_index: int,
+    *,
+    patient_ids: list[str] | None = None,
+    timepoints: tuple[float, ...] | None = None,
 ) -> tuple[ResolvedTimepoint | None, str | None]:
     """Study-membership → dataset-membership → ``t_index`` range.
+
+    ``patient_ids``/``timepoints`` override the app-state study models with
+    the case's historical snapshot (S11b: a pinned case uses its own patient
+    list and timepoints).
 
     Returns ``(resolved, None)`` or ``(None, message)``. Callers render the
     message in their own shape: GET wraps it in the S2 ``error-flash`` div,
     POST routes it through ``_answer_status.html``.
     """
     dataset = request.app.state.dataset
-    study_patient_ids = getattr(request.app.state, "study_patient_ids", None)
+    study_patient_ids = patient_ids
+    if study_patient_ids is None:
+        study_patient_ids = getattr(request.app.state, "study_patient_ids", None)
     if study_patient_ids is not None and patient_id not in study_patient_ids:
         return None, f"Patient '{patient_id}' is not part of this study"
 
@@ -171,6 +225,12 @@ def _resolve_timepoint(
     if patient_id not in known_pids:
         return None, f"Patient '{patient_id}' not found"
 
+    if timepoints is not None:
+        if t_index < 0 or t_index >= len(timepoints):
+            return None, (
+                f"Timepoint t_index={t_index} out of range (valid: 0\u2026{len(timepoints) - 1})"
+            )
+        return ResolvedTimepoint(timepoints=timepoints, t_minutes=timepoints[t_index]), None
     study_tps = getattr(request.app.state, "study_timepoints", None)
     timepoints = (
         tuple(float(t) for t in study_tps)
@@ -185,6 +245,23 @@ def _resolve_timepoint(
 
 def _error_flash(message: str) -> str:
     return f'<div class="error-flash" role="alert">{message}</div>'
+
+
+async def provenance_error_response(
+    request: Request, exc: ConfigurationProvenanceError
+) -> HTMLResponse:
+    """App-wide handler: a case row pinned to another configuration is an
+    integrity error — refuse with 500, never a crash or a silent fallback.
+    """
+    get_logger().error(
+        "case provenance mismatch; request refused",
+        event_kind="case.provenance.refused",
+        path=request.url.path,
+        error=str(exc),
+    )
+    return HTMLResponse(
+        content=_error_flash(str(exc)), status_code=status.HTTP_500_INTERNAL_SERVER_ERROR
+    )
 
 
 def _answer_status(
@@ -229,11 +306,21 @@ def _render_advance_cta(
 
 
 def _study_bootstrap(
-    request: Request, *, clinician_id: str, patient_id: str, frontier: Frontier
+    request: Request,
+    *,
+    clinician_id: str,
+    patient_id: str,
+    frontier: Frontier,
+    case: CaseConfiguration | None = None,
 ) -> SessionContext:
     state = request.app.state
     ctx = bootstrap_session(
-        state.db, state, clinician_id=clinician_id, patient_id=patient_id, frontier=frontier
+        state.db,
+        state,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        frontier=frontier,
+        case=case,
     )
     update_request_context(arm=ctx.arm)
     return ctx
@@ -249,22 +336,25 @@ def _render_questions_pane(
     t_minutes: float,
     chrome: str,
     timepoint_count: int,
+    case: CaseConfiguration | None = None,
 ) -> str:
     """Render the pre-filled pane in ``open`` or ``locked`` mode (study mode only)."""
     state = request.app.state
+    questions = case.questions if case is not None else state.questions
     prefill = saved_answers(
         state.db,
         clinician_id=clinician_id,
         patient_id=patient_id,
         t_minutes=t_minutes,
-        questions=state.questions,
+        questions=questions,
         config_hash=ctx.config_hash,
+        config_version=ctx.config_version,
     )
     mode = pane_mode(ctx.frontier, t_index)
     is_last = t_index == timepoint_count - 1
     cta_html = ""
     if mode == "open":
-        comp = completeness(state.questions, prefill)
+        comp = completeness(questions, prefill)
         cta_html = _render_advance_cta(
             request,
             patient_id=patient_id,
@@ -280,7 +370,7 @@ def _render_questions_pane(
         t_index=t_index,
         t_minutes=t_minutes,
         chrome=chrome,
-        questions=state.questions.questions,
+        questions=questions.questions,
         prefill=prefill,
         mode=mode,
         completed=ctx.frontier.completed,
@@ -303,6 +393,7 @@ def _render_patient_view(
     chrome: str,
     resolved: ResolvedTimepoint,
     ctx: SessionContext | None,
+    case: CaseConfiguration | None = None,
 ) -> str:
     """Slice → panels → summary → chrome → pane → ``_patient_view.html``.
 
@@ -328,7 +419,7 @@ def _render_patient_view(
         overview = progress_overview(
             state.db,
             clinician_id=clinician_id,
-            patient_ids=state.study_patient_ids,
+            patient_ids=_transitional_patient_ids(request, clinician_id),
             timepoint_count=timepoint_count,
         )
         resume_t_index = {pid: p.unlocked_t_index for pid, p in overview.items()}
@@ -341,6 +432,7 @@ def _render_patient_view(
             t_minutes=t_minutes,
             chrome=chrome,
             timepoint_count=timepoint_count,
+            case=case,
         )
 
     summary_html = _render_summary(
@@ -469,7 +561,7 @@ async def index(request: Request) -> HTMLResponse:
     study_patient_ids = getattr(state, "study_patient_ids", None)
     patient_progress: dict[str, PatientProgress] | None = None
     if study_patient_ids is not None:
-        patient_ids = list(study_patient_ids)
+        patient_ids = _transitional_patient_ids(request, clinician_id or "")
         patient_progress = progress_overview(
             state.db,
             clinician_id=clinician_id or "",
@@ -505,7 +597,19 @@ async def patient_timepoint(
     update_request_context(clinician_id=clinician_id)
     state = request.app.state
 
-    resolved, message = _resolve_timepoint(request, patient_id, t_index)
+    case: CaseConfiguration | None = None
+    if state.study is not None:
+        case, case_error, case_status = _try_resolve_case(request, clinician_id or "", patient_id)
+        if case_error is not None:
+            return HTMLResponse(content=_error_flash(case_error), status_code=case_status)
+
+    resolved, message = _resolve_timepoint(
+        request,
+        patient_id,
+        t_index,
+        patient_ids=list(case.patient_ids) if case is not None else None,
+        timepoints=case.timepoints if case is not None else None,
+    )
     if resolved is None:
         return HTMLResponse(content=_error_flash(message or ""), status_code=404)
 
@@ -522,7 +626,11 @@ async def patient_timepoint(
         # The gate decides on a pure read: nothing below may run for a
         # request we are about to bounce (no slice, no arm lock, no session).
         frontier = read_frontier(
-            state.db, state, clinician_id=clinician_id or "", patient_id=patient_id
+            state.db,
+            state,
+            clinician_id=clinician_id or "",
+            patient_id=patient_id,
+            timepoints=case.timepoints if case is not None else None,
         )
         if not is_viewable(frontier, t_index):
             get_logger().warning(
@@ -535,7 +643,11 @@ async def patient_timepoint(
                 request, _timepoint_url(patient_id, frontier.unlocked_t_index, chrome)
             )
         ctx = _study_bootstrap(
-            request, clinician_id=clinician_id or "", patient_id=patient_id, frontier=frontier
+            request,
+            clinician_id=clinician_id or "",
+            patient_id=patient_id,
+            frontier=frontier,
+            case=case,
         )
 
     inner = _render_patient_view(
@@ -546,6 +658,7 @@ async def patient_timepoint(
         chrome=chrome,
         resolved=resolved,
         ctx=ctx,
+        case=case,
     )
     # Build/render the complete response before recording timepoint.enter.
     if _is_history_restore(request) or not _is_htmx(request):
@@ -600,7 +713,20 @@ async def patient_answer(
             status_code=status.HTTP_409_CONFLICT,
         )
 
-    resolved, message = _resolve_timepoint(request, patient_id, t_index)
+    case = None
+    if state.study is not None:
+        case, case_error, case_status = _try_resolve_case(request, clinician_id or "", patient_id)
+        if case_error is not None:
+            return _answer_status(request, state="error", error=case_error, status_code=case_status)
+
+    questions = case.questions if case is not None else state.questions
+    resolved, message = _resolve_timepoint(
+        request,
+        patient_id,
+        t_index,
+        patient_ids=list(case.patient_ids) if case is not None else None,
+        timepoints=case.timepoints if case is not None else None,
+    )
     if resolved is None:
         return _answer_status(
             request, state="error", error=message, status_code=status.HTTP_404_NOT_FOUND
@@ -618,7 +744,7 @@ async def patient_answer(
             error=_MISSING_QUESTION_ID_MSG,
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
-    question = next((q for q in state.questions.questions if q.question_id == question_id), None)
+    question = next((q for q in questions.questions if q.question_id == question_id), None)
     if question is None:
         return _answer_status(
             request,
@@ -631,10 +757,18 @@ async def patient_answer(
     t_minutes = float(resolved.t_minutes)
     update_request_context(patient_id=patient_id, timepoint=t_minutes, timepoint_index=t_index)
     frontier = read_frontier(
-        state.db, state, clinician_id=clinician_id or "", patient_id=patient_id
+        state.db,
+        state,
+        clinician_id=clinician_id or "",
+        patient_id=patient_id,
+        timepoints=case.timepoints if case is not None else None,
     )
     ctx = _study_bootstrap(
-        request, clinician_id=clinician_id or "", patient_id=patient_id, frontier=frontier
+        request,
+        clinician_id=clinician_id or "",
+        patient_id=patient_id,
+        frontier=frontier,
+        case=case,
     )
 
     # Only the open timepoint takes answers; disabled fieldsets are a courtesy.
@@ -669,6 +803,15 @@ async def patient_answer(
             error=str(exc),
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
         )
+    except ConfigurationProvenanceError as exc:
+        # The stored answer is pinned to another configuration: integrity error.
+        return _answer_status(
+            request,
+            state="error",
+            question_id=question_id,
+            error=str(exc),
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        )
 
     # The CTA rides out-of-band so its remaining-count is always the server's.
     saved = saved_answers(
@@ -676,15 +819,16 @@ async def patient_answer(
         clinician_id=clinician_id or "",
         patient_id=patient_id,
         t_minutes=t_minutes,
-        questions=state.questions,
+        questions=questions,
         config_hash=ctx.config_hash,
+        config_version=ctx.config_version,
     )
     cta_html = _render_advance_cta(
         request,
         patient_id=patient_id,
         t_index=t_index,
         chrome=chrome,
-        remaining=completeness(state.questions, saved).remaining,
+        remaining=completeness(questions, saved).remaining,
         is_last=t_index == len(resolved.timepoints) - 1,
         oob=True,
     )
@@ -715,7 +859,18 @@ async def patient_advance(
             content=_error_flash(_NO_QUESTIONS_MSG), status_code=status.HTTP_409_CONFLICT
         )
 
-    resolved, message = _resolve_timepoint(request, patient_id, t_index)
+    case, case_error, case_status = _try_resolve_case(request, clinician_id or "", patient_id)
+    if case_error is not None:
+        return HTMLResponse(content=_error_flash(case_error), status_code=case_status)
+
+    questions = case.questions if case is not None else state.questions
+    resolved, message = _resolve_timepoint(
+        request,
+        patient_id,
+        t_index,
+        patient_ids=list(case.patient_ids) if case is not None else None,
+        timepoints=case.timepoints if case is not None else None,
+    )
     if resolved is None:
         return HTMLResponse(content=_error_flash(message or ""), status_code=404)
     update_request_context(
@@ -729,10 +884,18 @@ async def patient_advance(
     # read → compare-and-set below runs without yielding to the loop.
     form = await request.form()
     frontier = read_frontier(
-        state.db, state, clinician_id=clinician_id or "", patient_id=patient_id
+        state.db,
+        state,
+        clinician_id=clinician_id or "",
+        patient_id=patient_id,
+        timepoints=case.timepoints if case is not None else None,
     )
     ctx = _study_bootstrap(
-        request, clinician_id=clinician_id or "", patient_id=patient_id, frontier=frontier
+        request,
+        clinician_id=clinician_id or "",
+        patient_id=patient_id,
+        frontier=frontier,
+        case=case,
     )
 
     result = advance(
@@ -743,7 +906,7 @@ async def patient_advance(
         patient_id=patient_id,
         t_index=t_index,
         timepoints=resolved.timepoints,
-        questions=state.questions,
+        questions=questions,
         client_ts=_form_str(form.get("client_ts")),
         client_seq=_form_str(form.get("client_seq")),
     )
@@ -756,6 +919,7 @@ async def patient_advance(
         t_index=t_index,
         chrome=chrome,
         timepoint_count=len(resolved.timepoints),
+        case=case,
     )
 
 
@@ -769,6 +933,7 @@ def _advance_response(
     t_index: int,
     chrome: str,
     timepoint_count: int,
+    case: CaseConfiguration | None = None,
 ) -> Response:
     """Map an :class:`AdvanceResult` onto the HTMX / plain-browser contract (spec §5.1)."""
     if result.outcome == "finished":
@@ -802,7 +967,13 @@ def _advance_response(
         return RedirectResponse(target_url, status_code=status.HTTP_303_SEE_OTHER)
 
     target_ctx = replace(ctx, frontier=Frontier(target_t_index, ctx.frontier.completed))
-    target_resolved, message = _resolve_timepoint(request, patient_id, target_t_index)
+    target_resolved, message = _resolve_timepoint(
+        request,
+        patient_id,
+        target_t_index,
+        patient_ids=list(case.patient_ids) if case is not None else None,
+        timepoints=case.timepoints if case is not None else None,
+    )
     if target_resolved is None:  # unreachable: read_frontier clamps to the study range
         return HTMLResponse(
             content=_error_flash(message or ""),
@@ -816,6 +987,7 @@ def _advance_response(
         chrome=chrome,
         resolved=target_resolved,
         ctx=target_ctx,
+        case=case,
     )
     status_code = (
         status.HTTP_200_OK if result.outcome == "advanced" else status.HTTP_412_PRECONDITION_FAILED

@@ -167,6 +167,7 @@ def advance(
         t_minutes=t_minutes,
         questions=questions,
         config_hash=ctx.config_hash,
+        config_version=ctx.config_version,
     )
     comp = completeness(questions, saved)
     n_required = required_count(questions)
@@ -226,6 +227,7 @@ def advance(
                 patient_id=patient_id,
                 unlocked_t_index=t_index,
                 config_hash=ctx.config_hash,
+                config_version=ctx.config_version,
                 app_state=app_state,
                 commit=False,
             )
@@ -274,6 +276,7 @@ def advance(
             from_t_index=t_index,
             to_t_index=t_index + 1,
             config_hash=ctx.config_hash,
+            config_version=ctx.config_version,
             app_state=app_state,
             commit=False,
         )

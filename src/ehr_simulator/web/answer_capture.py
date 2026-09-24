@@ -41,6 +41,7 @@ from ehr_simulator.answer_codec import (
 )
 from ehr_simulator.config.questions import Question, Questions
 from ehr_simulator.db import answers, events
+from ehr_simulator.db.exceptions import ConfigurationProvenanceError
 from ehr_simulator.logging import get_logger
 from ehr_simulator.web.study_session import SessionContext
 
@@ -112,31 +113,32 @@ def saved_answers(
     t_minutes: float,
     questions: Questions,
     config_hash: str,
+    config_version: str | None = None,
 ) -> dict[str, str | list[str]]:
     """Pre-fill mapping for one cell, keyed by ``question_id``.
 
-    Rows for question ids not in the running config are dropped. Rows
-    recorded under a different ``config_hash`` are still returned (they are
-    that clinician's answers) but produce one ``answer.config_hash.drift``
-    WARNING per render — the detector for a mid-pilot config edit.
+    S11b provenance lock: every stored row must carry exactly the case's
+    ``(config_version, config_hash)``. A row recorded under a different
+    version or hash is an integrity error, not a warning — the case is
+    pinned and its answers must be too.
     """
     rows = answers.fetch_for_cell(
         conn, clinician_id=clinician_id, patient_id=patient_id, timepoint=t_minutes
     )
+    stale: list[str] = []
+    for qid, (_value, row_hash, row_version) in rows.items():
+        if row_version != config_version or row_hash != config_hash:
+            stale.append(qid)
+    if stale:
+        raise ConfigurationProvenanceError(
+            "stored answer provenance disagrees with the case configuration "
+            f"(clinician={clinician_id}, patient={patient_id}, "
+            f"timepoint={t_minutes}, question_ids={sorted(stale)})"
+        )
     by_id = {q.question_id: q for q in questions.questions}
     known = {qid: row for qid, row in rows.items() if qid in by_id}
 
-    stale = sorted(qid for qid, (_value, row_hash) in known.items() if row_hash != config_hash)
-    if stale:
-        get_logger().warning(
-            "pre-filled answers were recorded under a different config",
-            event_kind="answer.config_hash.drift",
-            question_ids=stale,
-            row_config_hashes=sorted({known[qid][1] for qid in stale}),
-            live_config_hash=config_hash,
-        )
-
-    return {qid: deserialize_answer(by_id[qid], value) for qid, (value, _h) in known.items()}
+    return {qid: deserialize_answer(by_id[qid], value) for qid, (value, _h, _v) in known.items()}
 
 
 def record_answer(
@@ -162,12 +164,24 @@ def record_answer(
     }
 
     if value is None:
-        deleted = answers.delete_one(conn, **cell, app_state=app_state)
+        deleted = answers.delete_one(
+            conn,
+            **cell,
+            config_hash=ctx.config_hash,
+            config_version=ctx.config_version,
+            app_state=app_state,
+        )
         outcome: AnswerOutcome = "cleared"
         detail: dict[str, Any] = {"deleted": deleted > 0}
     else:
         answers.upsert(
-            conn, **cell, value=value, arm=ctx.arm, config_hash=ctx.config_hash, app_state=app_state
+            conn,
+            **cell,
+            value=value,
+            arm=ctx.arm,
+            config_hash=ctx.config_hash,
+            config_version=ctx.config_version,
+            app_state=app_state,
         )
         outcome = "saved"
         detail = {"value_chars": len(value)}

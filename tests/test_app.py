@@ -20,6 +20,7 @@ import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from ehr_simulator.db import MIGRATIONS
@@ -45,15 +46,18 @@ def _seed_and_cookie(tmp_db_path: Path, client: TestClient) -> str:
     return clinician_id
 
 
-def _pre_seed(tmp_db_path: Path, study_path: Path) -> str:
+def _pre_seed(tmp_db_path: Path, study_path: Path, questions_path: Path) -> str:
     """Seed the test DB *before* the app boots so the lifespan picks the
     clinician up into ``known_clinicians`` and the protected-route cache
     lookup succeeds. S11a: the study's identity is bound BEFORE the
     clinician row is seeded — bind refuses to claim a non-empty unbound
-    DB, so seeding must follow binding.
+    DB, so seeding must follow binding. S11b: activation rides on top of
+    the bound identity (its foreign key requires it); boot now refuses
+    without an active configuration.
     """
     from ehr_simulator.config import load_study_config
     from ehr_simulator.db import apply_migrations, connect, study_identity
+    from tests.conftest import _activate_configuration
 
     study = load_study_config(study_path)
     name = "Dr. Test"
@@ -69,6 +73,9 @@ def _pre_seed(tmp_db_path: Path, study_path: Path) -> str:
     )
     conn.commit()
     conn.close()
+    _activate_configuration(
+        tmp_db_path, study_path, questions_path, version="v1", description="test activation"
+    )
     return clinician_id
 
 
@@ -78,7 +85,11 @@ def test_app_from_study_config_synthetic_renders_synth_001(
     tmp_db_path: Path,
     tmp_backup_dir: Path,
 ) -> None:
-    clinician_id = _pre_seed(tmp_db_path, study_fixture_dir / "study_synthetic.yaml")
+    clinician_id = _pre_seed(
+        tmp_db_path,
+        study_fixture_dir / "study_synthetic.yaml",
+        study_fixture_dir / "questions.yaml",
+    )
     app = app_from_study_config(
         study_fixture_dir / "study_synthetic.yaml",
         study_fixture_dir / "questions.yaml",
@@ -114,7 +125,7 @@ timepoints: [0, 180]
 """,
         encoding="utf-8",
     )
-    clinician_id = _pre_seed(tmp_db_path, study_path)
+    clinician_id = _pre_seed(tmp_db_path, study_path, study_fixture_dir / "questions.yaml")
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",
@@ -145,6 +156,7 @@ timepoints: [0, 180]
             from_t_index=0,
             to_t_index=1,
             config_hash=app.state.config_hash,
+            config_version=app.state.config_version,
         )
         response = client.get("/patient/synth_001/timepoint/1")
         assert response.status_code == 200
@@ -190,7 +202,7 @@ timepoints: [0, 60]
         encoding="utf-8",
     )
 
-    clinician_id = _pre_seed(tmp_db_path, study_path)
+    clinician_id = _pre_seed(tmp_db_path, study_path, study_fixture_dir / "questions.yaml")
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",
@@ -244,7 +256,7 @@ timepoints: [0, 60]
         encoding="utf-8",
     )
 
-    clinician_id = _pre_seed(tmp_db_path, study_path)
+    clinician_id = _pre_seed(tmp_db_path, study_path, study_fixture_dir / "questions.yaml")
     app = app_from_study_config(
         study_path,
         study_fixture_dir / "questions.yaml",
@@ -545,8 +557,14 @@ def _boot_expect_refused(app: object, log_dir: Path) -> list[dict]:
 def test_lifespan_binds_fresh_study_db_on_first_boot(
     study_fixture_dir: Path, tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
 ) -> None:
-    """S11a: a fresh, empty database is BOUND to the study on first boot and
-    the identity survives the shutdown."""
+    """S11b: a fresh, empty database is STILL BOUND to the study on first boot
+    (S11a), and the boot then refuses for the S11b configuration gate —
+    activation is never implicit. The bound identity survives the refused
+    boot so the first activation can claim it.
+    """
+    import json
+    import warnings
+
     from ehr_simulator.db import connect, study_identity
 
     study_path, questions_path = _study_paths(study_fixture_dir)
@@ -557,23 +575,54 @@ def test_lifespan_binds_fresh_study_db_on_first_boot(
         db_path=tmp_db_path,
         backup_dir=tmp_backup_dir,
     )
-    with TestClient(app) as client:
-        assert client.get("/login").status_code == 200
-        assert app.state.known_clinicians == set()
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        refused = False
+        try:
+            with TestClient(app):
+                pass
+        except BaseException:  # noqa: BLE001 — lifespan SystemExit(1) routed via the portal
+            refused = True
+    assert refused
+
+    # The config gate fired (not the identity gate) and after binding.
+    log_file = tmp_log_dir / "current.jsonl"
+    failed = []
+    if log_file.exists():
+        for line in log_file.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                r = json.loads(line)
+                if r.get("event_kind") == "app.boot.failed":
+                    failed.append(r)
+    assert any("failed to validate active configuration" in rec.get("event", "") for rec in failed)
 
     conn = connect(tmp_db_path)
-    assert study_identity.fetch(conn) == "fixture_synthetic"
+    assert study_identity.fetch(conn) == "fixture_synthetic"  # binding survived
     conn.close()
+
+    # With the first activation registered, the same YAML now boots cleanly.
+    from tests.conftest import _activate_configuration
+
+    _activate_configuration(
+        tmp_db_path, study_path, questions_path, version="v1", description="first activation"
+    )
+    with TestClient(app) as client:
+        assert client.get("/login").status_code == 200
 
 
 def test_lifespan_same_study_restarts_successfully(
     study_fixture_dir: Path, tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
 ) -> None:
     """S11a: booting the same study again against its own database must
-    succeed — the identity is stable across restarts."""
+    succeed — the identity is stable across restarts. S11b: the activation
+    (one registration) also survives — the configured hash has not moved.
+    """
     from ehr_simulator.db import connect, study_identity
 
     study_path, questions_path = _study_paths(study_fixture_dir)
+    # Operator order: bind → activate → boot (the DB is otherwise unclaimable).
+    _pre_seed(tmp_db_path, study_path, questions_path)
+
     first = app_from_study_config(
         study_path,
         questions_path,
@@ -597,6 +646,7 @@ def test_lifespan_same_study_restarts_successfully(
     )
     with TestClient(second) as client:
         assert client.get("/login").status_code == 200
+        assert second.state.config_version == "v1"
 
     conn = connect(tmp_db_path)
     assert study_identity.fetch(conn) == "fixture_synthetic"
@@ -665,3 +715,124 @@ def test_lifespan_nonempty_unbound_legacy_db_refused_before_app_reads_writes(
     assert conn.execute("SELECT COUNT(*) FROM ingestion_issues").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
     conn.close()
+
+
+def test_lifespan_refuses_hash_mismatch_against_active_configuration(
+    study_fixture_dir: Path, tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
+) -> None:
+    """S11b: booting with a YAML whose computed hash differs from the active
+    configuration's stored hash is an integrity refusal, not a fallback."""
+    import yaml
+
+    from ehr_simulator.config import load_questions
+
+    study_path, questions_path = _study_paths(study_fixture_dir)
+    _pre_seed(tmp_db_path, study_path, questions_path)
+
+    # A questions file identical except for one prompt -> different hash.
+    model = load_questions(questions_path)
+    first = model.questions[0]
+    first.prompt = first.prompt + " (revised)"
+    variant_path = tmp_db_path.parent / "questions_variant.yaml"
+    variant_path.write_text(yaml.safe_dump(model.model_dump(mode="json")))
+
+    app = app_from_study_config(
+        study_path,
+        variant_path,
+        log_dir=tmp_log_dir,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
+
+    import json
+    import warnings
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        refused = False
+        try:
+            with TestClient(app):
+                pass
+        except BaseException:  # noqa: BLE001 — lifespan SystemExit(1) routed via the portal
+            refused = True
+    assert refused
+
+    failed = []
+    log_file = tmp_log_dir / "current.jsonl"
+    if log_file.exists():
+        for line in log_file.read_text(encoding="utf-8").splitlines():
+            if line.strip():
+                r = json.loads(line)
+                if r.get("event_kind") == "app.boot.failed":
+                    failed.append(r)
+    assert any("failed to validate active configuration" in rec.get("event", "") for rec in failed)
+    assert any(
+        "differs from the active configuration hash" in rec.get("error", "") for rec in failed
+    )
+    assert getattr(app.state, "config_version", None) is None
+
+
+def _tamper_prompt(questions_json: str) -> str:
+    """Valid JSON that no longer hashes to the stored config_hash."""
+    import json
+
+    doc = json.loads(questions_json)
+    doc["questions"][0]["prompt"] += " (tampered)"
+    return json.dumps(doc)
+
+
+@pytest.mark.parametrize(
+    ("column", "corrupt"),
+    [
+        ("study_json", lambda _: "{not json"),
+        ("questions_json", lambda _: "{not json"),
+        ("questions_json", _tamper_prompt),
+    ],
+    ids=["study-unparseable", "questions-unparseable", "questions-rehash-mismatch"],
+)
+def test_lifespan_refuses_corrupted_active_snapshot(
+    study_fixture_dir: Path,
+    tmp_log_dir: Path,
+    tmp_db_path: Path,
+    tmp_backup_dir: Path,
+    column: str,
+    corrupt: object,
+) -> None:
+    """S11b boot test #11: a corrupted stored snapshot refuses boot."""
+    import json
+    import warnings
+
+    from ehr_simulator.db import connect
+
+    study_path, questions_path = _study_paths(study_fixture_dir)
+    _pre_seed(tmp_db_path, study_path, questions_path)
+    conn = connect(tmp_db_path)
+    stored = conn.execute(f"SELECT {column} FROM configuration_history").fetchone()[0]
+    conn.execute(f"UPDATE configuration_history SET {column} = ?", (corrupt(stored),))  # type: ignore[operator]
+    conn.commit()
+    conn.close()
+
+    app = app_from_study_config(
+        study_path,
+        questions_path,
+        log_dir=tmp_log_dir,
+        db_path=tmp_db_path,
+        backup_dir=tmp_backup_dir,
+    )
+    refused = False
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            with TestClient(app):
+                pass
+        except BaseException:  # noqa: BLE001 — lifespan SystemExit(1) routed via the portal
+            refused = True
+
+    assert refused
+    failed = [
+        json.loads(line)
+        for line in (tmp_log_dir / "current.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip() and json.loads(line).get("event_kind") == "app.boot.failed"
+    ]
+    assert any("failed to validate active configuration" in r.get("event", "") for r in failed)
+    assert getattr(app.state, "config_version", None) is None
