@@ -699,3 +699,13 @@ body.chrome-epic [role="tabpanel"][hidden] {
     width: auto;
     text-decoration: none;
 }
+
+/* S11e: lifecycle markers and the optional voluntary pause. */
+.progress-marker.is-paused,
+.progress-marker.is-incomplete {
+    border-style: dashed;
+}
+
+.case-pause {
+    margin: 0 0 0.5rem 0;
+}

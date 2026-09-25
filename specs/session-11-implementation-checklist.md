@@ -69,25 +69,25 @@ If implementation exceeds the normal one to two day session budget, split work r
 
 Support explicit states sufficient to distinguish:
 
-- [ ] planned
-- [ ] activated
-- [ ] active
-- [ ] paused
-- [ ] resumed
-- [ ] completed
-- [ ] incomplete or abandoned
+- [x] planned
+- [x] activated
+- [x] active
+- [x] paused
+- [x] resumed
+- [x] completed
+- [x] incomplete or abandoned
 
 Also:
 
-- [ ] Record pause events.
-- [ ] Record resume events.
-- [ ] Record interruption timeout.
-- [ ] Support study configurable reconnection grace period.
-- [ ] Support study configurable voluntary pause behaviour.
-- [ ] Ensure interruption beyond the allowed interval leaves the original case activated and incomplete.
-- [ ] Never return an activated assignment to the allocation pool.
-- [ ] Preserve incomplete cases in exports.
-- [ ] Preserve structured incomplete reason where known.
+- [x] Record pause events.
+- [x] Record resume events.
+- [x] Record interruption timeout.
+- [x] Support study configurable reconnection grace period.
+- [x] Support study configurable voluntary pause behaviour.
+- [x] Ensure interruption beyond the allowed interval leaves the original case activated and incomplete.
+- [x] Never return an activated assignment to the allocation pool.
+- [x] Preserve incomplete cases in exports.
+- [x] Preserve structured incomplete reason where known.
 
 ---
 
@@ -106,11 +106,11 @@ Also:
 
 # 7. Clinician level stopping
 
-- [ ] Support configurable target completed cases per clinician.
-- [ ] Support configurable maximum activated cases per clinician.
-- [ ] Stop assigning new cases when the relevant clinician level rule is reached.
-- [ ] Do not implement automatic whole study stopping.
-- [ ] Permit optional planned sample targets for display only.
+- [x] Support configurable target completed cases per clinician.
+- [x] Support configurable maximum activated cases per clinician.
+- [x] Stop assigning new cases when the relevant clinician level rule is reached.
+- [x] Do not implement automatic whole study stopping.
+- [x] Permit optional planned sample targets for display only.
 
 ---
 

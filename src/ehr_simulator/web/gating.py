@@ -21,6 +21,8 @@ write, ``advance.ok`` and ``timepoint.exit`` ride one explicit
 transaction (``commit=False`` everywhere, a single ``conn.commit()``), so
 a failed exit rolls the frontier (and the final close) back with it.
 ``write_counter`` is bumped exactly once, after that commit succeeds.
+S11e: the final advance also marks a tracked Phase 2 case ``completed``
+(+ ``case.completed``) inside that same transaction.
 """
 
 from __future__ import annotations
@@ -30,11 +32,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from ehr_simulator import case_lifecycle
 from ehr_simulator.config.questions import Questions
 from ehr_simulator.db import events, progress, sessions
 from ehr_simulator.db.events import EventKind
 from ehr_simulator.logging import get_logger
-from ehr_simulator.web import timing_events
+from ehr_simulator.web import case_contact, timing_events
 from ehr_simulator.web.answer_capture import (
     normalize_client_seq,
     normalize_client_ts,
@@ -232,6 +235,13 @@ def advance(
                 commit=False,
             )
             sessions.close(conn, ctx.session_id, commit=False)
+            case_lifecycle.complete(
+                conn,
+                clinician_id=clinician_id,
+                patient_id=patient_id,
+                session_id=ctx.session_id,
+                now=case_contact.now(app_state),
+            )
             _event(
                 "advance.ok",
                 t_minutes,

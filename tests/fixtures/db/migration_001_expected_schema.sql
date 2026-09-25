@@ -1,7 +1,7 @@
 -- Frozen expected schema after ALL migrations (001 "initial", 002
 -- "sessions_open_unique", 003 "progress", 004 "study_identity", 005
 -- "s11b_config_version_history", 006 "s11c_randomisation_schedules", 007
--- "s11d_case_activation"); the
+-- "s11d_case_activation", 008 "s11e_case_lifecycle"); the
 -- filename predates 002. The
 -- drift-check test in tests/test_db.py reads sqlite_master.sql (the exact
 -- DDL text SQLite stored) sorted by name, joins with ";\n\n", and asserts
@@ -36,6 +36,27 @@ CREATE TABLE arm_assignments (
     assigned_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     config_hash   TEXT NOT NULL, config_version TEXT, schedule_id TEXT, case_position INTEGER, activated_at TIMESTAMP,
     PRIMARY KEY (clinician_id, patient_id)
+);
+
+CREATE TABLE case_lifecycle (
+    clinician_id       TEXT NOT NULL,
+    patient_id         TEXT NOT NULL,
+    state              TEXT NOT NULL
+        CHECK (state IN ('active', 'paused', 'completed', 'incomplete')),
+    state_changed_at   TIMESTAMP NOT NULL,
+    last_seen_at       TIMESTAMP NOT NULL,
+    paused_at          TIMESTAMP,
+    completed_at       TIMESTAMP,
+    incomplete_at      TIMESTAMP,
+    incomplete_reason  TEXT
+        CHECK (incomplete_reason IS NULL OR incomplete_reason IN
+               ('reconnection_timeout', 'pause_timeout', 'operator_abandoned')),
+    PRIMARY KEY (clinician_id, patient_id),
+    FOREIGN KEY (clinician_id, patient_id)
+        REFERENCES arm_assignments(clinician_id, patient_id),
+    CHECK (state <> 'paused' OR paused_at IS NOT NULL),
+    CHECK ((state = 'completed') = (completed_at IS NOT NULL)),
+    CHECK ((state = 'incomplete') = (incomplete_at IS NOT NULL AND incomplete_reason IS NOT NULL))
 );
 
 CREATE TABLE clinicians (
@@ -171,6 +192,19 @@ BEFORE DELETE ON arm_assignments
 WHEN OLD.arm_source = 'phase2_randomized'
 BEGIN
     SELECT RAISE(ABORT, 'phase2_randomized assignments are immutable');
+END;
+
+CREATE TRIGGER trg_case_lifecycle_no_delete
+BEFORE DELETE ON case_lifecycle
+BEGIN
+    SELECT RAISE(ABORT, 'case lifecycle rows are permanent');
+END;
+
+CREATE TRIGGER trg_case_lifecycle_terminal
+BEFORE UPDATE ON case_lifecycle
+WHEN OLD.state IN ('completed', 'incomplete')
+BEGIN
+    SELECT RAISE(ABORT, 'completed and incomplete cases are terminal');
 END;
 
 CREATE UNIQUE INDEX ux_arm_schedule_position

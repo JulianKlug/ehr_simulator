@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>EHR simulator — case paused</title>
+    <link rel="stylesheet" href="/static/theme.css" />
+</head>
+<body>
+    {% include "_login_stripe.html" %}
+    <main>
+        <h1>EHR simulator</h1>
+        {#- S11e paused interstitial: no panels, no questions, nothing sliced. -#}
+        <section class="case-action" data-case-action="paused">
+            <p>This case is paused.</p>
+            <form method="post" action="/case/{{ patient_id }}/resume">
+                <button type="submit" class="advance-btn case-btn case-resume">Resume case</button>
+            </form>
+            <a class="resume-link" href="/">← Study index</a>
+        </section>
+    </main>
+</body>
+</html>

@@ -83,3 +83,12 @@ class CaseActivationError(RandomisationIntegrityError):
     with different data, or the configuration provenance is unknown.
     Nothing is written when this is raised.
     """
+
+
+class CaseLifecycleError(Exception):
+    """S11e: a lifecycle transition does not fit the case's current state.
+
+    Raised when the stored state is not the transition's expected source
+    (terminal cases included) or a lifecycle row is missing or duplicated.
+    Nothing is written when this is raised.
+    """

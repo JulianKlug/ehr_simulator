@@ -33,3 +33,17 @@ randomisation:
   master_seed: 123456
   block_length: 2
   block_sequence: [start, other]
+
+# S11e case lifecycle (optional; without it no timeout, pause or stopping
+# limit applies). A case silent longer than reconnection_grace_seconds
+# (>= 180) becomes incomplete on its next contact; a voluntary pause longer
+# than its grace (null → reconnection grace) does too. Start case stops at
+# either per-clinician limit; study_target_completed_cases is display-only
+# (`case-status`). Limits are sized to this 3-patient example.
+case_lifecycle:
+  reconnection_grace_seconds: 300
+  voluntary_pause_enabled: true
+  voluntary_pause_grace_seconds: null
+  target_completed_cases_per_clinician: 2
+  max_activated_cases_per_clinician: 3
+  study_target_completed_cases: null

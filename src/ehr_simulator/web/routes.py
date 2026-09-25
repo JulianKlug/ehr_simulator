@@ -32,6 +32,12 @@ S11d Phase 2 study mode: ``POST /case/start`` is the only way a case begins.
 A patient without an activated assignment is bounced to the index (GET) or
 refused with 409 (answer/advance) before anything is resolved or written;
 the index and jumper list only the clinician's cases.
+
+S11e lifecycle: every case route runs ``case_contact.check`` right after the
+case resolves — a timed-out case is made incomplete there (one commit) and
+the request is refused; a paused case renders only the Resume interstitial
+and refuses answer/advance. A successful contact touches ``last_seen_at``.
+``POST /case/{pid}/heartbeat|pause|resume`` are the lifecycle endpoints.
 """
 
 from __future__ import annotations
@@ -45,12 +51,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ehr_simulator.db import arm_assignments, clinicians, cookies, events
 from ehr_simulator.db.exceptions import (
+    CaseLifecycleError,
     ConfigurationProvenanceError,
     RandomisationIntegrityError,
     StaleConfigurationError,
 )
 from ehr_simulator.logging import get_logger, update_request_context
 from ehr_simulator.randomisation import ScheduleIncompatibleError
+from ehr_simulator.web import case_contact
 from ehr_simulator.web.answer_capture import (
     FREE_TEXT_AUTOSAVE_DELAY_MS,
     FREE_TEXT_MAX_CHARS,
@@ -60,9 +68,11 @@ from ehr_simulator.web.answer_capture import (
     record_answer,
     saved_answers,
 )
+from ehr_simulator.web.case_contact import CaseAccess, ContactResult
 from ehr_simulator.web.case_start import (
     CaseStartRefusedError,
     case_patient_ids,
+    case_states,
     index_state,
     start_next_case,
 )
@@ -99,6 +109,11 @@ _MISSING_QUESTION_ID_MSG = "Missing question_id"
 _TIMEPOINT_LOCKED_MSG = "Timepoint locked"
 _NOT_ACTIVATED_MSG = "This patient is not an activated case; start a case from the study index"
 _CASE_START_INTEGRITY_MSG = "Start case refused: stored allocation integrity check failed"
+_CASE_PAUSED_MSG = "This case is paused; resume it from the study index"
+_CASE_CLOSED_MSG = "This case is closed and accepts no further answers"
+_CASE_NOT_ACTIVE_MSG = "This case is not active"
+_CASE_NOT_PAUSED_MSG = "This case is not paused"
+_PAUSE_DISABLED_MSG = "Pausing is not enabled for this study"
 _HX_REQUEST_HEADER = "hx-request"
 _HX_HISTORY_RESTORE_HEADER = "hx-history-restore-request"
 _INDEX_URL = "/"
@@ -181,6 +196,44 @@ def _htmx_aware_redirect(request: Request, url: str) -> Response:
     if _is_htmx(request):
         return Response(status_code=status.HTTP_200_OK, headers={"HX-Redirect": url})
     return RedirectResponse(url, status_code=status.HTTP_303_SEE_OTHER)
+
+
+def _back_to_index(response: Response) -> Response:
+    """Refusal whose ``HX-Redirect`` sends htmx back to the index (S11e)."""
+    response.headers["HX-Redirect"] = _INDEX_URL
+    return response
+
+
+def _conflict(message: str) -> HTMLResponse:
+    return HTMLResponse(content=_error_flash(message), status_code=status.HTTP_409_CONFLICT)
+
+
+def _check_contact(
+    request: Request, clinician_id: str, patient_id: str, case: CaseConfiguration | None
+) -> ContactResult:
+    state = request.app.state
+    return case_contact.check(
+        state.db, state, clinician_id=clinician_id, patient_id=patient_id, case=case
+    )
+
+
+def _touch_contact(request: Request, contact: ContactResult | None) -> None:
+    if contact is not None:
+        case_contact.touch(request.app.state.db, request.app.state, contact)
+
+
+def _case_paused_page(request: Request, patient_id: str) -> Response:
+    """Resume interstitial: no panels, no questions, nothing sliced."""
+    if _is_htmx(request):
+        # Leave the swap target: the interstitial is a whole page.
+        return Response(
+            status_code=status.HTTP_200_OK, headers={"HX-Redirect": str(request.url.path)}
+        )
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "case_paused.html",
+        {"patient_id": patient_id, "logged_in_name": _logged_in_name(request)},
+    )
 
 
 def _require_clinician(request: Request) -> tuple[str | None, Response | None]:
@@ -302,6 +355,17 @@ async def provenance_error_response(
     )
 
 
+async def lifecycle_error_response(request: Request, exc: CaseLifecycleError) -> HTMLResponse:
+    """App-wide handler: a lifecycle transition that lost a race is a 409, never a 500."""
+    get_logger().warning(
+        "case lifecycle transition refused",
+        event_kind="case.lifecycle.refused",
+        path=request.url.path,
+        error=str(exc),
+    )
+    return HTMLResponse(content=_error_flash(str(exc)), status_code=status.HTTP_409_CONFLICT)
+
+
 def _answer_status(
     request: Request,
     *,
@@ -375,8 +439,13 @@ def _render_questions_pane(
     chrome: str,
     timepoint_count: int,
     case: CaseConfiguration | None = None,
+    contact: ContactResult | None = None,
 ) -> str:
-    """Render the pre-filled pane in ``open`` or ``locked`` mode (study mode only)."""
+    """Render the pre-filled pane in ``open`` or ``locked`` mode (study mode only).
+
+    S11e: an active tracked case also carries the heartbeat anchor and, when
+    its pinned policy allows it, the Pause button.
+    """
     state = request.app.state
     questions = case.questions if case is not None else state.questions
     prefill = saved_answers(
@@ -390,6 +459,7 @@ def _render_questions_pane(
     )
     mode = pane_mode(ctx.frontier, t_index)
     is_last = t_index == timepoint_count - 1
+    case_active = contact is not None and contact.access is CaseAccess.ACTIVE
     cta_html = ""
     if mode == "open":
         comp = completeness(questions, prefill)
@@ -419,6 +489,9 @@ def _render_questions_pane(
         free_text_autosave_delay_ms=FREE_TEXT_AUTOSAVE_DELAY_MS,
         probability_min=PROBABILITY_MIN,
         probability_max=PROBABILITY_MAX,
+        heartbeat_enabled=case_active,
+        heartbeat_interval_ms=case_contact.HEARTBEAT_INTERVAL_SECONDS * 1000,
+        pause_enabled=case_active and case_contact.policy_for(case).pause_enabled,
     )
 
 
@@ -432,6 +505,7 @@ def _render_patient_view(
     resolved: ResolvedTimepoint,
     ctx: SessionContext | None,
     case: CaseConfiguration | None = None,
+    contact: ContactResult | None = None,
 ) -> str:
     """Slice → panels → summary → chrome → pane → ``_patient_view.html``.
 
@@ -475,6 +549,7 @@ def _render_patient_view(
             chrome=chrome,
             timepoint_count=timepoint_count,
             case=case,
+            contact=contact,
         )
 
     summary_html = _render_summary(
@@ -604,6 +679,9 @@ async def index(request: Request) -> HTMLResponse:
     study_patient_ids = getattr(state, "study_patient_ids", None)
     patient_progress: dict[str, PatientProgress] | None = None
     case_state = index_state(state.db, state, clinician_id or "") if is_phase2_mode(state) else None
+    lifecycle_states: dict[str, str] = {}
+    if case_state is not None:
+        lifecycle_states = case_states(state.db, clinician_id or "")
     if study_patient_ids is not None:
         patient_ids = _case_patient_ids(request, clinician_id or "")
         patient_progress = progress_overview(
@@ -621,6 +699,7 @@ async def index(request: Request) -> HTMLResponse:
             "patient_ids": patient_ids,
             "patient_progress": patient_progress,
             "case_state": case_state,
+            "lifecycle_states": lifecycle_states,
             "logged_in_name": _logged_in_name(request),
         },
     )
@@ -659,6 +738,112 @@ async def case_start(request: Request, chrome: Chrome = "epic") -> Response:
     )
 
 
+def _lifecycle_request(
+    request: Request, clinician_id: str, patient_id: str
+) -> tuple[ContactResult | None, CaseConfiguration | None, Response | None]:
+    """Shared preamble of the S11e case endpoints: a tracked Phase 2 case or a refusal."""
+    state = request.app.state
+    if not is_phase2_mode(state) or _is_unactivated_phase2_patient(
+        request, clinician_id, patient_id
+    ):
+        return None, None, _conflict(_NOT_ACTIVATED_MSG)
+
+    case, case_error, case_status = _try_resolve_case(request, clinician_id, patient_id)
+    if case_error is not None:
+        return None, None, HTMLResponse(content=_error_flash(case_error), status_code=case_status)
+
+    contact = _check_contact(request, clinician_id, patient_id, case)
+    if contact.access is CaseAccess.UNTRACKED:
+        return None, None, _conflict(_NOT_ACTIVATED_MSG)
+    if contact.access in (CaseAccess.INCOMPLETE, CaseAccess.COMPLETED):
+        return None, None, _back_to_index(_conflict(_CASE_CLOSED_MSG))
+    return contact, case, None
+
+
+def _frontier_url(
+    request: Request,
+    clinician_id: str,
+    patient_id: str,
+    case: CaseConfiguration | None,
+    chrome: str,
+) -> str:
+    frontier = read_frontier(
+        request.app.state.db,
+        request.app.state,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        timepoints=case.timepoints if case is not None else None,
+    )
+    return _timepoint_url(patient_id, frontier.unlocked_t_index, chrome)
+
+
+@router.post("/case/{patient_id}/heartbeat")
+async def case_heartbeat(request: Request, patient_id: str) -> Response:
+    """Keep an open case page alive; records nothing but ``last_seen_at``."""
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect
+
+    contact, _case, refusal = _lifecycle_request(request, clinician_id or "", patient_id)
+    if refusal is not None:
+        return refusal
+    if contact.access is not CaseAccess.ACTIVE:  # type: ignore[union-attr]
+        return _back_to_index(_conflict(_CASE_NOT_ACTIVE_MSG))
+
+    _touch_contact(request, contact)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/case/{patient_id}/pause")
+async def case_pause(request: Request, patient_id: str, chrome: Chrome = "epic") -> Response:
+    """Voluntary pause, when the case's pinned policy allows it."""
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect
+    update_request_context(clinician_id=clinician_id, patient_id=patient_id)
+
+    contact, case, refusal = _lifecycle_request(request, clinician_id or "", patient_id)
+    if refusal is not None:
+        return refusal
+    if not case_contact.policy_for(case).pause_enabled:
+        return _conflict(_PAUSE_DISABLED_MSG)
+    if contact.access is not CaseAccess.ACTIVE:  # type: ignore[union-attr]
+        return _conflict(_CASE_NOT_ACTIVE_MSG)
+
+    try:
+        case_contact.pause_case(request.app.state.db, request.app.state, contact)  # type: ignore[arg-type]
+    except CaseLifecycleError as exc:
+        return _conflict(str(exc))
+
+    return _htmx_aware_redirect(
+        request, _frontier_url(request, clinician_id or "", patient_id, case, chrome)
+    )
+
+
+@router.post("/case/{patient_id}/resume")
+async def case_resume(request: Request, patient_id: str, chrome: Chrome = "epic") -> Response:
+    """Resume a paused case inside its pause grace; beyond it the case is incomplete."""
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect
+    update_request_context(clinician_id=clinician_id, patient_id=patient_id)
+
+    contact, case, refusal = _lifecycle_request(request, clinician_id or "", patient_id)
+    if refusal is not None:
+        return refusal
+    if contact.access is not CaseAccess.PAUSED:  # type: ignore[union-attr]
+        return _conflict(_CASE_NOT_PAUSED_MSG)
+
+    try:
+        case_contact.resume_case(request.app.state.db, request.app.state, contact, case)  # type: ignore[arg-type]
+    except CaseLifecycleError as exc:
+        return _conflict(str(exc))
+
+    return _htmx_aware_redirect(
+        request, _frontier_url(request, clinician_id or "", patient_id, case, chrome)
+    )
+
+
 @router.get(
     "/patient/{patient_id}/timepoint/{t_index}",
     response_class=HTMLResponse,
@@ -682,6 +867,15 @@ async def patient_timepoint(
         case, case_error, case_status = _try_resolve_case(request, clinician_id or "", patient_id)
         if case_error is not None:
             return HTMLResponse(content=_error_flash(case_error), status_code=case_status)
+
+    # S11e: lifecycle gate before the frontier gate and before any slice.
+    contact: ContactResult | None = None
+    if state.study is not None:
+        contact = _check_contact(request, clinician_id or "", patient_id, case)
+        if contact.access is CaseAccess.INCOMPLETE:
+            return _htmx_aware_redirect(request, _INDEX_URL)
+        if contact.access is CaseAccess.PAUSED:
+            return _case_paused_page(request, patient_id)
 
     resolved, message = _resolve_timepoint(
         request,
@@ -739,6 +933,7 @@ async def patient_timepoint(
         resolved=resolved,
         ctx=ctx,
         case=case,
+        contact=contact,
     )
     # Build/render the complete response before recording timepoint.enter.
     if _is_history_restore(request) or not _is_htmx(request):
@@ -768,6 +963,7 @@ async def patient_timepoint(
             t_minutes=float(resolved.t_minutes),
         )
 
+    _touch_contact(request, contact)
     return response
 
 
@@ -802,6 +998,23 @@ async def patient_answer(
         case, case_error, case_status = _try_resolve_case(request, clinician_id or "", patient_id)
         if case_error is not None:
             return _answer_status(request, state="error", error=case_error, status_code=case_status)
+
+    contact: ContactResult | None = None
+    if state.study is not None:
+        contact = _check_contact(request, clinician_id or "", patient_id, case)
+        if contact.access is CaseAccess.PAUSED:
+            return _answer_status(
+                request, state="error", error=_CASE_PAUSED_MSG, status_code=status.HTTP_409_CONFLICT
+            )
+        if contact.access is CaseAccess.INCOMPLETE:
+            return _back_to_index(
+                _answer_status(
+                    request,
+                    state="error",
+                    error=_CASE_CLOSED_MSG,
+                    status_code=status.HTTP_409_CONFLICT,
+                )
+            )
 
     questions = case.questions if case is not None else state.questions
     resolved, message = _resolve_timepoint(
@@ -916,6 +1129,7 @@ async def patient_answer(
         is_last=t_index == len(resolved.timepoints) - 1,
         oob=True,
     )
+    _touch_contact(request, contact)
     return _answer_status(request, state=outcome, question_id=question_id, trailing_html=cta_html)
 
 
@@ -950,6 +1164,14 @@ async def patient_advance(
     case, case_error, case_status = _try_resolve_case(request, clinician_id or "", patient_id)
     if case_error is not None:
         return HTMLResponse(content=_error_flash(case_error), status_code=case_status)
+
+    contact = _check_contact(request, clinician_id or "", patient_id, case)
+    if contact.access is CaseAccess.PAUSED:
+        return HTMLResponse(
+            content=_error_flash(_CASE_PAUSED_MSG), status_code=status.HTTP_409_CONFLICT
+        )
+    if contact.access is CaseAccess.INCOMPLETE:
+        return _back_to_index(_conflict(_CASE_CLOSED_MSG))
 
     questions = case.questions if case is not None else state.questions
     resolved, message = _resolve_timepoint(
@@ -998,6 +1220,8 @@ async def patient_advance(
         client_ts=_form_str(form.get("client_ts")),
         client_seq=_form_str(form.get("client_seq")),
     )
+    # A finished walk completed the case; touch() then finds nothing active.
+    _touch_contact(request, contact)
     return _advance_response(
         request,
         result=result,
@@ -1008,6 +1232,7 @@ async def patient_advance(
         chrome=chrome,
         timepoint_count=len(resolved.timepoints),
         case=case,
+        contact=contact,
     )
 
 
@@ -1022,6 +1247,7 @@ def _advance_response(
     chrome: str,
     timepoint_count: int,
     case: CaseConfiguration | None = None,
+    contact: ContactResult | None = None,
 ) -> Response:
     """Map an :class:`AdvanceResult` onto the HTMX / plain-browser contract (spec §5.1)."""
     if result.outcome == "finished":
@@ -1076,6 +1302,7 @@ def _advance_response(
         resolved=target_resolved,
         ctx=target_ctx,
         case=case,
+        contact=contact,
     )
     status_code = (
         status.HTTP_200_OK if result.outcome == "advanced" else status.HTTP_412_PRECONDITION_FAILED

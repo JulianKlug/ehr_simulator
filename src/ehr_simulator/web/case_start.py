@@ -5,8 +5,11 @@
     POST /case/start
         │
         ▼
-    start_next_case ── open case? ──yes──► resume (no write)
-        │ no
+    start_next_case ── open case? ── timed out ──► incomplete (own commit)
+        │ none          └─ still open ──► resume (touch only)
+        ▼
+    clinician limit reached? ──► ClinicianLimitReachedError   (fast path)
+        │
         ▼
     Phase A   stale-server check
               create_or_fetch_schedule          own commit; planned only,
@@ -16,14 +19,19 @@
     Phase B   BEGIN IMMEDIATE
               open case? (a racing Start won) ──► rollback, resume
               stale-server check
+              clinician limit reached? ──► ClinicianLimitReachedError
               first unactivated item ── none ──► ScheduleExhaustedError
               schedule ↔ active config compatible
-              activate assignment + session + case.activated + session.start
+              activate assignment + lifecycle "active" + session
+              + case.activated + session.start
               COMMIT                            rollback on any failure
 
-An **open case** is a ``phase2_randomized`` assignment whose progress is not
-completed (derived from assignment + progress, never from sessions). Nothing
-here returns or renders the arm to the caller.
+S11e: an **open case** is a ``phase2_randomized`` assignment whose lifecycle
+state is ``active`` or ``paused`` (a row missing lifecycle state falls back
+to "progress not completed"). Completed and incomplete cases are closed; a
+paused case still blocks Start case and is resumed only by an explicit
+``POST /case/{pid}/resume``. Limits come from the **active** configuration.
+Nothing here returns or renders the arm to the caller.
 """
 
 from __future__ import annotations
@@ -33,9 +41,12 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
+from ehr_simulator.case_lifecycle import limit_reached
 from ehr_simulator.db import arm_assignments, events, progress, sessions
+from ehr_simulator.db import case_lifecycle as lifecycle_dao
 from ehr_simulator.db import randomisation as schedules
 from ehr_simulator.db.arm_assignments import ARM_SOURCE_PHASE2, ActivatedAssignment
+from ehr_simulator.db.case_lifecycle import CaseState
 from ehr_simulator.db.exceptions import CaseActivationError, ConfigurationProvenanceError
 from ehr_simulator.db.randomisation import GeneratedSchedule, ScheduleItem
 from ehr_simulator.logging import get_logger
@@ -44,10 +55,12 @@ from ehr_simulator.randomisation import (
     load_activated_allocation_state,
     require_schedule_compatible,
 )
+from ehr_simulator.web import case_contact
 from ehr_simulator.web.study_session import (
     NOT_STARTED_T_INDEX,
     is_phase2_mode,
     require_active_case,
+    resolve_case_configuration,
 )
 
 
@@ -63,6 +76,10 @@ class ScheduleExhaustedError(CaseStartRefusedError):
     """Every schedule item is already activated; no further cases."""
 
 
+class ClinicianLimitReachedError(CaseStartRefusedError):
+    """The active configuration's per-clinician case limit is reached (S11e)."""
+
+
 class StartOutcome(StrEnum):
     ACTIVATED = "activated"
     RESUMED = "resumed"
@@ -71,6 +88,8 @@ class StartOutcome(StrEnum):
 class IndexAction(StrEnum):
     START = "start"
     RESUME = "resume"
+    RESUME_PAUSED = "resume_paused"
+    LIMIT_REACHED = "limit_reached"
     EXHAUSTED = "exhausted"
 
 
@@ -95,13 +114,30 @@ def case_patient_ids(conn: sqlite3.Connection, clinician_id: str) -> list[str]:
     return [a.patient_id for a in arm_assignments.list_for_clinician(conn, clinician_id)]
 
 
+def case_states(conn: sqlite3.Connection, clinician_id: str) -> dict[str, str]:
+    """Lifecycle state per realised case (index markers, S11e)."""
+    return {
+        pid: str(row.state)
+        for pid, row in lifecycle_dao.list_for_clinician(conn, clinician_id).items()
+    }
+
+
 def find_open_case(conn: sqlite3.Connection, clinician_id: str) -> ActivatedAssignment | None:
-    """The clinician's activated, not completed Phase 2 case, if any."""
+    """The clinician's active or paused Phase 2 case, if any (S11e)."""
+    states = lifecycle_dao.list_for_clinician(conn, clinician_id)
     rows = progress.list_for_clinician(conn, clinician_id)
     for assignment in arm_assignments.list_for_clinician(conn, clinician_id):
         if assignment.arm_source != ARM_SOURCE_PHASE2:
             continue
 
+        lifecycle = states.get(assignment.patient_id)
+        if lifecycle is not None:
+            if lifecycle.is_open:
+                return assignment
+            continue
+
+        # Migration 8 backfills every realised case; progress decides only
+        # for a row written outside the activation path.
         row = rows.get(assignment.patient_id)
         if row is None or row.completed_at is None:
             return assignment
@@ -109,13 +145,50 @@ def find_open_case(conn: sqlite3.Connection, clinician_id: str) -> ActivatedAssi
     return None
 
 
+def _limit_reached(conn: sqlite3.Connection, app_state: Any, clinician_id: str) -> bool:
+    counts = lifecycle_dao.counts_for_clinician(conn, clinician_id)
+    return limit_reached(counts, app_state.study.case_lifecycle)
+
+
+def _refuse_at_limit(conn: sqlite3.Connection, app_state: Any, clinician_id: str) -> None:
+    if _limit_reached(conn, app_state, clinician_id):
+        raise ClinicianLimitReachedError("no further cases can be started")
+
+
+def _open_case_after_timeouts(
+    conn: sqlite3.Connection, app_state: Any, clinician_id: str
+) -> tuple[ActivatedAssignment, case_contact.ContactResult] | None:
+    """The open case once the lazy timeout had its say; a timed-out one closes."""
+    opened = find_open_case(conn, clinician_id)
+    if opened is None:
+        return None
+
+    pinned = resolve_case_configuration(
+        conn, app_state, clinician_id=clinician_id, patient_id=opened.patient_id
+    )
+    contact = case_contact.check(
+        conn, app_state, clinician_id=clinician_id, patient_id=opened.patient_id, case=pinned
+    )
+    if contact.access is case_contact.CaseAccess.INCOMPLETE:
+        return None
+
+    return opened, contact
+
+
 def index_state(conn: sqlite3.Connection, app_state: Any, clinician_id: str) -> CaseIndexState:
     """Which case action the study index offers. Pure read: never creates a schedule."""
     opened = find_open_case(conn, clinician_id)
     if opened is not None:
+        lifecycle = lifecycle_dao.fetch(conn, clinician_id, opened.patient_id)
+        paused = lifecycle is not None and lifecycle.state is CaseState.PAUSED
         return CaseIndexState(
-            IndexAction.RESUME, opened.patient_id, _resume_t_index(conn, clinician_id, opened)
+            IndexAction.RESUME_PAUSED if paused else IndexAction.RESUME,
+            opened.patient_id,
+            _resume_t_index(conn, clinician_id, opened),
         )
+
+    if _limit_reached(conn, app_state, clinician_id):
+        return CaseIndexState(IndexAction.LIMIT_REACHED)
 
     stored = schedules.fetch_for_clinician(conn, app_state.study.study_id, clinician_id)
     if stored is not None and _next_item(conn, stored.schedule) is None:
@@ -129,6 +202,7 @@ def start_next_case(conn: sqlite3.Connection, app_state: Any, *, clinician_id: s
 
     Raises:
         NotPhase2StudyError / ScheduleExhaustedError: refused, nothing written.
+        ClinicianLimitReachedError: the active per-clinician limit is reached.
         StaleConfigurationError: DB active configuration ≠ the running server.
         ScheduleIncompatibleError: the schedule no longer fits the active config.
         ConfigurationProvenanceError / RandomisationIntegrityError: integrity.
@@ -136,9 +210,13 @@ def start_next_case(conn: sqlite3.Connection, app_state: Any, *, clinician_id: s
     if not is_phase2_mode(app_state):
         raise NotPhase2StudyError("Start case needs a study with randomisation settings")
 
-    opened = find_open_case(conn, clinician_id)
-    if opened is not None:
+    held = _open_case_after_timeouts(conn, app_state, clinician_id)
+    if held is not None:
+        opened, contact = held
+        case_contact.touch(conn, app_state, contact)
         return _resumed(conn, clinician_id, opened)
+
+    _refuse_at_limit(conn, app_state, clinician_id)
 
     # Phase A: the schedule (planned only) commits on its own.
     study = app_state.study
@@ -175,6 +253,7 @@ def _activate_next(
             return _resumed(conn, clinician_id, opened)
 
         active = require_active_case(conn, app_state)
+        _refuse_at_limit(conn, app_state, clinician_id)
         item = _next_item(conn, schedule)
         if item is None:
             raise ScheduleExhaustedError("no further cases: every scheduled case is activated")
@@ -193,6 +272,13 @@ def _activate_next(
             item=item,
             config_version=active.config_version,  # type: ignore[arg-type]
             config_hash=active.config_hash,
+            commit=False,
+        )
+        lifecycle_dao.insert_active(
+            conn,
+            clinician_id=clinician_id,
+            patient_id=item.patient_id,
+            now=case_contact.now(app_state),
             commit=False,
         )
         session_id = sessions.start_or_resume(

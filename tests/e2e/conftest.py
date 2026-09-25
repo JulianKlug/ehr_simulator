@@ -148,3 +148,24 @@ def live_study_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]
             "e2e baseline",
         ],
     )
+
+
+@pytest.fixture(scope="session")
+def live_lifecycle_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """S11e: Phase 2 study with ``case_lifecycle`` (pause enabled)."""
+    study_yaml = str(_FIXTURES_DIR / "study_lifecycle.yaml")
+    questions_yaml = str(_FIXTURES_DIR / "questions.yaml")
+    yield from _boot_server(
+        tmp_path_factory,
+        label="e2e-lifecycle",
+        extra_args=["--config", study_yaml, "--questions", questions_yaml],
+        activation=[
+            "activate-config",
+            study_yaml,
+            questions_yaml,
+            "--version",
+            "e2e",
+            "--description",
+            "e2e lifecycle",
+        ],
+    )

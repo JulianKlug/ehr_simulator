@@ -51,6 +51,14 @@ EventKind = Literal[
     # S11d: Start case realised one planned schedule item (payload:
     # schedule_id, case_position, arm — never the clinician name).
     "case.activated",
+    # S11e: lifecycle transitions. ``case.reconnected`` records a contact
+    # after a heartbeat gap still inside the grace period; ``case.incomplete``
+    # carries the structured reason (never the clinician name).
+    "case.paused",
+    "case.resumed",
+    "case.reconnected",
+    "case.completed",
+    "case.incomplete",
 ]
 EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 

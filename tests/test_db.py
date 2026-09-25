@@ -154,7 +154,7 @@ def test_apply_migrations_forward(tmp_db_path: Path) -> None:
         ).fetchall()
     finally:
         conn.close()
-    assert versions == [1, 2, 3, 4, 5, 6, 7]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
     assert [(r[0], r[1]) for r in rows] == [
         (1, "initial"),
         (2, "sessions_open_unique"),
@@ -163,6 +163,7 @@ def test_apply_migrations_forward(tmp_db_path: Path) -> None:
         (5, "s11b_config_version_history"),
         (6, "s11c_randomisation_schedules"),
         (7, "s11d_case_activation"),
+        (8, "s11e_case_lifecycle"),
     ]
 
 
@@ -193,7 +194,7 @@ def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None
         migration_rows = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
     finally:
         conn.close()
-    assert versions == [1, 2, 3, 4, 5, 6, 7]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
     expected = {
         "clinicians",
         "sessions",
@@ -240,7 +241,7 @@ def test_apply_migrations_recovers_from_partial_migration_5(tmp_db_path: Path) -
     finally:
         half.close()
 
-    assert versions == [5, 6, 7]
+    assert versions == [5, 6, 7, 8]
     assert all(cols.count("config_version") == 1 for cols in columns.values()), columns
 
 
@@ -674,7 +675,7 @@ def test_migration_2_rejects_second_open_session(tmp_db_path: Path) -> None:
     )
     v1.execute("INSERT INTO schema_migrations (version, name) VALUES (1, 'initial')")
     v1.commit()
-    assert apply_migrations(v1) == [2, 3, 4, 5, 6, 7]
+    assert apply_migrations(v1) == [2, 3, 4, 5, 6, 7, 8]
     assert apply_migrations(v1) == []
 
     cid = clinicians.lookup_or_create(v1, "Dr. Smith")
@@ -727,7 +728,7 @@ def _v2_db(tmp_db_path: Path) -> sqlite3.Connection:
 
 def test_migration_3_creates_progress_and_is_idempotent(tmp_db_path: Path) -> None:
     v2 = _v2_db(tmp_db_path)
-    assert apply_migrations(v2) == [3, 4, 5, 6, 7]
+    assert apply_migrations(v2) == [3, 4, 5, 6, 7, 8]
     assert apply_migrations(v2) == []
     tables = {r[0] for r in v2.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "progress" in tables
@@ -1294,7 +1295,7 @@ def test_migration_4_creates_exactly_study_identity_table(tmp_db_path: Path) -> 
     never populates it, and is safe to re-apply."""
     conn = connect(tmp_db_path)
     try:
-        assert apply_migrations(conn) == [1, 2, 3, 4, 5, 6, 7]
+        assert apply_migrations(conn) == [1, 2, 3, 4, 5, 6, 7, 8]
         tables = {
             r[0]
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")

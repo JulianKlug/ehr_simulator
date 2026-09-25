@@ -264,6 +264,69 @@ END;
 """
 
 
+# S11e: lifecycle state of every realised Phase 2 case. Timestamps come from
+# the service's injected clock (no defaults). The CHECKs tie each state to its
+# timestamp (``paused_at`` survives a pause timeout as evidence); triggers
+# make ``completed``/``incomplete`` rows immutable and forbid deletes. The
+# backfill copies S11d cases without inventing pause/incomplete history:
+# completed progress → ``completed``, anything else → ``active`` last seen at
+# its latest recorded contact.
+# No inline SQL comments: sqlite_master stores the DDL verbatim and the
+# schema-snapshot test compares it byte-for-byte.
+_S11E_CASE_LIFECYCLE_DDL = """
+CREATE TABLE IF NOT EXISTS case_lifecycle (
+    clinician_id       TEXT NOT NULL,
+    patient_id         TEXT NOT NULL,
+    state              TEXT NOT NULL
+        CHECK (state IN ('active', 'paused', 'completed', 'incomplete')),
+    state_changed_at   TIMESTAMP NOT NULL,
+    last_seen_at       TIMESTAMP NOT NULL,
+    paused_at          TIMESTAMP,
+    completed_at       TIMESTAMP,
+    incomplete_at      TIMESTAMP,
+    incomplete_reason  TEXT
+        CHECK (incomplete_reason IS NULL OR incomplete_reason IN
+               ('reconnection_timeout', 'pause_timeout', 'operator_abandoned')),
+    PRIMARY KEY (clinician_id, patient_id),
+    FOREIGN KEY (clinician_id, patient_id)
+        REFERENCES arm_assignments(clinician_id, patient_id),
+    CHECK (state <> 'paused' OR paused_at IS NOT NULL),
+    CHECK ((state = 'completed') = (completed_at IS NOT NULL)),
+    CHECK ((state = 'incomplete') = (incomplete_at IS NOT NULL AND incomplete_reason IS NOT NULL))
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_case_lifecycle_terminal
+BEFORE UPDATE ON case_lifecycle
+WHEN OLD.state IN ('completed', 'incomplete')
+BEGIN
+    SELECT RAISE(ABORT, 'completed and incomplete cases are terminal');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_case_lifecycle_no_delete
+BEFORE DELETE ON case_lifecycle
+BEGIN
+    SELECT RAISE(ABORT, 'case lifecycle rows are permanent');
+END;
+
+INSERT OR IGNORE INTO case_lifecycle
+    (clinician_id, patient_id, state, state_changed_at, last_seen_at, completed_at)
+SELECT
+    a.clinician_id,
+    a.patient_id,
+    CASE WHEN p.completed_at IS NOT NULL THEN 'completed' ELSE 'active' END,
+    COALESCE(p.completed_at, a.activated_at),
+    MAX(a.activated_at, COALESCE(
+        (SELECT MAX(e.server_ts) FROM events e
+          WHERE e.clinician_id = a.clinician_id AND e.patient_id = a.patient_id),
+        a.activated_at)),
+    p.completed_at
+FROM arm_assignments a
+LEFT JOIN progress p
+       ON p.clinician_id = a.clinician_id AND p.patient_id = a.patient_id
+WHERE a.arm_source = 'phase2_randomized' AND a.activated_at IS NOT NULL;
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
@@ -283,6 +346,7 @@ MIGRATIONS: tuple[Migration, ...] = (
         add_columns=_S11D_ACTIVATION_COLUMNS,
         post_sql=_S11D_ACTIVATION_DDL,
     ),
+    Migration(version=8, name="s11e_case_lifecycle", up_sql=_S11E_CASE_LIFECYCLE_DDL),
 )
 
 

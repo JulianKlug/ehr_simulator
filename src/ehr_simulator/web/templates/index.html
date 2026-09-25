@@ -16,6 +16,13 @@
             {% if case_state.action == "resume" %}
             <p>You have a case in progress.</p>
             <a class="advance-btn case-btn case-resume" href="/patient/{{ case_state.open_patient_id }}/timepoint/{{ case_state.resume_t_index }}?chrome=epic">Resume case</a>
+            {% elif case_state.action == "resume_paused" %}
+            <p>Your case is paused.</p>
+            <form method="post" action="/case/{{ case_state.open_patient_id }}/resume">
+                <button type="submit" class="advance-btn case-btn case-resume">Resume case</button>
+            </form>
+            {% elif case_state.action == "limit_reached" %}
+            <p class="case-limit">No further cases can be started. Thank you.</p>
             {% elif case_state.action == "start" %}
             <p>Press <strong>Start case</strong> when you are ready. The next patient is assigned when you press it.</p>
             <form method="post" action="/case/start">
@@ -37,14 +44,22 @@
             {% set resume = prog.unlocked_t_index if prog else 0 %}
             {#- S11d: a Phase 2 case is started at activation, even before any progress row. -#}
             {% set shown = "in_progress" if case_state and prog and prog.state == "not_started" else (prog.state if prog else None) %}
+            {#- S11e: paused / incomplete lifecycle states override the walk state;
+                an incomplete case is closed, so its row carries no links. -#}
+            {% set lifecycle = lifecycle_states.get(pid) if lifecycle_states else None %}
+            {% if lifecycle in ("paused", "incomplete") %}{% set shown = lifecycle %}{% endif %}
             <li{% if prog %} data-progress-state="{{ shown }}"{% endif %}>
                 <strong>{{ pid }}</strong>:
+                {% if shown != "incomplete" %}
                 <a href="/patient/{{ pid }}/timepoint/{{ resume }}?chrome=epic">epic</a>
                 <span aria-hidden="true">·</span>
                 <a href="/patient/{{ pid }}/timepoint/{{ resume }}?chrome=dense">dense</a>
+                {% endif %}
                 {% if prog %}
                 <span class="progress-marker is-{{ shown|replace('_', '-') }}">
                     {%- if shown == "complete" %}complete ✓
+                    {%- elif shown == "paused" %}paused
+                    {%- elif shown == "incomplete" %}incomplete
                     {%- elif shown == "in_progress" %}in progress · t {{ prog.unlocked_t_index + 1 }}/{{ prog.timepoint_count }}
                     {%- else %}not started{% endif -%}
                 </span>

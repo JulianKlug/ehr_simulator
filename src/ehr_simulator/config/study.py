@@ -17,6 +17,10 @@ S11: ``study_id`` is required — a stable, filesystem-safe identifier
 S11c: optional ``randomisation`` block (:class:`RandomisationConfig`) feeds
 the Phase 2 scheduler. When absent it is omitted from serialization, so
 pre-S11c snapshots and their ``config_hash`` stay byte-identical.
+
+S11e: optional ``case_lifecycle`` block (:class:`CaseLifecycleConfig`) sets
+reconnection grace, voluntary pause and per-clinician stopping limits.
+Omitted from serialization when absent, like ``randomisation``.
 """
 
 from __future__ import annotations
@@ -29,6 +33,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     SerializerFunctionWrapHandler,
+    StrictBool,
     StrictInt,
     ValidationInfo,
     field_validator,
@@ -40,8 +45,10 @@ from ehr_simulator.config.exceptions import ConfigError
 
 __all__ = [
     "MASTER_SEED_MAX",
+    "MIN_RECONNECTION_GRACE_SECONDS",
     "STUDY_ID_PATTERN",
     "BlockEntry",
+    "CaseLifecycleConfig",
     "RandomisationConfig",
     "StudyConfig",
 ]
@@ -56,6 +63,11 @@ STUDY_ID_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
 #: S11c: largest master seed — the SQLite signed 64-bit INTEGER ceiling.
 MASTER_SEED_MAX = 2**63 - 1
+
+#: S11e: smallest reconnection grace. Chrome throttles timers in background
+#: tabs to one wake-up per minute; 180 s leaves a 3x margin over that for
+#: the case heartbeat (a lockstep test pins it to ``HEARTBEAT_INTERVAL_SECONDS``).
+MIN_RECONNECTION_GRACE_SECONDS = 180
 
 #: ``start`` = the clinician's starting arm, ``other`` = the opposite arm.
 BlockEntry = Literal["start", "other"]
@@ -107,6 +119,71 @@ class RandomisationConfig(BaseModel):
         return v
 
 
+class CaseLifecycleConfig(BaseModel):
+    """S11e reconnection, pause and clinician stopping policy.
+
+    ``voluntary_pause_grace_seconds`` is serialized as supplied; a null grace
+    with pause enabled falls back to the reconnection grace at use
+    (:attr:`effective_pause_grace_seconds`), never in the stored snapshot.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reconnection_grace_seconds: StrictInt
+    voluntary_pause_enabled: StrictBool = False
+    voluntary_pause_grace_seconds: StrictInt | None = None
+    target_completed_cases_per_clinician: StrictInt
+    max_activated_cases_per_clinician: StrictInt
+    study_target_completed_cases: StrictInt | None = None
+
+    @field_validator("reconnection_grace_seconds")
+    @classmethod
+    def _grace_above_floor(cls, v: int) -> int:
+        if v < MIN_RECONNECTION_GRACE_SECONDS:
+            raise ValueError(
+                f"reconnection_grace_seconds must be >= {MIN_RECONNECTION_GRACE_SECONDS}; got {v}"
+            )
+        return v
+
+    @field_validator("voluntary_pause_grace_seconds")
+    @classmethod
+    def _pause_grace_positive(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError(f"voluntary_pause_grace_seconds must be >= 1; got {v}")
+        return v
+
+    @field_validator("target_completed_cases_per_clinician", "study_target_completed_cases")
+    @classmethod
+    def _target_positive(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError(f"completed case targets must be >= 1; got {v}")
+        return v
+
+    @model_validator(mode="after")
+    def _policy_consistent(self) -> CaseLifecycleConfig:
+        if not self.voluntary_pause_enabled and self.voluntary_pause_grace_seconds is not None:
+            raise ValueError(
+                "voluntary_pause_grace_seconds is set while voluntary_pause_enabled is false"
+            )
+        if self.max_activated_cases_per_clinician < self.target_completed_cases_per_clinician:
+            raise ValueError(
+                "max_activated_cases_per_clinician must be >= "
+                "target_completed_cases_per_clinician; got "
+                f"{self.max_activated_cases_per_clinician} < "
+                f"{self.target_completed_cases_per_clinician}"
+            )
+        return self
+
+    @property
+    def effective_pause_grace_seconds(self) -> int | None:
+        """Pause grace in force; ``None`` when voluntary pause is disabled."""
+        if not self.voluntary_pause_enabled:
+            return None
+        if self.voluntary_pause_grace_seconds is None:
+            return self.reconnection_grace_seconds
+        return self.voluntary_pause_grace_seconds
+
+
 class StudyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -120,14 +197,20 @@ class StudyConfig(BaseModel):
     time_unit: Literal["minutes", "hours"]
     timepoints: list[float]
     randomisation: RandomisationConfig | None = None
+    case_lifecycle: CaseLifecycleConfig | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_randomisation(self, handler: SerializerFunctionWrapHandler) -> Any:
-        # Absent block → absent key: pre-S11c snapshots re-render byte-for-byte
-        # and their config_hash does not move.
+        # Absent block → absent key: pre-S11c/S11e snapshots re-render
+        # byte-for-byte and their config_hash does not move.
         data = handler(self)
-        if self.randomisation is None and isinstance(data, dict):
+        if not isinstance(data, dict):
+            return data
+
+        if self.randomisation is None:
             data.pop("randomisation", None)
+        if self.case_lifecycle is None:
+            data.pop("case_lifecycle", None)
         return data
 
     @model_validator(mode="before")
