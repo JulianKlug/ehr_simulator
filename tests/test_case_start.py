@@ -630,6 +630,7 @@ def test_index_copy_speaks_of_cases_not_patient_picking(harness: Harness) -> Non
     assert "Your cases" not in before
     assert "Your cases" in after
     assert "in progress · t 1/3" in after
+    assert "is-in-progress" in after
     assert "not started" not in after
 
 

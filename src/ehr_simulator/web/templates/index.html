@@ -36,15 +36,16 @@
             {% set prog = patient_progress.get(pid) if patient_progress else None %}
             {% set resume = prog.unlocked_t_index if prog else 0 %}
             {#- S11d: a Phase 2 case is started at activation, even before any progress row. -#}
-            <li{% if prog %} data-progress-state="{{ prog.state }}"{% endif %}>
+            {% set shown = "in_progress" if case_state and prog and prog.state == "not_started" else (prog.state if prog else None) %}
+            <li{% if prog %} data-progress-state="{{ shown }}"{% endif %}>
                 <strong>{{ pid }}</strong>:
                 <a href="/patient/{{ pid }}/timepoint/{{ resume }}?chrome=epic">epic</a>
                 <span aria-hidden="true">·</span>
                 <a href="/patient/{{ pid }}/timepoint/{{ resume }}?chrome=dense">dense</a>
                 {% if prog %}
-                <span class="progress-marker is-{{ prog.state|replace('_', '-') }}">
-                    {%- if prog.state == "complete" %}complete ✓
-                    {%- elif prog.state == "in_progress" or case_state %}in progress · t {{ prog.unlocked_t_index + 1 }}/{{ prog.timepoint_count }}
+                <span class="progress-marker is-{{ shown|replace('_', '-') }}">
+                    {%- if shown == "complete" %}complete ✓
+                    {%- elif shown == "in_progress" %}in progress · t {{ prog.unlocked_t_index + 1 }}/{{ prog.timepoint_count }}
                     {%- else %}not started{% endif -%}
                 </span>
                 {% endif %}
