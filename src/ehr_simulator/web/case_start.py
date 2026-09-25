@@ -14,16 +14,18 @@
     Phase A   stale-server check
               create_or_fetch_schedule          own commit; planned only,
               (allocation state read in lock)   consumes nothing
+              plan missing replacements         S11f; own commits
         │
         ▼
     Phase B   BEGIN IMMEDIATE
               open case? (a racing Start won) ──► rollback, resume
               stale-server check
               clinician limit reached? ──► ClinicianLimitReachedError
-              first unactivated item ── none ──► ScheduleExhaustedError
+              pending replacement? ── else first unactivated, unreserved item
+                                    ── none ──► ScheduleExhaustedError
               schedule ↔ active config compatible
               activate assignment + lifecycle "active" + session
-              + case.activated + session.start
+              + replacement activated_at + case.activated + session.start
               COMMIT                            rollback on any failure
 
 S11e: an **open case** is a ``phase2_randomized`` assignment whose lifecycle
@@ -31,6 +33,8 @@ state is ``active`` or ``paused`` (a row missing lifecycle state falls back
 to "progress not completed"). Completed and incomplete cases are closed; a
 paused case still blocks Start case and is resumed only by an explicit
 ``POST /case/{pid}/resume``. Limits come from the **active** configuration.
+S11f: a pending replacement plan is activated before the next ordinary item,
+through the same checks; its reserved position is never taken otherwise.
 Nothing here returns or renders the arm to the caller.
 """
 
@@ -45,16 +49,19 @@ from ehr_simulator.case_lifecycle import limit_reached
 from ehr_simulator.db import arm_assignments, events, progress, sessions
 from ehr_simulator.db import case_lifecycle as lifecycle_dao
 from ehr_simulator.db import randomisation as schedules
+from ehr_simulator.db import replacements as replacements_dao
 from ehr_simulator.db.arm_assignments import ARM_SOURCE_PHASE2, ActivatedAssignment
 from ehr_simulator.db.case_lifecycle import CaseState
 from ehr_simulator.db.exceptions import CaseActivationError, ConfigurationProvenanceError
 from ehr_simulator.db.randomisation import GeneratedSchedule, ScheduleItem
+from ehr_simulator.db.replacements import ReplacementPlan
 from ehr_simulator.logging import get_logger
 from ehr_simulator.randomisation import (
     create_or_fetch_schedule,
     load_activated_allocation_state,
     require_schedule_compatible,
 )
+from ehr_simulator.replacement import plan_missing_replacements
 from ehr_simulator.web import case_contact
 from ehr_simulator.web.study_session import (
     NOT_STARTED_T_INDEX,
@@ -112,6 +119,31 @@ class CaseIndexState:
 def case_patient_ids(conn: sqlite3.Connection, clinician_id: str) -> list[str]:
     """Patients the clinician already holds as cases (index + jumper list)."""
     return [a.patient_id for a in arm_assignments.list_for_clinician(conn, clinician_id)]
+
+
+class ReplacementMarker(StrEnum):
+    PENDING = "pending"
+    REPLACED = "replaced"
+    NONE = "none"
+
+
+def replacement_markers(conn: sqlite3.Connection, clinician_id: str) -> dict[str, str]:
+    """Per incomplete case: replacement pending / replaced / none (S11f index)."""
+    plans = {
+        p.original_patient_id: p for p in replacements_dao.list_for_clinician(conn, clinician_id)
+    }
+    markers: dict[str, str] = {}
+    for pid, row in lifecycle_dao.list_for_clinician(conn, clinician_id).items():
+        if row.state is not CaseState.INCOMPLETE:
+            continue
+        plan = plans.get(pid)
+        if plan is None:
+            markers[pid] = ReplacementMarker.NONE
+        else:
+            markers[pid] = (
+                ReplacementMarker.PENDING if plan.is_pending else ReplacementMarker.REPLACED
+            )
+    return markers
 
 
 def case_states(conn: sqlite3.Connection, clinician_id: str) -> dict[str, str]:
@@ -191,7 +223,7 @@ def index_state(conn: sqlite3.Connection, app_state: Any, clinician_id: str) -> 
         return CaseIndexState(IndexAction.LIMIT_REACHED)
 
     stored = schedules.fetch_for_clinician(conn, app_state.study.study_id, clinician_id)
-    if stored is not None and _next_item(conn, stored.schedule) is None:
+    if stored is not None and _next_activation(conn, stored.schedule, clinician_id) is None:
         return CaseIndexState(IndexAction.EXHAUSTED)
 
     return CaseIndexState(IndexAction.START)
@@ -234,6 +266,7 @@ def start_next_case(conn: sqlite3.Connection, app_state: Any, *, clinician_id: s
         clinician_id=clinician_id,
         load_allocation_state=lambda c: load_activated_allocation_state(c, study.patient_ids),
     )
+    plan_missing_replacements(conn, clinician_id=clinician_id, now=case_contact.now(app_state))
     return _activate_next(conn, app_state, clinician_id=clinician_id, schedule=stored.schedule)
 
 
@@ -254,10 +287,11 @@ def _activate_next(
 
         active = require_active_case(conn, app_state)
         _refuse_at_limit(conn, app_state, clinician_id)
-        item = _next_item(conn, schedule)
-        if item is None:
+        upcoming = _next_activation(conn, schedule, clinician_id)
+        if upcoming is None:
             raise ScheduleExhaustedError("no further cases: every scheduled case is activated")
 
+        item, plan = upcoming
         require_schedule_compatible(schedule, app_state.study, item)
         if arm_assignments.fetch_for_pair(conn, clinician_id, item.patient_id) is not None:
             raise CaseActivationError(
@@ -281,6 +315,16 @@ def _activate_next(
             now=case_contact.now(app_state),
             commit=False,
         )
+        activated_payload: dict[str, Any] = {
+            "schedule_id": schedule.schedule_id,
+            "case_position": item.case_position,
+            "arm": assignment.arm,
+        }
+        if plan is not None:
+            replacements_dao.mark_activated(
+                conn, plan.replacement_id, now=case_contact.now(app_state), commit=False
+            )
+            activated_payload["replacement_id"] = plan.replacement_id
         session_id = sessions.start_or_resume(
             conn,
             clinician_id,
@@ -296,11 +340,7 @@ def _activate_next(
             clinician_id,
             item.patient_id,
             "case.activated",
-            {
-                "schedule_id": schedule.schedule_id,
-                "case_position": item.case_position,
-                "arm": assignment.arm,
-            },
+            activated_payload,
         )
         _append(
             conn,
@@ -343,10 +383,23 @@ def _append(
     )
 
 
-def _next_item(conn: sqlite3.Connection, schedule: GeneratedSchedule) -> ScheduleItem | None:
-    """First item in ``case_position`` order not yet activated."""
+def _next_activation(
+    conn: sqlite3.Connection, schedule: GeneratedSchedule, clinician_id: str
+) -> tuple[ScheduleItem, ReplacementPlan | None] | None:
+    """The oldest pending replacement, else the first unactivated, unreserved item."""
+    by_position = {i.case_position: i for i in schedule.items}
+    pending = [
+        p
+        for p in replacements_dao.pending_for_clinician(conn, clinician_id)
+        if p.replacement_schedule_id == schedule.schedule_id
+    ]
+    if pending:
+        plan = pending[0]
+        return by_position[plan.replacement_case_position], plan
+
     consumed = arm_assignments.activated_positions(conn, schedule.schedule_id)
-    return next((i for i in schedule.items if i.case_position not in consumed), None)
+    item = next((i for i in schedule.items if i.case_position not in consumed), None)
+    return None if item is None else (item, None)
 
 
 def _resume_t_index(

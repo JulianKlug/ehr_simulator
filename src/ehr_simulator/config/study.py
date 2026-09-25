@@ -125,6 +125,9 @@ class CaseLifecycleConfig(BaseModel):
     ``voluntary_pause_grace_seconds`` is serialized as supplied; a null grace
     with pause enabled falls back to the reconnection grace at use
     (:attr:`effective_pause_grace_seconds`), never in the stored snapshot.
+
+    S11f: ``replacement_cases_enabled`` is serialized only when true, so S11e
+    snapshots (which predate it) re-render byte-for-byte.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -135,6 +138,14 @@ class CaseLifecycleConfig(BaseModel):
     target_completed_cases_per_clinician: StrictInt
     max_activated_cases_per_clinician: StrictInt
     study_target_completed_cases: StrictInt | None = None
+    replacement_cases_enabled: StrictBool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_disabled_replacements(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if not self.replacement_cases_enabled and isinstance(data, dict):
+            data.pop("replacement_cases_enabled", None)
+        return data
 
     @field_validator("reconnection_grace_seconds")
     @classmethod

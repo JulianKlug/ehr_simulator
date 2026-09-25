@@ -568,7 +568,7 @@ def abandon_case_cmd(
     setup_logging(Path("logs"))
     _study, conn = _open_study_db(study_path, db_path, read_only=False)
     try:
-        clinician_id = abandon_case(
+        report = abandon_case(
             conn, clinician_name=clinician, patient_id=patient, now=datetime.now(UTC)
         )
     except OperatorError as exc:
@@ -578,8 +578,13 @@ def abandon_case_cmd(
         conn.close()
 
     typer.echo(
-        f"Case {patient} for clinician {clinician_id} is now incomplete (operator_abandoned)."
+        f"Case {patient} for clinician {report.clinician_id} is now incomplete "
+        "(operator_abandoned)."
     )
+    if report.replacement_patient_id is not None:
+        typer.echo(f"Replacement planned: {report.replacement_patient_id}.")
+    if report.planning_error is not None:
+        typer.echo(f"Warning: replacement not planned: {report.planning_error}", err=True)
 
 
 @app_typer.command("case-status")

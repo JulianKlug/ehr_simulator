@@ -1,7 +1,8 @@
 -- Frozen expected schema after ALL migrations (001 "initial", 002
 -- "sessions_open_unique", 003 "progress", 004 "study_identity", 005
 -- "s11b_config_version_history", 006 "s11c_randomisation_schedules", 007
--- "s11d_case_activation", 008 "s11e_case_lifecycle"); the
+-- "s11d_case_activation", 008 "s11e_case_lifecycle", 009
+-- "s11f_case_replacements"); the
 -- filename predates 002. The
 -- drift-check test in tests/test_db.py reads sqlite_master.sql (the exact
 -- DDL text SQLite stored) sorted by name, joins with ";\n\n", and asserts
@@ -57,6 +58,24 @@ CREATE TABLE case_lifecycle (
     CHECK (state <> 'paused' OR paused_at IS NOT NULL),
     CHECK ((state = 'completed') = (completed_at IS NOT NULL)),
     CHECK ((state = 'incomplete') = (incomplete_at IS NOT NULL AND incomplete_reason IS NOT NULL))
+);
+
+CREATE TABLE case_replacements (
+    replacement_id              TEXT PRIMARY KEY,
+    clinician_id                TEXT NOT NULL,
+    original_patient_id         TEXT NOT NULL,
+    replacement_patient_id      TEXT NOT NULL,
+    replacement_schedule_id     TEXT NOT NULL,
+    replacement_case_position   INTEGER NOT NULL,
+    planned_arm                 TEXT NOT NULL CHECK (planned_arm IN ('ai', 'no_ai')),
+    generated_at                TIMESTAMP NOT NULL,
+    activated_at                TIMESTAMP,
+    UNIQUE (clinician_id, original_patient_id),
+    UNIQUE (clinician_id, replacement_patient_id),
+    FOREIGN KEY (clinician_id, original_patient_id)
+        REFERENCES arm_assignments(clinician_id, patient_id),
+    FOREIGN KEY (replacement_schedule_id, replacement_case_position)
+        REFERENCES randomisation_schedule_items(schedule_id, case_position)
 );
 
 CREATE TABLE clinicians (
@@ -205,6 +224,28 @@ BEFORE UPDATE ON case_lifecycle
 WHEN OLD.state IN ('completed', 'incomplete')
 BEGIN
     SELECT RAISE(ABORT, 'completed and incomplete cases are terminal');
+END;
+
+CREATE TRIGGER trg_case_replacements_activate_once
+BEFORE UPDATE ON case_replacements
+WHEN OLD.activated_at IS NOT NULL
+  OR NEW.activated_at IS NULL
+  OR NEW.replacement_id IS NOT OLD.replacement_id
+  OR NEW.clinician_id IS NOT OLD.clinician_id
+  OR NEW.original_patient_id IS NOT OLD.original_patient_id
+  OR NEW.replacement_patient_id IS NOT OLD.replacement_patient_id
+  OR NEW.replacement_schedule_id IS NOT OLD.replacement_schedule_id
+  OR NEW.replacement_case_position IS NOT OLD.replacement_case_position
+  OR NEW.planned_arm IS NOT OLD.planned_arm
+  OR NEW.generated_at IS NOT OLD.generated_at
+BEGIN
+    SELECT RAISE(ABORT, 'replacement plans are immutable; activated_at is set once');
+END;
+
+CREATE TRIGGER trg_case_replacements_no_delete
+BEFORE DELETE ON case_replacements
+BEGIN
+    SELECT RAISE(ABORT, 'replacement plans are permanent');
 END;
 
 CREATE UNIQUE INDEX ux_arm_schedule_position

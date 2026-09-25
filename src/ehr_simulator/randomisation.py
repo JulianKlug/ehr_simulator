@@ -95,6 +95,7 @@ class _Purpose(StrEnum):
     STARTING_ARM = "starting_arm"
     PATIENT_RANK = "patient_rank"
     ASSIGNMENT_SEED = "assignment_seed"
+    REPLACEMENT_RANK = "replacement_rank"
 
 
 # ---------------------------------------------------------------------------
@@ -279,6 +280,25 @@ def _assign_patients(
         remaining.remove(best)
         chosen.append(best)
     return chosen
+
+
+def replacement_tie_rank(
+    derived_seed_hex: str,
+    *,
+    original_patient_id: str,
+    case_position: int,
+    patient_id: str,
+    planned_arm: str,
+) -> bytes:
+    """S11f final tie-break: HMAC keyed by the clinician schedule's key."""
+    return _hmac_digest(
+        bytes.fromhex(derived_seed_hex),
+        _Purpose.REPLACEMENT_RANK,
+        original_patient_id,
+        case_position,
+        patient_id,
+        planned_arm,
+    )
 
 
 def _assignment_seed(key: bytes, case_position: int, patient_id: str, arm: Arm) -> int:

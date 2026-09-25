@@ -74,6 +74,7 @@ from ehr_simulator.web.case_start import (
     case_patient_ids,
     case_states,
     index_state,
+    replacement_markers,
     start_next_case,
 )
 from ehr_simulator.web.gating import (
@@ -680,8 +681,10 @@ async def index(request: Request) -> HTMLResponse:
     patient_progress: dict[str, PatientProgress] | None = None
     case_state = index_state(state.db, state, clinician_id or "") if is_phase2_mode(state) else None
     lifecycle_states: dict[str, str] = {}
+    replacements: dict[str, str] = {}
     if case_state is not None:
         lifecycle_states = case_states(state.db, clinician_id or "")
+        replacements = replacement_markers(state.db, clinician_id or "")
     if study_patient_ids is not None:
         patient_ids = _case_patient_ids(request, clinician_id or "")
         patient_progress = progress_overview(
@@ -700,6 +703,7 @@ async def index(request: Request) -> HTMLResponse:
             "patient_progress": patient_progress,
             "case_state": case_state,
             "lifecycle_states": lifecycle_states,
+            "replacements": replacements,
             "logged_in_name": _logged_in_name(request),
         },
     )

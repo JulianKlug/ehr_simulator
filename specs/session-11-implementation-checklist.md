@@ -93,14 +93,14 @@ Also:
 
 # 6. Replacement cases
 
-- [ ] Support replacement case scheduling.
-- [ ] Draw replacement only from patients not previously seen by the clinician.
-- [ ] Never overwrite the original incomplete case.
-- [ ] Record replacement relationship.
-- [ ] Include both original and replacement in audit exports.
-- [ ] Preserve AI versus no AI balance as closely as possible.
-- [ ] Preserve patient level balance as closely as possible.
-- [ ] Respect study specific block constraints.
+- [x] Support replacement case scheduling.
+- [x] Draw replacement only from patients not previously seen by the clinician.
+- [x] Never overwrite the original incomplete case.
+- [x] Record replacement relationship.
+- [ ] Include both original and replacement in audit exports. (S11f persists; S11n exports.)
+- [x] Preserve AI versus no AI balance as closely as possible.
+- [x] Preserve patient level balance as closely as possible.
+- [x] Respect study specific block constraints.
 
 ---
 

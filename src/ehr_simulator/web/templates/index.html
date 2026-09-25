@@ -60,6 +60,10 @@
                     {%- if shown == "complete" %}complete ✓
                     {%- elif shown == "paused" %}paused
                     {%- elif shown == "incomplete" %}incomplete
+                    {%- set replaced = replacements.get(pid) if replacements else None -%}
+                    {%- if replaced == "pending" %} · replacement pending
+                    {%- elif replaced == "replaced" %} · replaced
+                    {%- elif replaced == "none" %} · no replacement{% endif -%}
                     {%- elif shown == "in_progress" %}in progress · t {{ prog.unlocked_t_index + 1 }}/{{ prog.timepoint_count }}
                     {%- else %}not started{% endif -%}
                 </span>

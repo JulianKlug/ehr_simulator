@@ -59,6 +59,10 @@ EventKind = Literal[
     "case.reconnected",
     "case.completed",
     "case.incomplete",
+    # S11f: an incomplete case received its replacement plan (payload:
+    # replacement_id, replacement_patient_id, replacement_case_position —
+    # never the planned arm).
+    "case.replacement_planned",
 ]
 EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 

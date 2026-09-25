@@ -314,7 +314,7 @@ def test_migration_8_backfills_realised_cases(tmp_db_path: Path, monkeypatch) ->
     conn.commit()
 
     monkeypatch.setattr(migrations_module, "MIGRATIONS", all_migrations)
-    assert apply_migrations(conn) == [8]
+    assert apply_migrations(conn) == [8, 9]
     rows = lifecycle_dao.list_for_clinician(conn, "c1")
     conn.close()
 

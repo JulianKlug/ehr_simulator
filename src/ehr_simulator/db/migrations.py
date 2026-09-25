@@ -327,6 +327,55 @@ WHERE a.arm_source = 'phase2_randomized' AND a.activated_at IS NOT NULL;
 """
 
 
+# S11f: one immutable replacement plan per incomplete original case. The
+# plan names an existing schedule item (FK) realised earlier than planned;
+# ``activated_at`` is set exactly once by Start case. Triggers refuse deletes
+# and any other update. Timestamps come from the injected clock.
+# No inline SQL comments: sqlite_master stores the DDL verbatim and the
+# schema-snapshot test compares it byte-for-byte.
+_S11F_CASE_REPLACEMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS case_replacements (
+    replacement_id              TEXT PRIMARY KEY,
+    clinician_id                TEXT NOT NULL,
+    original_patient_id         TEXT NOT NULL,
+    replacement_patient_id      TEXT NOT NULL,
+    replacement_schedule_id     TEXT NOT NULL,
+    replacement_case_position   INTEGER NOT NULL,
+    planned_arm                 TEXT NOT NULL CHECK (planned_arm IN ('ai', 'no_ai')),
+    generated_at                TIMESTAMP NOT NULL,
+    activated_at                TIMESTAMP,
+    UNIQUE (clinician_id, original_patient_id),
+    UNIQUE (clinician_id, replacement_patient_id),
+    FOREIGN KEY (clinician_id, original_patient_id)
+        REFERENCES arm_assignments(clinician_id, patient_id),
+    FOREIGN KEY (replacement_schedule_id, replacement_case_position)
+        REFERENCES randomisation_schedule_items(schedule_id, case_position)
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_case_replacements_activate_once
+BEFORE UPDATE ON case_replacements
+WHEN OLD.activated_at IS NOT NULL
+  OR NEW.activated_at IS NULL
+  OR NEW.replacement_id IS NOT OLD.replacement_id
+  OR NEW.clinician_id IS NOT OLD.clinician_id
+  OR NEW.original_patient_id IS NOT OLD.original_patient_id
+  OR NEW.replacement_patient_id IS NOT OLD.replacement_patient_id
+  OR NEW.replacement_schedule_id IS NOT OLD.replacement_schedule_id
+  OR NEW.replacement_case_position IS NOT OLD.replacement_case_position
+  OR NEW.planned_arm IS NOT OLD.planned_arm
+  OR NEW.generated_at IS NOT OLD.generated_at
+BEGIN
+    SELECT RAISE(ABORT, 'replacement plans are immutable; activated_at is set once');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_case_replacements_no_delete
+BEFORE DELETE ON case_replacements
+BEGIN
+    SELECT RAISE(ABORT, 'replacement plans are permanent');
+END;
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
@@ -347,6 +396,7 @@ MIGRATIONS: tuple[Migration, ...] = (
         post_sql=_S11D_ACTIVATION_DDL,
     ),
     Migration(version=8, name="s11e_case_lifecycle", up_sql=_S11E_CASE_LIFECYCLE_DDL),
+    Migration(version=9, name="s11f_case_replacements", up_sql=_S11F_CASE_REPLACEMENTS_DDL),
 )
 
 

@@ -47,3 +47,6 @@ case_lifecycle:
   target_completed_cases_per_clinician: 2
   max_activated_cases_per_clinician: 3
   study_target_completed_cases: null
+  # S11f: an incomplete case gets one replacement from the clinician's own
+  # unused schedule items (same arm first). Omitted/false keeps the hash.
+  replacement_cases_enabled: false

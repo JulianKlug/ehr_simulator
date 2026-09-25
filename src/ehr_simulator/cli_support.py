@@ -494,9 +494,20 @@ class AbandonError(OperatorError):
     """The case cannot be abandoned; nothing was written."""
 
 
-def abandon_case(conn: Any, *, clinician_name: str, patient_id: str, now: datetime) -> str:
-    """Mark one open case ``incomplete`` (``operator_abandoned``); return the clinician id."""
-    from ehr_simulator import case_lifecycle
+@dataclass(frozen=True)
+class AbandonReport:
+    clinician_id: str
+    replacement_patient_id: str | None  # S11f: planned replacement, if any
+    planning_error: str | None = None  # the abandon stands even when planning fails
+
+
+def abandon_case(
+    conn: Any, *, clinician_name: str, patient_id: str, now: datetime
+) -> AbandonReport:
+    """Mark one open case ``incomplete`` (``operator_abandoned``), then plan its
+    replacement in a separate commit (S11f; a planning failure keeps the abandon).
+    """
+    from ehr_simulator import case_lifecycle, replacement
     from ehr_simulator.db import clinicians
     from ehr_simulator.db.exceptions import CaseLifecycleError
 
@@ -508,7 +519,14 @@ def abandon_case(conn: Any, *, clinician_name: str, patient_id: str, now: dateti
         case_lifecycle.abandon(conn, clinician_id=clinician_id, patient_id=patient_id, now=now)
     except CaseLifecycleError as exc:
         raise AbandonError(str(exc)) from exc
-    return clinician_id
+
+    try:
+        plan = replacement.plan_replacement(
+            conn, clinician_id=clinician_id, original_patient_id=patient_id, now=now
+        )
+    except Exception as exc:  # noqa: BLE001 — Start case re-plans; report, don't fail
+        return AbandonReport(clinician_id, None, planning_error=str(exc))
+    return AbandonReport(clinician_id, plan.replacement_patient_id if plan else None)
 
 
 @dataclass(frozen=True)

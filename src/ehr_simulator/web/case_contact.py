@@ -24,7 +24,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import Any
 
-from ehr_simulator import case_lifecycle
+from ehr_simulator import case_lifecycle, replacement
 from ehr_simulator.case_lifecycle import LifecyclePolicy
 from ehr_simulator.db import arm_assignments
 from ehr_simulator.db import case_lifecycle as lifecycle_dao
@@ -103,6 +103,29 @@ def _expire_atomically(
     return lifecycle_dao.fetch(conn, row.clinician_id, row.patient_id)  # type: ignore[return-value]
 
 
+def _plan_replacement_after_expiry(
+    conn: sqlite3.Connection, app_state: Any, row: CaseLifecycle
+) -> None:
+    """S11f: plan in its own commit; a failure never undoes the timeout.
+
+    Start case re-plans missing replacements, so a lost plan heals there.
+    """
+    try:
+        replacement.plan_replacement(
+            conn,
+            clinician_id=row.clinician_id,
+            original_patient_id=row.patient_id,
+            now=now(app_state),
+        )
+    except Exception:  # noqa: BLE001
+        get_logger().exception(
+            "replacement planning failed after timeout", event_kind="case.replacement.failed"
+        )
+        return
+
+    _bump(app_state)
+
+
 def check(
     conn: sqlite3.Connection,
     app_state: Any,
@@ -119,7 +142,10 @@ def check(
     policy = policy_for(case)
     if row.is_open and case_lifecycle.evaluate(row, policy, now(app_state)) is not None:
         row = _expire_atomically(conn, app_state, row, policy)
-        return ContactResult(CaseAccess(row.state), row, expired=row.state is CaseState.INCOMPLETE)
+        expired = row.state is CaseState.INCOMPLETE
+        if expired:
+            _plan_replacement_after_expiry(conn, app_state, row)
+        return ContactResult(CaseAccess(row.state), row, expired=expired)
 
     return ContactResult(CaseAccess(row.state), row)
 
