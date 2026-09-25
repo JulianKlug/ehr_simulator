@@ -620,6 +620,19 @@ def test_index_and_jumper_list_only_activated_cases(harness: Harness) -> None:
         assert f"/patient/{other}/" not in page
 
 
+def test_index_copy_speaks_of_cases_not_patient_picking(harness: Harness) -> None:
+    with harness.boot() as client:
+        before = client.get(INDEX_URL).text
+        _start(client)
+        after = client.get(INDEX_URL).text
+
+    assert "Pick a patient" not in before
+    assert "Your cases" not in before
+    assert "Your cases" in after
+    assert "in progress · t 1/3" in after
+    assert "not started" not in after
+
+
 @pytest.mark.parametrize("htmx", [False, True], ids=["browser", "htmx"])
 def test_direct_get_to_unactivated_patient_redirects(harness: Harness, htmx: bool) -> None:
     with harness.boot() as client:

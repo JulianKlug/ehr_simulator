@@ -9,20 +9,25 @@
     {% include "_login_stripe.html" %}
     <main>
         <h1>EHR simulator</h1>
-        <p>Pick a patient + chrome variant. Use <kbd>[</kbd>/<kbd>]</kbd> to walk timepoints.</p>
-        {#- S11d Phase 2: one explicit case action; never renders the arm. -#}
+        {#- S11d Phase 2: cases are assigned by Start case, not picked from a
+            list; one explicit action, never the arm. -#}
         {% if case_state %}
         <section class="case-action" data-case-action="{{ case_state.action }}">
             {% if case_state.action == "resume" %}
-            <a class="case-resume" href="/patient/{{ case_state.open_patient_id }}/timepoint/{{ case_state.resume_t_index }}?chrome=epic">Resume case</a>
+            <p>You have a case in progress.</p>
+            <a class="advance-btn case-btn case-resume" href="/patient/{{ case_state.open_patient_id }}/timepoint/{{ case_state.resume_t_index }}?chrome=epic">Resume case</a>
             {% elif case_state.action == "start" %}
+            <p>Press <strong>Start case</strong> when you are ready. The next patient is assigned when you press it.</p>
             <form method="post" action="/case/start">
-                <button type="submit" class="case-start">Start case</button>
+                <button type="submit" class="advance-btn case-btn case-start">Start case</button>
             </form>
             {% else %}
-            <p class="case-exhausted">All cases completed</p>
+            <p class="case-exhausted">All cases completed. Thank you.</p>
             {% endif %}
         </section>
+        {% if patient_ids %}<h2>Your cases</h2>{% endif %}
+        {% else %}
+        <p>Pick a patient + chrome variant. Use <kbd>[</kbd>/<kbd>]</kbd> to walk timepoints.</p>
         {% endif %}
         <ul class="patient-list">
             {% for pid in patient_ids %}
@@ -30,6 +35,7 @@
                 its links resume at the frontier instead of t=0. -#}
             {% set prog = patient_progress.get(pid) if patient_progress else None %}
             {% set resume = prog.unlocked_t_index if prog else 0 %}
+            {#- S11d: a Phase 2 case is started at activation, even before any progress row. -#}
             <li{% if prog %} data-progress-state="{{ prog.state }}"{% endif %}>
                 <strong>{{ pid }}</strong>:
                 <a href="/patient/{{ pid }}/timepoint/{{ resume }}?chrome=epic">epic</a>
@@ -38,7 +44,7 @@
                 {% if prog %}
                 <span class="progress-marker is-{{ prog.state|replace('_', '-') }}">
                     {%- if prog.state == "complete" %}complete ✓
-                    {%- elif prog.state == "in_progress" %}in progress · t {{ prog.unlocked_t_index + 1 }}/{{ prog.timepoint_count }}
+                    {%- elif prog.state == "in_progress" or case_state %}in progress · t {{ prog.unlocked_t_index + 1 }}/{{ prog.timepoint_count }}
                     {%- else %}not started{% endif -%}
                 </span>
                 {% endif %}
