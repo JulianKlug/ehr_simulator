@@ -180,6 +180,48 @@ _S11B_PROVENANCE_COLUMNS = tuple(
 )
 
 
+# S11c: one immutable planned schedule per clinician (UNIQUE study/clinician)
+# plus its ordered items. ``schedule_id`` is the SHA256 of the canonical
+# generation context, so the same inputs always name the same schedule.
+# Planned only: no activation, completion or replacement columns.
+# No inline SQL comments: sqlite_master stores the DDL verbatim and the
+# schema-snapshot test compares it byte-for-byte.
+_S11C_RANDOMISATION_DDL = """
+CREATE TABLE IF NOT EXISTS randomisation_schedules (
+    schedule_id                 TEXT PRIMARY KEY,
+    study_id                    TEXT NOT NULL,
+    clinician_id                TEXT NOT NULL,
+    generated_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    config_version              TEXT NOT NULL,
+    config_hash                 TEXT NOT NULL,
+    algorithm_version           TEXT NOT NULL,
+    master_seed                 INTEGER NOT NULL,
+    derived_seed_hex            TEXT NOT NULL,
+    allocation_state_json       TEXT NOT NULL,
+    starting_ai_count           INTEGER NOT NULL,
+    starting_no_ai_count        INTEGER NOT NULL,
+    starting_arm                TEXT NOT NULL CHECK (starting_arm IN ('ai', 'no_ai')),
+    block_length                INTEGER NOT NULL,
+    block_sequence_json         TEXT NOT NULL,
+    UNIQUE (study_id, clinician_id)
+);
+
+CREATE TABLE IF NOT EXISTS randomisation_schedule_items (
+    schedule_id                 TEXT NOT NULL REFERENCES randomisation_schedules(schedule_id),
+    case_position               INTEGER NOT NULL,
+    patient_id                  TEXT NOT NULL,
+    planned_arm                 TEXT NOT NULL CHECK (planned_arm IN ('ai', 'no_ai')),
+    block_number                INTEGER NOT NULL,
+    position_in_block           INTEGER NOT NULL,
+    preceding_block_arm         TEXT,
+    planned_cases_since_ai      INTEGER,
+    assignment_seed             INTEGER NOT NULL,
+    PRIMARY KEY (schedule_id, case_position),
+    UNIQUE (schedule_id, patient_id)
+);
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
@@ -191,6 +233,7 @@ MIGRATIONS: tuple[Migration, ...] = (
         up_sql=_S11B_CONFIG_HISTORY,
         add_columns=_S11B_PROVENANCE_COLUMNS,
     ),
+    Migration(version=6, name="s11c_randomisation_schedules", up_sql=_S11C_RANDOMISATION_DDL),
 )
 
 

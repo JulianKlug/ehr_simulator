@@ -1,6 +1,7 @@
 -- Frozen expected schema after ALL migrations (001 "initial", 002
 -- "sessions_open_unique", 003 "progress", 004 "study_identity", 005
--- "s11b_config_version_history"); the filename predates 002. The
+-- "s11b_config_version_history", 006 "s11c_randomisation_schedules"); the
+-- filename predates 002. The
 -- drift-check test in tests/test_db.py reads sqlite_master.sql (the exact
 -- DDL text SQLite stored) sorted by name, joins with ";\n\n", and asserts
 -- it equals the contents of this file.
@@ -94,6 +95,39 @@ CREATE TABLE progress (
     config_hash       TEXT NOT NULL,
     updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, config_version TEXT,
     PRIMARY KEY (clinician_id, patient_id)
+);
+
+CREATE TABLE randomisation_schedule_items (
+    schedule_id                 TEXT NOT NULL REFERENCES randomisation_schedules(schedule_id),
+    case_position               INTEGER NOT NULL,
+    patient_id                  TEXT NOT NULL,
+    planned_arm                 TEXT NOT NULL CHECK (planned_arm IN ('ai', 'no_ai')),
+    block_number                INTEGER NOT NULL,
+    position_in_block           INTEGER NOT NULL,
+    preceding_block_arm         TEXT,
+    planned_cases_since_ai      INTEGER,
+    assignment_seed             INTEGER NOT NULL,
+    PRIMARY KEY (schedule_id, case_position),
+    UNIQUE (schedule_id, patient_id)
+);
+
+CREATE TABLE randomisation_schedules (
+    schedule_id                 TEXT PRIMARY KEY,
+    study_id                    TEXT NOT NULL,
+    clinician_id                TEXT NOT NULL,
+    generated_at                TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    config_version              TEXT NOT NULL,
+    config_hash                 TEXT NOT NULL,
+    algorithm_version           TEXT NOT NULL,
+    master_seed                 INTEGER NOT NULL,
+    derived_seed_hex            TEXT NOT NULL,
+    allocation_state_json       TEXT NOT NULL,
+    starting_ai_count           INTEGER NOT NULL,
+    starting_no_ai_count        INTEGER NOT NULL,
+    starting_arm                TEXT NOT NULL CHECK (starting_arm IN ('ai', 'no_ai')),
+    block_length                INTEGER NOT NULL,
+    block_sequence_json         TEXT NOT NULL,
+    UNIQUE (study_id, clinician_id)
 );
 
 CREATE TABLE schema_migrations ( version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP);

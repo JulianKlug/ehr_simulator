@@ -34,3 +34,15 @@ time_unit: minutes
 # Sorted ascending, no duplicates, all >= 0. The URL ordinal `t_index`
 # maps into this list (t_index=0 -> first timepoint, etc.).
 timepoints: [0, 60, 180]
+
+# Optional (S11c): Phase 2 randomisation scheduler settings. Required only
+# to generate clinician schedules; adding or editing it changes config_hash
+# (activate a new config_version). Each block_sequence entry is one block
+# of block_length cases; `start` = the clinician's starting arm, `other` =
+# the opposite arm. One cycle must hold equal start/other counts.
+# master_seed: 0 .. 2^63 - 1.
+#
+# randomisation:
+#   master_seed: 123456
+#   block_length: 2
+#   block_sequence: [start, other]

@@ -56,3 +56,20 @@ class StaleConfigurationError(ConfigurationError):
     case is refused until the server is restarted (existing pinned cases may
     keep using their historical snapshots).
     """
+
+
+class RandomisationError(Exception):
+    """S11c: a randomisation schedule cannot be generated or stored.
+
+    Raised for a study without ``randomisation`` settings, an allocation
+    state that does not cover the configured patients, or a schedule
+    requested under a configuration that is not the active one.
+    """
+
+
+class RandomisationIntegrityError(RandomisationError):
+    """A stored schedule disagrees with the one being written.
+
+    A clinician holds at most one immutable schedule; a different schedule
+    for the same clinician is refused, never overwritten.
+    """

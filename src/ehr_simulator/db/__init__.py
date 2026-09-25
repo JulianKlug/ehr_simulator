@@ -11,7 +11,8 @@ Public surface (built up across S6 commits):
 - :class:`StudyIdentityError` — S11a database/study identity mismatch.
 - :mod:`study_identity` — S11a one-database-is-one-study binding.
 - Per-table DAO modules: ``clinicians``, ``sessions``, ``arm_assignments``,
-  ``answers``, ``events``, ``ingestion_issues``, ``progress`` (S9b).
+  ``answers``, ``events``, ``ingestion_issues``, ``progress`` (S9b),
+  ``randomisation`` (S11c planned schedules).
 - ``backup`` (commit 3) + ``cookies`` (commit 5a) re-exported once they land.
 """
 
@@ -27,6 +28,7 @@ from ehr_simulator.db import (
     events,
     ingestion_issues,
     progress,
+    randomisation,
     sessions,
     study_identity,
 )
@@ -36,6 +38,8 @@ from ehr_simulator.db.exceptions import (
     ConfigurationError,
     ConfigurationProvenanceError,
     DbError,
+    RandomisationError,
+    RandomisationIntegrityError,
     StaleConfigurationError,
     StudyIdentityError,
 )
@@ -49,6 +53,8 @@ __all__ = [
     "ConfigurationProvenanceError",
     "DbError",
     "Migration",
+    "RandomisationError",
+    "RandomisationIntegrityError",
     "StaleConfigurationError",
     "StudyIdentityError",
     "answers",
@@ -62,6 +68,7 @@ __all__ = [
     "events",
     "ingestion_issues",
     "progress",
+    "randomisation",
     "resolve_db_path",
     "sessions",
     "study_identity",
