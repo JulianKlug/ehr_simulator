@@ -483,7 +483,9 @@ def _create(
         config_version=config_version,
         config_hash=config_hash,
         clinician_id=clinician_id,
-        allocation_state=state or ActivatedAllocationState.empty(study.patient_ids),
+        load_allocation_state=lambda _conn: (
+            state or ActivatedAllocationState.empty(study.patient_ids)
+        ),
     )
 
 

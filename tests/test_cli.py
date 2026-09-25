@@ -289,7 +289,7 @@ def test_cli_migrate_forward_then_idempotent(runner: CliRunner, tmp_path: Path) 
     db_path = tmp_path / "x.db"
     first = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
     assert first.exit_code == 0, first.stderr
-    assert "Applied migrations: [1, 2, 3, 4, 5, 6]" in first.stdout
+    assert "Applied migrations: [1, 2, 3, 4, 5, 6, 7]" in first.stdout
 
     second = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
     assert second.exit_code == 0, second.stderr
@@ -558,7 +558,7 @@ def test_cli_reset_progress_refuses_stale_schema(
         ],
     )
     assert result.exit_code == 1
-    assert "pending migrations [2, 3, 4, 5, 6]" in result.stderr
+    assert "pending migrations [2, 3, 4, 5, 6, 7]" in result.stderr
     conn = connect(db_path)
     assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
     conn.close()

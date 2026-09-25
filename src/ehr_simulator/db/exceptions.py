@@ -73,3 +73,13 @@ class RandomisationIntegrityError(RandomisationError):
     A clinician holds at most one immutable schedule; a different schedule
     for the same clinician is refused, never overwritten.
     """
+
+
+class CaseActivationError(RandomisationIntegrityError):
+    """S11d: a planned item cannot become a realised assignment.
+
+    Raised when the clinician already holds the patient, the item belongs to
+    another clinician or is not the stored one, its position was activated
+    with different data, or the configuration provenance is unknown.
+    Nothing is written when this is raised.
+    """

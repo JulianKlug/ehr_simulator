@@ -48,6 +48,9 @@ EventKind = Literal[
     # divergence figure.
     "timepoint.enter",
     "timepoint.exit",
+    # S11d: Start case realised one planned schedule item (payload:
+    # schedule_id, case_position, arm — never the clinician name).
+    "case.activated",
 ]
 EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 

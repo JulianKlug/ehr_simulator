@@ -29,6 +29,8 @@ class Migration(NamedTuple):
     # (table, column, declaration) added only when missing: SQLite has no
     # ``ADD COLUMN IF NOT EXISTS``, so a raw ALTER would wedge the retry.
     add_columns: tuple[tuple[str, str, str], ...] = ()
+    # DDL that references ``add_columns`` (indexes, triggers): runs after them.
+    post_sql: str = ""
 
 
 _INITIAL_DDL = """
@@ -222,6 +224,46 @@ CREATE TABLE IF NOT EXISTS randomisation_schedule_items (
 """
 
 
+# S11d: realised Phase 2 activation provenance on ``arm_assignments``.
+# ``activated_at`` (non-NULL only for an explicit Start case) is distinct from
+# ``assigned_at`` (defaulted on every row, phase1_stub included). SQLite's
+# ALTER cannot add a CHECK, so triggers enforce completeness + immutability.
+_S11D_ACTIVATION_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("arm_assignments", "schedule_id", "TEXT"),
+    ("arm_assignments", "case_position", "INTEGER"),
+    ("arm_assignments", "activated_at", "TIMESTAMP"),
+)
+
+_S11D_ACTIVATION_DDL = """
+CREATE UNIQUE INDEX IF NOT EXISTS ux_arm_schedule_position
+    ON arm_assignments (schedule_id, case_position) WHERE schedule_id IS NOT NULL;
+
+CREATE TRIGGER IF NOT EXISTS trg_arm_phase2_complete
+BEFORE INSERT ON arm_assignments
+WHEN NEW.arm_source = 'phase2_randomized'
+ AND (NEW.schedule_id IS NULL OR NEW.case_position IS NULL
+      OR NEW.activated_at IS NULL OR NEW.seed IS NULL
+      OR NEW.config_version IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'phase2_randomized assignment requires activation provenance');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_arm_phase2_immutable
+BEFORE UPDATE ON arm_assignments
+WHEN OLD.arm_source = 'phase2_randomized'
+BEGIN
+    SELECT RAISE(ABORT, 'phase2_randomized assignments are immutable');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_arm_phase2_no_delete
+BEFORE DELETE ON arm_assignments
+WHEN OLD.arm_source = 'phase2_randomized'
+BEGIN
+    SELECT RAISE(ABORT, 'phase2_randomized assignments are immutable');
+END;
+"""
+
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
@@ -234,6 +276,13 @@ MIGRATIONS: tuple[Migration, ...] = (
         add_columns=_S11B_PROVENANCE_COLUMNS,
     ),
     Migration(version=6, name="s11c_randomisation_schedules", up_sql=_S11C_RANDOMISATION_DDL),
+    Migration(
+        version=7,
+        name="s11d_case_activation",
+        up_sql="",
+        add_columns=_S11D_ACTIVATION_COLUMNS,
+        post_sql=_S11D_ACTIVATION_DDL,
+    ),
 )
 
 
@@ -273,6 +322,8 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
         conn.executescript(m.up_sql)
         for table, column, declaration in m.add_columns:
             _add_column_if_missing(conn, table, column, declaration)
+        if m.post_sql:
+            conn.executescript(m.post_sql)
         conn.execute(
             "INSERT INTO schema_migrations (version, name) VALUES (?, ?)",
             (m.version, m.name),

@@ -71,6 +71,7 @@ def start_or_resume(
     arm: str,
     config_hash: str,
     config_version: str | None = None,
+    commit: bool = True,
 ) -> str:
     """Return the open ``session_id`` for ``(clinician_id, patient_id)``,
     creating a new row if no open session exists.
@@ -78,6 +79,9 @@ def start_or_resume(
     S11b: the new row is stamped with the case's provenance pair
     (``config_version``, ``config_hash``); an existing open session is
     returned as-is (its provenance was fixed when it opened).
+
+    S11d: ``commit=False`` leaves the INSERT in the caller's transaction
+    (Start case commits it together with the activation).
     """
     existing = find_open(conn, clinician_id, patient_id)
     if existing is not None:
@@ -91,7 +95,8 @@ def start_or_resume(
         "VALUES (?, ?, ?, ?, ?, ?)",
         (session_id, clinician_id, patient_id, arm, config_hash, config_version),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     return session_id
 
 

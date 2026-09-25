@@ -34,6 +34,7 @@ from ehr_simulator.db import (
 )
 from ehr_simulator.db.connection import AccessMode, connect, resolve_db_path
 from ehr_simulator.db.exceptions import (
+    CaseActivationError,
     ConfigurationActivationError,
     ConfigurationError,
     ConfigurationProvenanceError,
@@ -48,6 +49,7 @@ from ehr_simulator.db.migrations import MIGRATIONS, Migration, apply_migrations
 __all__ = [
     "MIGRATIONS",
     "AccessMode",
+    "CaseActivationError",
     "ConfigurationActivationError",
     "ConfigurationError",
     "ConfigurationProvenanceError",

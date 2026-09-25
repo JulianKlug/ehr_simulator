@@ -49,19 +49,19 @@ If implementation exceeds the normal one to two day session budget, split work r
 
 # 4. Explicit case activation
 
-- [ ] Introduce an explicit **Start case** action.
-- [ ] Do not activate randomisation on GET.
-- [ ] Do not activate randomisation from patient index navigation.
-- [ ] Conceal AI versus no AI assignment before case start.
-- [ ] Commit assignment atomically when Start case succeeds.
-- [ ] Record activation timestamp.
-- [ ] Record active configuration version.
-- [ ] Record case position.
-- [ ] Record allocated patient.
-- [ ] Record allocated arm.
-- [ ] Ensure activated assignment is immutable.
-- [ ] Treat reopening as resume rather than new activation.
-- [ ] Add regression test proving an accidental GET does not consume an allocation.
+- [x] Introduce an explicit **Start case** action.
+- [x] Do not activate randomisation on GET.
+- [x] Do not activate randomisation from patient index navigation.
+- [x] Conceal AI versus no AI assignment before case start.
+- [x] Commit assignment atomically when Start case succeeds.
+- [x] Record activation timestamp.
+- [x] Record active configuration version.
+- [x] Record case position.
+- [x] Record allocated patient.
+- [x] Record allocated arm.
+- [x] Ensure activated assignment is immutable.
+- [x] Treat reopening as resume rather than new activation.
+- [x] Add regression test proving an accidental GET does not consume an allocation.
 
 ---
 
@@ -159,9 +159,9 @@ For every generated schedule retain:
 
 For every realised assignment retain:
 
-- [ ] activated yes or no
-- [ ] activation timestamp
-- [ ] configuration version at activation
+- [x] activated yes or no
+- [x] activation timestamp
+- [x] configuration version at activation
 - [ ] completion state
 - [ ] replacement relationship if applicable
 

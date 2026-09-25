@@ -1,6 +1,7 @@
 -- Frozen expected schema after ALL migrations (001 "initial", 002
 -- "sessions_open_unique", 003 "progress", 004 "study_identity", 005
--- "s11b_config_version_history", 006 "s11c_randomisation_schedules"); the
+-- "s11b_config_version_history", 006 "s11c_randomisation_schedules", 007
+-- "s11d_case_activation"); the
 -- filename predates 002. The
 -- drift-check test in tests/test_db.py reads sqlite_master.sql (the exact
 -- DDL text SQLite stored) sorted by name, joins with ";\n\n", and asserts
@@ -33,7 +34,7 @@ CREATE TABLE arm_assignments (
     arm_source    TEXT NOT NULL,
     seed          INTEGER,
     assigned_at   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    config_hash   TEXT NOT NULL, config_version TEXT,
+    config_hash   TEXT NOT NULL, config_version TEXT, schedule_id TEXT, case_position INTEGER, activated_at TIMESTAMP,
     PRIMARY KEY (clinician_id, patient_id)
 );
 
@@ -147,6 +148,33 @@ CREATE TABLE study_identity (
     study_id    TEXT NOT NULL UNIQUE,
     created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TRIGGER trg_arm_phase2_complete
+BEFORE INSERT ON arm_assignments
+WHEN NEW.arm_source = 'phase2_randomized'
+ AND (NEW.schedule_id IS NULL OR NEW.case_position IS NULL
+      OR NEW.activated_at IS NULL OR NEW.seed IS NULL
+      OR NEW.config_version IS NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'phase2_randomized assignment requires activation provenance');
+END;
+
+CREATE TRIGGER trg_arm_phase2_immutable
+BEFORE UPDATE ON arm_assignments
+WHEN OLD.arm_source = 'phase2_randomized'
+BEGIN
+    SELECT RAISE(ABORT, 'phase2_randomized assignments are immutable');
+END;
+
+CREATE TRIGGER trg_arm_phase2_no_delete
+BEFORE DELETE ON arm_assignments
+WHEN OLD.arm_source = 'phase2_randomized'
+BEGIN
+    SELECT RAISE(ABORT, 'phase2_randomized assignments are immutable');
+END;
+
+CREATE UNIQUE INDEX ux_arm_schedule_position
+    ON arm_assignments (schedule_id, case_position) WHERE schedule_id IS NOT NULL;
 
 CREATE UNIQUE INDEX ux_sessions_open
     ON sessions (clinician_id, patient_id) WHERE ended_at IS NULL;
