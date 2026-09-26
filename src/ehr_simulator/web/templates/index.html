@@ -56,11 +56,22 @@
                 <a href="/patient/{{ pid }}/timepoint/{{ resume }}?chrome=dense">dense</a>
                 {% endif %}
                 {% if prog %}
-                <span class="progress-marker is-{{ shown|replace('_', '-') }}">
+                {#- Hover text for lifecycle markers; never names the arm. -#}
+                {% set replaced = replacements.get(pid) if replacements else None %}
+                {% set hints = {
+                    "paused": "You paused this case. Resume it before the pause time runs out, or it closes as incomplete.",
+                    "incomplete": "This case was closed before it was finished (timed out or stopped by the study team). It cannot be reopened.",
+                } %}
+                {% set replacement_hints = {
+                    "pending": " A new case will be given to you instead when you press Start case.",
+                    "replaced": " You have already been given a new case instead.",
+                    "none": " No other case is available to take its place.",
+                } %}
+                {% set hint = hints.get(shown, "") ~ (replacement_hints.get(replaced, "") if shown == "incomplete" else "") %}
+                <span class="progress-marker is-{{ shown|replace('_', '-') }}"{% if hint %} title="{{ hint }}"{% endif %}>
                     {%- if shown == "complete" %}complete ✓
                     {%- elif shown == "paused" %}paused
                     {%- elif shown == "incomplete" %}incomplete
-                    {%- set replaced = replacements.get(pid) if replacements else None -%}
                     {%- if replaced == "pending" %} · replacement pending
                     {%- elif replaced == "replaced" %} · replaced
                     {%- elif replaced == "none" %} · no replacement{% endif -%}

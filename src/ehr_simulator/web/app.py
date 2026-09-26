@@ -62,7 +62,7 @@ from ehr_simulator.logging import (
     setup_logging,
 )
 from ehr_simulator.web.case_contact import Clock, system_clock
-from ehr_simulator.web.middleware import CSPMiddleware
+from ehr_simulator.web.middleware import CSPMiddleware, NoStoreMiddleware
 from ehr_simulator.web.panels import DatasetLike
 
 _THIS_DIR = Path(__file__).resolve().parent
@@ -233,6 +233,7 @@ def create_app(
     app.add_exception_handler(CaseLifecycleError, lifecycle_error_response)
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(CSPMiddleware)
+    app.add_middleware(NoStoreMiddleware)
     return app
 
 

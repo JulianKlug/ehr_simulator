@@ -706,6 +706,11 @@ body.chrome-epic [role="tabpanel"][hidden] {
     border-style: dashed;
 }
 
+/* Markers with an explanation: signal that hovering helps. */
+.progress-marker[title] {
+    cursor: help;
+}
+
 .case-pause {
     margin: 0 0 0.5rem 0;
 }

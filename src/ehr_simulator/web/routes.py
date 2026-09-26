@@ -209,6 +209,26 @@ def _conflict(message: str) -> HTMLResponse:
     return HTMLResponse(content=_error_flash(message), status_code=status.HTTP_409_CONFLICT)
 
 
+def _form_refusal(request: Request, response: Response) -> Response:
+    """Start / Pause / Resume are plain forms: a refusal must not strand the
+    browser on a bare flash, so non-htmx callers get a page linking back."""
+    if _is_htmx(request):
+        return response
+
+    page = request.app.state.templates.TemplateResponse(
+        request,
+        "case_refused.html",
+        {"flash_html": bytes(response.body).decode(), "logged_in_name": _logged_in_name(request)},
+        status_code=response.status_code,
+    )
+
+    # Keep the refusal's HX-Redirect so the contract stays the same for any caller.
+    redirect = response.headers.get("HX-Redirect")
+    if redirect is not None:
+        page.headers["HX-Redirect"] = redirect
+    return page
+
+
 def _check_contact(
     request: Request, clinician_id: str, patient_id: str, case: CaseConfiguration | None
 ) -> ContactResult:
@@ -726,14 +746,20 @@ async def case_start(request: Request, chrome: Chrome = "epic") -> Response:
         started = start_next_case(state.db, state, clinician_id=clinician_id or "")
     except (CaseStartRefusedError, StaleConfigurationError, ScheduleIncompatibleError) as exc:
         get_logger().warning("start case refused", event_kind="case.start.refused", error=str(exc))
-        return HTMLResponse(content=_error_flash(str(exc)), status_code=status.HTTP_409_CONFLICT)
+        return _form_refusal(
+            request,
+            HTMLResponse(content=_error_flash(str(exc)), status_code=status.HTTP_409_CONFLICT),
+        )
     except RandomisationIntegrityError as exc:
         get_logger().error(
             "start case integrity failure", event_kind="case.start.integrity", error=str(exc)
         )
-        return HTMLResponse(
-            content=_error_flash(_CASE_START_INTEGRITY_MSG),
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        return _form_refusal(
+            request,
+            HTMLResponse(
+                content=_error_flash(_CASE_START_INTEGRITY_MSG),
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            ),
         )
 
     update_request_context(patient_id=started.patient_id)
@@ -808,16 +834,16 @@ async def case_pause(request: Request, patient_id: str, chrome: Chrome = "epic")
 
     contact, case, refusal = _lifecycle_request(request, clinician_id or "", patient_id)
     if refusal is not None:
-        return refusal
+        return _form_refusal(request, refusal)
     if not case_contact.policy_for(case).pause_enabled:
-        return _conflict(_PAUSE_DISABLED_MSG)
+        return _form_refusal(request, _conflict(_PAUSE_DISABLED_MSG))
     if contact.access is not CaseAccess.ACTIVE:  # type: ignore[union-attr]
-        return _conflict(_CASE_NOT_ACTIVE_MSG)
+        return _form_refusal(request, _conflict(_CASE_NOT_ACTIVE_MSG))
 
     try:
         case_contact.pause_case(request.app.state.db, request.app.state, contact)  # type: ignore[arg-type]
     except CaseLifecycleError as exc:
-        return _conflict(str(exc))
+        return _form_refusal(request, _conflict(str(exc)))
 
     return _htmx_aware_redirect(
         request, _frontier_url(request, clinician_id or "", patient_id, case, chrome)
@@ -834,14 +860,14 @@ async def case_resume(request: Request, patient_id: str, chrome: Chrome = "epic"
 
     contact, case, refusal = _lifecycle_request(request, clinician_id or "", patient_id)
     if refusal is not None:
-        return refusal
+        return _form_refusal(request, refusal)
     if contact.access is not CaseAccess.PAUSED:  # type: ignore[union-attr]
-        return _conflict(_CASE_NOT_PAUSED_MSG)
+        return _form_refusal(request, _conflict(_CASE_NOT_PAUSED_MSG))
 
     try:
         case_contact.resume_case(request.app.state.db, request.app.state, contact, case)  # type: ignore[arg-type]
     except CaseLifecycleError as exc:
-        return _conflict(str(exc))
+        return _form_refusal(request, _conflict(str(exc)))
 
     return _htmx_aware_redirect(
         request, _frontier_url(request, clinician_id or "", patient_id, case, chrome)
