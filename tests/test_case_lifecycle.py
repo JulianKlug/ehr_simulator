@@ -286,12 +286,19 @@ def test_validate_config_warns_on_randomisation_without_lifecycle(
 
 
 def _blocks_yaml(
-    tmp_path: Path, study_fixture_dir: Path, *, block_length: int, sequence: list[str], target: int
+    tmp_path: Path,
+    study_fixture_dir: Path,
+    *,
+    block_length: int,
+    sequence: list[str],
+    target: int,
+    max_activated: int | None = None,
 ) -> Path:
     data = yaml.safe_load((study_fixture_dir / "study_lifecycle.yaml").read_text())
     data["randomisation"].update(block_length=block_length, block_sequence=sequence)
     data["case_lifecycle"].update(
-        target_completed_cases_per_clinician=target, max_activated_cases_per_clinician=target
+        target_completed_cases_per_clinician=target,
+        max_activated_cases_per_clinician=max_activated or target,
     )
     path = tmp_path / "study_blocks.yaml"
     path.write_text(yaml.safe_dump(data))
@@ -313,6 +320,22 @@ def test_target_that_cuts_a_block_unbalanced_is_refused(
         tmp_path, study_fixture_dir, block_length=block_length, sequence=sequence, target=target
     )
     with pytest.raises(ConfigError, match="target_completed_cases_per_clinician"):
+        load_study_config(path)
+
+
+def test_maximum_that_cuts_a_block_unbalanced_is_refused(
+    tmp_path: Path, study_fixture_dir: Path
+) -> None:
+    # Target 4 is 2:2, but a clinician stopped at 6 activations holds 4:2.
+    path = _blocks_yaml(
+        tmp_path,
+        study_fixture_dir,
+        block_length=2,
+        sequence=["start", "other"],
+        target=4,
+        max_activated=6,
+    )
+    with pytest.raises(ConfigError, match="max_activated_cases_per_clinician 6"):
         load_study_config(path)
 
 

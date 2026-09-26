@@ -18,32 +18,32 @@ If implementation exceeds the normal one to two day session budget, split work r
 
 # 2. Study identity
 
-- [ ] Add `study_id` to study configuration.
-- [ ] Validate the study ID format.
-- [ ] Associate every study database with one study ID.
-- [ ] Use the study ID in the default database filename.
-- [ ] Persist study identity inside the database.
-- [ ] Refuse startup when configured study ID conflicts with database study ID.
-- [ ] Include `study_id` in Phase 2 exports.
-- [ ] Add regression tests preventing cross study database reuse.
+- [x] Add `study_id` to study configuration.
+- [x] Validate the study ID format.
+- [x] Associate every study database with one study ID.
+- [x] Use the study ID in the default database filename.
+- [x] Persist study identity inside the database.
+- [x] Refuse startup when configured study ID conflicts with database study ID.
+- [ ] Include `study_id` in Phase 2 exports. (S11n)
+- [x] Add regression tests preventing cross study database reuse.
 
 ---
 
 # 3. Configuration version history
 
-- [ ] Add human readable `config_version`.
-- [ ] Continue generating immutable `config_hash`.
-- [ ] Add persistent configuration history.
-- [ ] Store activation timestamp.
-- [ ] Store change description.
-- [ ] Support optional change reason.
-- [ ] Preserve historical configuration versions.
-- [ ] Associate every newly activated case with its active configuration version.
-- [ ] Do not change the configuration identity of an already activated case.
-- [ ] Permit new configuration versions within the same `study_id`.
-- [ ] Update export behaviour so mixed valid configuration versions are allowed.
-- [ ] Continue refusing missing or inconsistent configuration identities.
-- [ ] Produce a summary of cases and observations by configuration version.
+- [x] Add human readable `config_version`.
+- [x] Continue generating immutable `config_hash`.
+- [x] Add persistent configuration history.
+- [x] Store activation timestamp.
+- [x] Store change description.
+- [x] Support optional change reason.
+- [x] Preserve historical configuration versions.
+- [x] Associate every newly activated case with its active configuration version.
+- [x] Do not change the configuration identity of an already activated case.
+- [x] Permit new configuration versions within the same `study_id`.
+- [ ] Update export behaviour so mixed valid configuration versions are allowed. (S11n)
+- [x] Continue refusing missing or inconsistent configuration identities.
+- [ ] Produce a summary of cases and observations by configuration version. (S11n)
 
 ---
 
@@ -120,19 +120,19 @@ Replace the original independent pairwise arm assignment design.
 
 The scheduler must support:
 
-- [ ] study master randomisation seed
-- [ ] versioned randomisation algorithm
-- [ ] random patient order per clinician
-- [ ] clinician level AI versus no AI balance
-- [ ] patient level AI versus no AI balance
-- [ ] adaptive balancing based on activated assignments
-- [ ] study configurable block length
-- [ ] study configurable block sequence
-- [ ] balanced starting arm
-- [ ] case position metadata
-- [ ] block position metadata
-- [ ] preceding arm metadata
-- [ ] cases since previous AI exposure metadata where applicable
+- [x] study master randomisation seed
+- [x] versioned randomisation algorithm
+- [x] random patient order per clinician (HMAC order among balance ties; S11c)
+- [x] clinician level AI versus no AI balance
+- [x] patient level AI versus no AI balance
+- [x] adaptive balancing based on activated assignments
+- [x] study configurable block length
+- [x] study configurable block sequence
+- [x] balanced starting arm
+- [x] case position metadata
+- [x] block position metadata
+- [x] preceding arm metadata
+- [x] cases since previous AI exposure metadata where applicable
 
 Existing activated assignments must never be rewritten.
 
@@ -144,26 +144,26 @@ Schedules already generated for other clinicians must not be rewritten merely be
 
 For every generated schedule retain:
 
-- [ ] `study_id`
-- [ ] clinician ID
-- [ ] schedule generation timestamp
-- [ ] master seed or derived seed information
-- [ ] algorithm version
-- [ ] allocation state used during generation
-- [ ] configuration version used during generation
-- [ ] planned patient order
-- [ ] planned arm
-- [ ] starting arm
-- [ ] block information where applicable
-- [ ] overall case position
+- [x] `study_id`
+- [x] clinician ID
+- [x] schedule generation timestamp
+- [x] master seed or derived seed information
+- [x] algorithm version
+- [x] allocation state used during generation
+- [x] configuration version used during generation
+- [x] planned patient order
+- [x] planned arm
+- [x] starting arm
+- [x] block information where applicable
+- [x] overall case position
 
 For every realised assignment retain:
 
 - [x] activated yes or no
 - [x] activation timestamp
 - [x] configuration version at activation
-- [ ] completion state
-- [ ] replacement relationship if applicable
+- [x] completion state
+- [x] replacement relationship if applicable
 
 ---
 

@@ -100,24 +100,31 @@ def load_study_config(path: Path) -> StudyConfig:
 
 
 def _check_balance_at_target(study: StudyConfig, path: Path) -> None:
-    """Phase 2 gate §7.1: a clinician stopping at the target gets 50:50 arms.
+    """Phase 2 gate §7.1: a clinician stopping at either limit gets 50:50 arms.
 
+    The target covers completed cases, the maximum the activated (ITT) set.
     Checked on YAML only, never on stored snapshots, so activated history
-    stays readable. An odd target allows a one-case difference.
+    stays readable. An odd limit allows a one-case difference.
     """
     if study.randomisation is None or study.case_lifecycle is None:
         return
 
-    target = study.case_lifecycle.target_completed_cases_per_clinician
-    starts, others = study.randomisation.planned_split(target)
-    if abs(starts - others) <= target % 2:
-        return
+    limits = {
+        "target_completed_cases_per_clinician": (
+            study.case_lifecycle.target_completed_cases_per_clinician
+        ),
+        "max_activated_cases_per_clinician": study.case_lifecycle.max_activated_cases_per_clinician,
+    }
+    for field, limit in limits.items():
+        starts, others = study.randomisation.planned_split(limit)
+        if abs(starts - others) <= limit % 2:
+            continue
 
-    raise ConfigError(
-        f"{path.name}: target_completed_cases_per_clinician {target} stops mid-block at "
-        f"{starts}:{others} arms (block_length {study.randomisation.block_length}); "
-        "choose a target or block design that reaches 50:50"
-    )
+        raise ConfigError(
+            f"{path.name}: {field} {limit} stops mid-block at {starts}:{others} arms "
+            f"(block_length {study.randomisation.block_length}); "
+            "choose a limit or block design that reaches 50:50"
+        )
 
 
 def load_questions(path: Path) -> Questions:
