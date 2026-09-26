@@ -48,6 +48,21 @@ EventKind = Literal[
     # divergence figure.
     "timepoint.enter",
     "timepoint.exit",
+    # S11d: Start case realised one planned schedule item (payload:
+    # schedule_id, case_position, arm — never the clinician name).
+    "case.activated",
+    # S11e: lifecycle transitions. ``case.reconnected`` records a contact
+    # after a heartbeat gap still inside the grace period; ``case.incomplete``
+    # carries the structured reason (never the clinician name).
+    "case.paused",
+    "case.resumed",
+    "case.reconnected",
+    "case.completed",
+    "case.incomplete",
+    # S11f: an incomplete case received its replacement plan (payload:
+    # replacement_id, replacement_patient_id, replacement_case_position —
+    # never the planned arm).
+    "case.replacement_planned",
 ]
 EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 

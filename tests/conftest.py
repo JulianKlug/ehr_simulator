@@ -324,3 +324,15 @@ def seed_progress(
             config_hash=config_hash,
             config_version=config_version,
         )
+        # S11e: the final advance completes a tracked Phase 2 case too.
+        from ehr_simulator.db import case_lifecycle
+        from ehr_simulator.web.case_contact import now
+
+        lifecycle = case_lifecycle.fetch(db, clinician_id, patient_id)
+        if lifecycle is not None and lifecycle.state is case_lifecycle.CaseState.ACTIVE:
+            case_lifecycle.complete(
+                db,
+                clinician_id=clinician_id,
+                patient_id=patient_id,
+                now=now(client.app.state),  # type: ignore[attr-defined]
+            )

@@ -56,3 +56,39 @@ class StaleConfigurationError(ConfigurationError):
     case is refused until the server is restarted (existing pinned cases may
     keep using their historical snapshots).
     """
+
+
+class RandomisationError(Exception):
+    """S11c: a randomisation schedule cannot be generated or stored.
+
+    Raised for a study without ``randomisation`` settings, an allocation
+    state that does not cover the configured patients, or a schedule
+    requested under a configuration that is not the active one.
+    """
+
+
+class RandomisationIntegrityError(RandomisationError):
+    """A stored schedule disagrees with the one being written.
+
+    A clinician holds at most one immutable schedule; a different schedule
+    for the same clinician is refused, never overwritten.
+    """
+
+
+class CaseActivationError(RandomisationIntegrityError):
+    """S11d: a planned item cannot become a realised assignment.
+
+    Raised when the clinician already holds the patient, the item belongs to
+    another clinician or is not the stored one, its position was activated
+    with different data, or the configuration provenance is unknown.
+    Nothing is written when this is raised.
+    """
+
+
+class CaseLifecycleError(Exception):
+    """S11e: a lifecycle transition does not fit the case's current state.
+
+    Raised when the stored state is not the transition's expected source
+    (terminal cases included) or a lifecycle row is missing or duplicated.
+    Nothing is written when this is raised.
+    """

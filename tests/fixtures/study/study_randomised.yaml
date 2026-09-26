@@ -1,0 +1,10 @@
+schema_version: "2"
+study_id: fixture_randomised
+dataset: synthetic
+patient_ids: [synth_001, synth_002, synth_003]
+time_unit: minutes
+timepoints: [0, 60, 180]
+randomisation:
+  master_seed: 123456
+  block_length: 1
+  block_sequence: [start, other]

@@ -688,3 +688,29 @@ body.chrome-epic [role="tabpanel"][hidden] {
     border-color: var(--color-warn);
     color: var(--color-warn);
 }
+
+/* S11d: index case action (Start / Resume) — the advance button look, sized to its label. */
+.case-action {
+    margin: 1rem 0 1.5rem 0;
+}
+
+.case-btn {
+    display: inline-block;
+    width: auto;
+    text-decoration: none;
+}
+
+/* S11e: lifecycle markers and the optional voluntary pause. */
+.progress-marker.is-paused,
+.progress-marker.is-incomplete {
+    border-style: dashed;
+}
+
+/* Markers with an explanation: signal that hovering helps. */
+.progress-marker[title] {
+    cursor: help;
+}
+
+.case-pause {
+    margin: 0 0 0.5rem 0;
+}

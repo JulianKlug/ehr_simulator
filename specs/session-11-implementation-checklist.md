@@ -18,50 +18,50 @@ If implementation exceeds the normal one to two day session budget, split work r
 
 # 2. Study identity
 
-- [ ] Add `study_id` to study configuration.
-- [ ] Validate the study ID format.
-- [ ] Associate every study database with one study ID.
-- [ ] Use the study ID in the default database filename.
-- [ ] Persist study identity inside the database.
-- [ ] Refuse startup when configured study ID conflicts with database study ID.
-- [ ] Include `study_id` in Phase 2 exports.
-- [ ] Add regression tests preventing cross study database reuse.
+- [x] Add `study_id` to study configuration.
+- [x] Validate the study ID format.
+- [x] Associate every study database with one study ID.
+- [x] Use the study ID in the default database filename.
+- [x] Persist study identity inside the database.
+- [x] Refuse startup when configured study ID conflicts with database study ID.
+- [ ] Include `study_id` in Phase 2 exports. (S11n)
+- [x] Add regression tests preventing cross study database reuse.
 
 ---
 
 # 3. Configuration version history
 
-- [ ] Add human readable `config_version`.
-- [ ] Continue generating immutable `config_hash`.
-- [ ] Add persistent configuration history.
-- [ ] Store activation timestamp.
-- [ ] Store change description.
-- [ ] Support optional change reason.
-- [ ] Preserve historical configuration versions.
-- [ ] Associate every newly activated case with its active configuration version.
-- [ ] Do not change the configuration identity of an already activated case.
-- [ ] Permit new configuration versions within the same `study_id`.
-- [ ] Update export behaviour so mixed valid configuration versions are allowed.
-- [ ] Continue refusing missing or inconsistent configuration identities.
-- [ ] Produce a summary of cases and observations by configuration version.
+- [x] Add human readable `config_version`.
+- [x] Continue generating immutable `config_hash`.
+- [x] Add persistent configuration history.
+- [x] Store activation timestamp.
+- [x] Store change description.
+- [x] Support optional change reason.
+- [x] Preserve historical configuration versions.
+- [x] Associate every newly activated case with its active configuration version.
+- [x] Do not change the configuration identity of an already activated case.
+- [x] Permit new configuration versions within the same `study_id`.
+- [ ] Update export behaviour so mixed valid configuration versions are allowed. (S11n)
+- [x] Continue refusing missing or inconsistent configuration identities.
+- [ ] Produce a summary of cases and observations by configuration version. (S11n)
 
 ---
 
 # 4. Explicit case activation
 
-- [ ] Introduce an explicit **Start case** action.
-- [ ] Do not activate randomisation on GET.
-- [ ] Do not activate randomisation from patient index navigation.
-- [ ] Conceal AI versus no AI assignment before case start.
-- [ ] Commit assignment atomically when Start case succeeds.
-- [ ] Record activation timestamp.
-- [ ] Record active configuration version.
-- [ ] Record case position.
-- [ ] Record allocated patient.
-- [ ] Record allocated arm.
-- [ ] Ensure activated assignment is immutable.
-- [ ] Treat reopening as resume rather than new activation.
-- [ ] Add regression test proving an accidental GET does not consume an allocation.
+- [x] Introduce an explicit **Start case** action.
+- [x] Do not activate randomisation on GET.
+- [x] Do not activate randomisation from patient index navigation.
+- [x] Conceal AI versus no AI assignment before case start.
+- [x] Commit assignment atomically when Start case succeeds.
+- [x] Record activation timestamp.
+- [x] Record active configuration version.
+- [x] Record case position.
+- [x] Record allocated patient.
+- [x] Record allocated arm.
+- [x] Ensure activated assignment is immutable.
+- [x] Treat reopening as resume rather than new activation.
+- [x] Add regression test proving an accidental GET does not consume an allocation.
 
 ---
 
@@ -69,48 +69,48 @@ If implementation exceeds the normal one to two day session budget, split work r
 
 Support explicit states sufficient to distinguish:
 
-- [ ] planned
-- [ ] activated
-- [ ] active
-- [ ] paused
-- [ ] resumed
-- [ ] completed
-- [ ] incomplete or abandoned
+- [x] planned
+- [x] activated
+- [x] active
+- [x] paused
+- [x] resumed
+- [x] completed
+- [x] incomplete or abandoned
 
 Also:
 
-- [ ] Record pause events.
-- [ ] Record resume events.
-- [ ] Record interruption timeout.
-- [ ] Support study configurable reconnection grace period.
-- [ ] Support study configurable voluntary pause behaviour.
-- [ ] Ensure interruption beyond the allowed interval leaves the original case activated and incomplete.
-- [ ] Never return an activated assignment to the allocation pool.
-- [ ] Preserve incomplete cases in exports.
-- [ ] Preserve structured incomplete reason where known.
+- [x] Record pause events.
+- [x] Record resume events.
+- [x] Record interruption timeout.
+- [x] Support study configurable reconnection grace period.
+- [x] Support study configurable voluntary pause behaviour.
+- [x] Ensure interruption beyond the allowed interval leaves the original case activated and incomplete.
+- [x] Never return an activated assignment to the allocation pool.
+- [x] Preserve incomplete cases in exports.
+- [x] Preserve structured incomplete reason where known.
 
 ---
 
 # 6. Replacement cases
 
-- [ ] Support replacement case scheduling.
-- [ ] Draw replacement only from patients not previously seen by the clinician.
-- [ ] Never overwrite the original incomplete case.
-- [ ] Record replacement relationship.
-- [ ] Include both original and replacement in audit exports.
-- [ ] Preserve AI versus no AI balance as closely as possible.
-- [ ] Preserve patient level balance as closely as possible.
-- [ ] Respect study specific block constraints.
+- [x] Support replacement case scheduling.
+- [x] Draw replacement only from patients not previously seen by the clinician.
+- [x] Never overwrite the original incomplete case.
+- [x] Record replacement relationship.
+- [ ] Include both original and replacement in audit exports. (S11f persists; S11n exports.)
+- [x] Preserve AI versus no AI balance as closely as possible.
+- [x] Preserve patient level balance as closely as possible.
+- [x] Respect study specific block constraints.
 
 ---
 
 # 7. Clinician level stopping
 
-- [ ] Support configurable target completed cases per clinician.
-- [ ] Support configurable maximum activated cases per clinician.
-- [ ] Stop assigning new cases when the relevant clinician level rule is reached.
-- [ ] Do not implement automatic whole study stopping.
-- [ ] Permit optional planned sample targets for display only.
+- [x] Support configurable target completed cases per clinician.
+- [x] Support configurable maximum activated cases per clinician.
+- [x] Stop assigning new cases when the relevant clinician level rule is reached.
+- [x] Do not implement automatic whole study stopping.
+- [x] Permit optional planned sample targets for display only.
 
 ---
 
@@ -120,19 +120,19 @@ Replace the original independent pairwise arm assignment design.
 
 The scheduler must support:
 
-- [ ] study master randomisation seed
-- [ ] versioned randomisation algorithm
-- [ ] random patient order per clinician
-- [ ] clinician level AI versus no AI balance
-- [ ] patient level AI versus no AI balance
-- [ ] adaptive balancing based on activated assignments
-- [ ] study configurable block length
-- [ ] study configurable block sequence
-- [ ] balanced starting arm
-- [ ] case position metadata
-- [ ] block position metadata
-- [ ] preceding arm metadata
-- [ ] cases since previous AI exposure metadata where applicable
+- [x] study master randomisation seed
+- [x] versioned randomisation algorithm
+- [x] random patient order per clinician (HMAC order among balance ties; S11c)
+- [x] clinician level AI versus no AI balance
+- [x] patient level AI versus no AI balance
+- [x] adaptive balancing based on activated assignments
+- [x] study configurable block length
+- [x] study configurable block sequence
+- [x] balanced starting arm
+- [x] case position metadata
+- [x] block position metadata
+- [x] preceding arm metadata
+- [x] cases since previous AI exposure metadata where applicable
 
 Existing activated assignments must never be rewritten.
 
@@ -144,26 +144,26 @@ Schedules already generated for other clinicians must not be rewritten merely be
 
 For every generated schedule retain:
 
-- [ ] `study_id`
-- [ ] clinician ID
-- [ ] schedule generation timestamp
-- [ ] master seed or derived seed information
-- [ ] algorithm version
-- [ ] allocation state used during generation
-- [ ] configuration version used during generation
-- [ ] planned patient order
-- [ ] planned arm
-- [ ] starting arm
-- [ ] block information where applicable
-- [ ] overall case position
+- [x] `study_id`
+- [x] clinician ID
+- [x] schedule generation timestamp
+- [x] master seed or derived seed information
+- [x] algorithm version
+- [x] allocation state used during generation
+- [x] configuration version used during generation
+- [x] planned patient order
+- [x] planned arm
+- [x] starting arm
+- [x] block information where applicable
+- [x] overall case position
 
 For every realised assignment retain:
 
-- [ ] activated yes or no
-- [ ] activation timestamp
-- [ ] configuration version at activation
-- [ ] completion state
-- [ ] replacement relationship if applicable
+- [x] activated yes or no
+- [x] activation timestamp
+- [x] configuration version at activation
+- [x] completion state
+- [x] replacement relationship if applicable
 
 ---
 

@@ -9,12 +9,18 @@ import os
 import socket
 import subprocess
 import sys
+import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
 import pytest
+import uvicorn
+
+from ehr_simulator.web.app import app_from_study_config
 
 
 def _free_port() -> int:
@@ -24,6 +30,8 @@ def _free_port() -> int:
 
 
 _FIXTURES_DIR = Path(__file__).resolve().parents[1] / "fixtures" / "study"
+_DB_FILENAME = "e2e.db"
+_READY_TIMEOUT_SECONDS = 30
 
 
 def _run_cli(args: list[str], *, env: dict[str, str], cwd: Path) -> None:
@@ -45,16 +53,18 @@ def _boot_server(
     label: str,
     extra_args: list[str],
     activation: list[str] | None = None,
+    work_dir: Path | None = None,
 ) -> Iterator[str]:
     """Boot ``serve`` in a subprocess; yield its base URL.
 
     ``activation`` is the ``activate-config`` argv (sans ``--db-path``) run
     first: S11b study mode refuses to boot without an active configuration.
+    ``work_dir`` pins where the DB lives, for tests that also touch it.
     """
     port = _free_port()
     log_dir = tmp_path_factory.mktemp(f"{label}-logs")
-    work_dir = tmp_path_factory.mktemp(f"{label}-work")
-    db_path = work_dir / "e2e.db"
+    work_dir = work_dir or tmp_path_factory.mktemp(f"{label}-work")
+    db_path = work_dir / _DB_FILENAME
     backup_dir = work_dir / "backups"
     env = {
         **os.environ,
@@ -148,3 +158,121 @@ def live_study_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]
             "e2e baseline",
         ],
     )
+
+
+_LIFECYCLE_STUDY = _FIXTURES_DIR / "study_lifecycle.yaml"
+
+
+@pytest.fixture(scope="session")
+def lifecycle_work_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Work dir (and so DB) of ``live_lifecycle_server``."""
+    return tmp_path_factory.mktemp("e2e-lifecycle-work")
+
+
+@pytest.fixture(scope="session")
+def live_lifecycle_server(
+    tmp_path_factory: pytest.TempPathFactory, lifecycle_work_dir: Path
+) -> Iterator[str]:
+    """S11e: Phase 2 study with ``case_lifecycle`` (pause enabled)."""
+    study_yaml = str(_LIFECYCLE_STUDY)
+    questions_yaml = str(_FIXTURES_DIR / "questions.yaml")
+    yield from _boot_server(
+        tmp_path_factory,
+        label="e2e-lifecycle",
+        extra_args=["--config", study_yaml, "--questions", questions_yaml],
+        activation=[
+            "activate-config",
+            study_yaml,
+            questions_yaml,
+            "--version",
+            "e2e",
+            "--description",
+            "e2e lifecycle",
+        ],
+        work_dir=lifecycle_work_dir,
+    )
+
+
+@pytest.fixture
+def lifecycle_cli(lifecycle_work_dir: Path) -> Callable[..., None]:
+    """Run an operator command on ``live_lifecycle_server``'s live DB.
+
+    Example: ``lifecycle_cli("abandon-case", "--clinician", "Dr. X", "--patient", pid)``
+    becomes ``abandon-case <study_lifecycle.yaml> … --db-path <work>/e2e.db``.
+    """
+    env = {**os.environ, "EHR_LOG_DIR": str(lifecycle_work_dir / "cli-logs")}
+
+    def run(command: str, *args: str) -> None:
+        argv = [command, str(_LIFECYCLE_STUDY), *args]
+        _run_cli(
+            [*argv, "--db-path", str(lifecycle_work_dir / _DB_FILENAME)],
+            env=env,
+            cwd=lifecycle_work_dir,
+        )
+
+    return run
+
+
+class FakeClock:
+    """Injected ``app.state.clock``: time moves only when a test says so."""
+
+    def __init__(self) -> None:
+        self.moment = datetime.now(UTC)
+
+    def __call__(self) -> datetime:
+        return self.moment
+
+    def advance(self, seconds: float) -> None:
+        self.moment += timedelta(seconds=seconds)
+
+
+@dataclass(frozen=True)
+class ClockServer:
+    base_url: str
+    clock: FakeClock
+
+
+@pytest.fixture
+def live_clock_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[ClockServer]:
+    """S11f: replacement-enabled Phase 2 study served in-process on a ``FakeClock``.
+
+    In-process (uvicorn in a thread, not ``serve``) so the test holds the
+    clock and can jump past the reconnection grace instead of waiting it out.
+    """
+    work_dir = tmp_path_factory.mktemp("e2e-clock-work")
+    db_path = work_dir / _DB_FILENAME
+    log_dir = work_dir / "logs"
+    study_yaml = _FIXTURES_DIR / "study_lifecycle_replacement.yaml"
+    questions_yaml = _FIXTURES_DIR / "questions.yaml"
+    env = {**os.environ, "EHR_LOG_DIR": str(log_dir)}
+    activation = ["activate-config", str(study_yaml), str(questions_yaml)]
+    activation += ["--version", "e2e", "--description", "e2e replacement"]
+    _run_cli([*activation, "--db-path", str(db_path)], env=env, cwd=work_dir)
+
+    clock = FakeClock()
+    app = app_from_study_config(
+        study_yaml,
+        questions_yaml,
+        log_dir=log_dir,
+        db_path=db_path,
+        backup_dir=work_dir / "backups",
+        clock=clock,
+    )
+    port = _free_port()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", ws="none")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    # Readiness: uvicorn flips ``started`` once the lifespan has run.
+    deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
+    while not server.started:
+        if not thread.is_alive() or time.monotonic() > deadline:
+            raise RuntimeError("in-process uvicorn did not start")
+        time.sleep(0.05)
+
+    try:
+        yield ClockServer(f"http://127.0.0.1:{port}", clock)
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)

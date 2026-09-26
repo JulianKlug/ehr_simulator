@@ -1,0 +1,54 @@
+# Phase 2 example study configuration — synthetic dataset, randomisation on.
+#
+# Same patients and timepoints as example_config.yaml, but the
+# `randomisation` block switches `serve` to Phase 2 study mode: clinicians
+# get cases through **Start case** instead of picking patients. Its own
+# study_id gives it its own database (data/study_example_phase2.db), so it
+# never collides with the Phase 1 example.
+#
+#   uv run ehr-simulator validate-config configs/example_phase2_config.yaml configs/example_questions.yaml
+#   uv run ehr-simulator activate-config configs/example_phase2_config.yaml configs/example_questions.yaml \
+#       --version v1 --description "Phase 2 example"
+#   uv run ehr-simulator serve --config  configs/example_phase2_config.yaml --questions configs/example_questions.yaml
+#
+# Editing this file changes config_hash: stop the server, activate a new
+# --version, restart.
+
+schema_version: "2"
+study_id: example_phase2
+dataset: synthetic
+
+patient_ids:
+  - synth_001
+  - synth_002
+  - synth_003
+
+time_unit: minutes
+timepoints: [0, 60, 180]
+
+# Each block_sequence entry is one block of block_length cases; `start` =
+# the clinician's starting arm, `other` = the opposite arm. One cycle must
+# hold equal start/other counts, and the first
+# target_completed_cases_per_clinician positions must split 50:50 (block_length
+# 2 with target 2 would give 2:0). master_seed: 0 .. 2^63 - 1.
+randomisation:
+  master_seed: 123456
+  block_length: 1
+  block_sequence: [start, other]
+
+# S11e case lifecycle (optional; without it no timeout, pause or stopping
+# limit applies). A case silent longer than reconnection_grace_seconds
+# (>= 180) becomes incomplete on its next contact; a voluntary pause longer
+# than its grace (null → reconnection grace) does too. Start case stops at
+# either per-clinician limit; study_target_completed_cases is display-only
+# (`case-status`). Limits are sized to this 3-patient example.
+case_lifecycle:
+  reconnection_grace_seconds: 300
+  voluntary_pause_enabled: true
+  voluntary_pause_grace_seconds: null
+  target_completed_cases_per_clinician: 2
+  max_activated_cases_per_clinician: 3
+  study_target_completed_cases: null
+  # S11f: an incomplete case gets one replacement from the clinician's own
+  # unused schedule items (same arm first). Omitted/false keeps the hash.
+  replacement_cases_enabled: false

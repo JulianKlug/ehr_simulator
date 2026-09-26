@@ -93,6 +93,17 @@
     {% endfor %}
 
     <footer class="pane-footer">
+        {#- S11e: heartbeat anchor (static/heartbeat.js) + optional voluntary pause. -#}
+        {% if heartbeat_enabled %}
+        <span id="case-heartbeat" hidden
+              data-heartbeat-url="/case/{{ patient_id }}/heartbeat"
+              data-heartbeat-interval-ms="{{ heartbeat_interval_ms }}"></span>
+        {% endif %}
+        {% if pause_enabled %}
+        <form class="case-pause" method="post" action="/case/{{ patient_id }}/pause?chrome={{ chrome }}">
+            <button type="submit" class="case-pause-btn">Pause case</button>
+        </form>
+        {% endif %}
         {% if mode == "open" %}
         {{ cta_html | safe }}
         {% elif completed %}

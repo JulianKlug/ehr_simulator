@@ -44,7 +44,11 @@ from fastapi.templating import Jinja2Templates
 from ehr_simulator.db import arm_assignments
 from ehr_simulator.db.backup import create_backup
 from ehr_simulator.db.connection import AccessMode, connect, resolve_db_path
-from ehr_simulator.db.exceptions import ConfigurationProvenanceError, StudyIdentityError
+from ehr_simulator.db.exceptions import (
+    CaseLifecycleError,
+    ConfigurationProvenanceError,
+    StudyIdentityError,
+)
 from ehr_simulator.db.ingestion_issues import record_batch as record_ingestion_issues
 from ehr_simulator.db.migrations import apply_migrations
 from ehr_simulator.db.study_identity import bind as bind_study_identity
@@ -57,7 +61,8 @@ from ehr_simulator.logging import (
     reset_request_context,
     setup_logging,
 )
-from ehr_simulator.web.middleware import CSPMiddleware
+from ehr_simulator.web.case_contact import Clock, system_clock
+from ehr_simulator.web.middleware import CSPMiddleware, NoStoreMiddleware
 from ehr_simulator.web.panels import DatasetLike
 
 _THIS_DIR = Path(__file__).resolve().parent
@@ -71,6 +76,7 @@ def create_app(
     dataset_loader: Callable[[], DatasetLike] = load_synthetic,
     db_path: Path | None = None,
     backup_dir: Path | None = None,
+    clock: Clock = system_clock,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -212,14 +218,22 @@ def create_app(
     app.state.config_hash = None
     app.state.config_version = None
     app.state.active_configuration = None
+    # S11e: the lifecycle's only time source; tests swap it to move time.
+    app.state.clock = clock
     app.mount("/static", StaticFiles(directory=str(_STATIC_DIR)), name="static")
 
-    from ehr_simulator.web.routes import provenance_error_response, router
+    from ehr_simulator.web.routes import (
+        lifecycle_error_response,
+        provenance_error_response,
+        router,
+    )
 
     app.include_router(router)
     app.add_exception_handler(ConfigurationProvenanceError, provenance_error_response)
+    app.add_exception_handler(CaseLifecycleError, lifecycle_error_response)
     app.add_middleware(RequestContextMiddleware)
     app.add_middleware(CSPMiddleware)
+    app.add_middleware(NoStoreMiddleware)
     return app
 
 
@@ -302,6 +316,7 @@ def app_from_study_config(
     log_dir: Path = Path("logs"),
     db_path: Path | None = None,
     backup_dir: Path | None = None,
+    clock: Clock = system_clock,
 ) -> FastAPI:
     """Build a FastAPI app whose dataset_loader and timepoints come from the study config.
 
@@ -335,6 +350,7 @@ def app_from_study_config(
         dataset_loader=loader,
         db_path=resolved_db_path,
         backup_dir=backup_dir,
+        clock=clock,
     )
     app.state.study_timepoints = list(study.timepoints_minutes)
     app.state.study_patient_ids = list(study.patient_ids)

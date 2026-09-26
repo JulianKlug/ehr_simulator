@@ -30,6 +30,11 @@ S11b pins every case to its configuration activation:
                               the DB's active version/hash must still equal
                               app.state, or a new case creation is refused)
 
+S11d Phase 2 study mode (active study has ``randomisation``): a case exists
+only after an explicit Start case (``web/case_start.py``). Resolution and
+bootstrap never create an assignment — an unassigned pair is
+:class:`CaseNotActivatedError`.
+
 A "new case" is created only when the pair has no assignment row; every
 write in ``bootstrap_session`` carries the case's ``config_version`` +
 ``config_hash``, and an existing session row whose provenance disagrees with
@@ -58,6 +63,10 @@ from ehr_simulator.db.exceptions import (
 from ehr_simulator.logging import get_logger
 
 NOT_STARTED_T_INDEX = 0
+
+
+class CaseNotActivatedError(Exception):
+    """S11d: Phase 2 pair without an activated assignment — not a case yet."""
 
 
 @dataclass(frozen=True)
@@ -95,6 +104,12 @@ class CaseConfiguration:
     @property
     def patient_ids(self) -> tuple[str, ...]:
         return tuple(self.study.patient_ids)
+
+
+def is_phase2_mode(app_state: Any) -> bool:
+    """Study mode whose active configuration carries ``randomisation`` (S11d)."""
+    study = getattr(app_state, "study", None)
+    return isinstance(study, StudyConfig) and study.randomisation is not None
 
 
 def _legacy_or_raise(app_state: Any) -> tuple[StudyConfig, Questions]:
@@ -211,6 +226,11 @@ def _active_case_or_raise(conn: sqlite3.Connection, app_state: Any) -> CaseConfi
     )
 
 
+def require_active_case(conn: sqlite3.Connection, app_state: Any) -> CaseConfiguration:
+    """The active configuration new cases pin; stale server → StaleConfigurationError."""
+    return _active_case_or_raise(conn, app_state)
+
+
 def resolve_case_configuration(
     conn: sqlite3.Connection,
     app_state: Any,
@@ -222,10 +242,16 @@ def resolve_case_configuration(
 
     Existing assignments use their stored version/hash snapshots forever;
     unassigned pairs pin the still-active configuration (stale-server guard
-    included). See the module docstring for the failure modes.
+    included) — except in Phase 2, where they are not a case at all.
+    See the module docstring for the failure modes.
     """
     if arm_assignments.fetch_for_pair(conn, clinician_id, patient_id) is not None:
         return _resolve_existing_case(conn, app_state, clinician_id, patient_id)
+
+    if is_phase2_mode(app_state):
+        raise CaseNotActivatedError(
+            f"patient {patient_id!r} is not an activated case; start it from the study index"
+        )
     return _active_case_or_raise(conn, app_state)
 
 
@@ -300,9 +326,18 @@ def bootstrap_session(
         )
     config_hash = case.config_hash
     config_version = case.config_version
-    arm, _source = arm_assignments.assign_or_lookup(
-        conn, clinician_id, patient_id, config_hash=config_hash, config_version=config_version
-    )
+    if is_phase2_mode(app_state):
+        # S11d: only Start case creates Phase 2 assignments.
+        assignment = arm_assignments.fetch_for_pair(conn, clinician_id, patient_id)
+        if assignment is None:
+            raise CaseNotActivatedError(
+                f"patient {patient_id!r} is not an activated case; start it from the study index"
+            )
+        arm = assignment.arm
+    else:
+        arm, _source = arm_assignments.assign_or_lookup(
+            conn, clinician_id, patient_id, config_hash=config_hash, config_version=config_version
+        )
 
     session_id = sessions.find_open(conn, clinician_id, patient_id)
     is_new_session = session_id is None

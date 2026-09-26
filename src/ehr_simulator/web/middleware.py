@@ -51,3 +51,31 @@ class CSPMiddleware:
             await send(message)
 
         await self.app(scope, receive, send_wrapper)
+
+
+# Case pages must never come back from the browser cache: after a timeout or
+# abandon, Back would otherwise show an editable stale page (S11e).
+_NO_STORE_PATH_PREFIXES = ("/patient/", "/case/")
+_CACHE_CONTROL_HEADER = (b"cache-control", b"no-store")
+
+
+class NoStoreMiddleware:
+    """Send ``Cache-Control: no-store`` on every case response."""
+
+    def __init__(self, app: Callable[..., Awaitable[None]]) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        path = scope.get("path", "")
+        if scope.get("type") != "http" or not path.startswith(_NO_STORE_PATH_PREFIXES):
+            await self.app(scope, receive, send)
+            return
+
+        async def send_wrapper(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                headers = list(message.get("headers", []))
+                headers.append(_CACHE_CONTROL_HEADER)
+                message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_wrapper)

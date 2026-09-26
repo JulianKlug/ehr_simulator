@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>EHR simulator — action refused</title>
+    <link rel="stylesheet" href="/static/theme.css" />
+</head>
+<body>
+    {% include "_login_stripe.html" %}
+    <main>
+        <h1>EHR simulator</h1>
+        {#- Plain-form refusal of Start / Pause / Resume: say why, offer a way back. -#}
+        <section class="case-action" data-case-action="refused">
+            {{ flash_html | safe }}
+            <a class="resume-link" href="/">← Study index</a>
+        </section>
+    </main>
+</body>
+</html>

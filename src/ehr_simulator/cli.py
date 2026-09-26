@@ -36,6 +36,12 @@ Ten commands after S11b:
   non-empty unbound legacy database), then applies one atomic commit.
   Exit 0 on success (including a same-registered no-op), 1 on any
   refusal.
+- ``abandon-case`` (S11e) — mark one open Phase 2 case ``incomplete`` with
+  reason ``operator_abandoned``; terminal or unknown cases exit 1 unwritten.
+- ``expire-cases`` (S11e) — mark every open case past its pinned grace
+  ``incomplete``; ``--dry-run`` lists them without writing.
+- ``case-status`` (S11e) — read-only per-clinician lifecycle counts and
+  remaining limits, keyed by ``clinician_id``.
 
 The ``main(argv: list[str] | None = None) -> None`` signature is preserved
 from the S2 argparse skeleton so ``test_cli.py``'s monkeypatch idiom carries
@@ -252,6 +258,12 @@ def validate_config(
         f"{len(study.timepoints)} timepoints), "
         f"{questions_path} ({len(questions_obj.questions)} questions, schema_version=1)"
     )
+    if study.randomisation is not None and study.case_lifecycle is None:
+        typer.echo(
+            "Warning: randomisation without case_lifecycle — no reconnection timeout, "
+            "no voluntary pause and no clinician stopping limits apply.",
+            err=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -500,6 +512,148 @@ def reset_progress_cmd(
 
 
 # ---------------------------------------------------------------------------
+# abandon-case / case-status (S11e)
+# ---------------------------------------------------------------------------
+
+
+def _open_study_db(study_path: Path, db_path: Path | None, *, read_only: bool):
+    """Load the study, open its DB and pass the schema + identity gates.
+
+    Returns ``(study, conn)``; any refusal is ``typer.Exit(1)``.
+    """
+    from ehr_simulator.cli_support import OperatorError, assert_schema_current
+    from ehr_simulator.config import load_study_config
+    from ehr_simulator.db import AccessMode, connect, resolve_db_path
+    from ehr_simulator.db.exceptions import StudyIdentityError
+    from ehr_simulator.db.study_identity import require as require_study_identity
+
+    try:
+        study = load_study_config(study_path)
+    except ConfigError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    resolved_db = db_path if db_path is not None else resolve_db_path(study)
+    if not resolved_db.exists():
+        typer.echo(f"Error: db_path does not exist: {resolved_db}", err=True)
+        raise typer.Exit(code=1)
+
+    access = AccessMode.READ_ONLY if read_only else AccessMode.READ_WRITE
+    conn = connect(resolved_db, access=access)
+    try:
+        assert_schema_current(conn)
+        require_study_identity(conn, study.study_id)
+    except (OperatorError, StudyIdentityError) as exc:
+        conn.close()
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    return study, conn
+
+
+@app_typer.command("abandon-case")
+def abandon_case_cmd(
+    study_path: Path = typer.Argument(..., exists=True, dir_okay=False),
+    clinician: str = typer.Option(..., "--clinician", help="Clinician name as typed at login."),
+    patient: str = typer.Option(..., "--patient", help="Patient ID of the open case."),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite DB; defaults to the study's db_path / data/study_<study_id>.db.",
+    ),
+) -> None:
+    """Mark an open case incomplete (operator_abandoned); never deletes it."""
+    from datetime import UTC, datetime
+
+    from ehr_simulator.cli_support import OperatorError, abandon_case
+    from ehr_simulator.logging import setup_logging
+
+    setup_logging(Path("logs"))
+    _study, conn = _open_study_db(study_path, db_path, read_only=False)
+    try:
+        report = abandon_case(
+            conn, clinician_name=clinician, patient_id=patient, now=datetime.now(UTC)
+        )
+    except OperatorError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+    typer.echo(
+        f"Case {patient} for clinician {report.clinician_id} is now incomplete "
+        "(operator_abandoned)."
+    )
+    if report.replacement_patient_id is not None:
+        typer.echo(f"Replacement planned: {report.replacement_patient_id}.")
+    if report.planning_error is not None:
+        typer.echo(f"Warning: replacement not planned: {report.planning_error}", err=True)
+
+
+@app_typer.command("expire-cases")
+def expire_cases_cmd(
+    study_path: Path = typer.Argument(..., exists=True, dir_okay=False),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite DB; defaults to the study's db_path / data/study_<study_id>.db.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="List overdue cases; write nothing."),
+) -> None:
+    """Mark every open case past its grace incomplete, as its next contact would."""
+    from datetime import UTC, datetime
+
+    from ehr_simulator.cli_support import ExpiryMode, expire_cases
+    from ehr_simulator.db.case_lifecycle import to_db_timestamp
+    from ehr_simulator.db.exceptions import ConfigurationProvenanceError
+    from ehr_simulator.logging import setup_logging
+
+    setup_logging(Path("logs"))
+    mode = ExpiryMode.DRY_RUN if dry_run else ExpiryMode.APPLY
+    _study, conn = _open_study_db(study_path, db_path, read_only=dry_run)
+    try:
+        expired = expire_cases(conn, now=datetime.now(UTC), mode=mode)
+    except ConfigurationProvenanceError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+    verb = "Would expire" if dry_run else "Expired"
+    typer.echo(f"{verb} {len(expired)} case(s).")
+    for case in expired:
+        line = (
+            f"  {case.clinician_id} {case.patient_id} {case.reason} "
+            f"(deadline {to_db_timestamp(case.deadline)})"
+        )
+        if case.replacement_patient_id is not None:
+            line += f"; replacement planned: {case.replacement_patient_id}"
+        typer.echo(line)
+        if case.planning_error is not None:
+            typer.echo(f"Warning: replacement not planned: {case.planning_error}", err=True)
+
+
+@app_typer.command("case-status")
+def case_status_cmd(
+    study_path: Path = typer.Argument(..., exists=True, dir_okay=False),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite DB; defaults to the study's db_path / data/study_<study_id>.db.",
+    ),
+) -> None:
+    """Read-only lifecycle counts per clinician against the study's limits."""
+    from ehr_simulator.cli_support import case_status, format_case_status
+
+    study, conn = _open_study_db(study_path, db_path, read_only=True)
+    try:
+        report = case_status(conn, study)
+    finally:
+        conn.close()
+
+    typer.echo(format_case_status(report))
+
+
+# ---------------------------------------------------------------------------
 # export-answers (S9c)
 # ---------------------------------------------------------------------------
 
@@ -535,7 +689,7 @@ def export_answers(
     """Export the study's recorded answers to a guarded, analysis-ready CSV."""
     from datetime import UTC, datetime
 
-    from ehr_simulator import export
+    from ehr_simulator import case_lifecycle, export
     from ehr_simulator.cli_support import OperatorError, assert_schema_current
     from ehr_simulator.config import (
         compute_config_hash_from_models,
@@ -544,7 +698,7 @@ def export_answers(
     )
     from ehr_simulator.db import connect, resolve_db_path
     from ehr_simulator.db.connection import AccessMode
-    from ehr_simulator.db.exceptions import StudyIdentityError
+    from ehr_simulator.db.exceptions import ConfigurationProvenanceError, StudyIdentityError
     from ehr_simulator.db.study_identity import require as require_study_identity
     from ehr_simulator.logging import get_logger, setup_logging
 
@@ -568,6 +722,8 @@ def export_answers(
         try:
             assert_schema_current(conn)
             require_study_identity(conn, study.study_id)
+            # S11e: cases no contact will ever time out still read as open.
+            overdue = case_lifecycle.overdue_cases(conn, datetime.now(UTC))
             bundle = export.build_export(
                 conn,
                 study=study,
@@ -592,11 +748,19 @@ def export_answers(
         export.ExportError,
         OperatorError,
         StudyIdentityError,
+        ConfigurationProvenanceError,
         OSError,
         sqlite3.Error,
     ) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+    if overdue:
+        typer.echo(
+            f"Warning: {len(overdue)} open case(s) are past their grace and export as "
+            "open; run expire-cases first.",
+            err=True,
+        )
 
     report = bundle.frame.report
     get_logger().info(

@@ -25,6 +25,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
+from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -429,7 +431,7 @@ def reset_progress(
     the pair has no walk, the index is outside the study, or the index is
     ahead of the current frontier (a reset only rewinds).
     """
-    from ehr_simulator.db import answers, clinicians, events, progress
+    from ehr_simulator.db import answers, case_lifecycle, clinicians, events, progress
 
     if not 0 <= to_t_index < len(timepoints):
         raise ResetError(
@@ -446,6 +448,10 @@ def reset_progress(
             f"--to-t-index {to_t_index} is ahead of the current frontier "
             f"{row.unlocked_t_index}; reset only rewinds"
         )
+    # S11e: completed and incomplete Phase 2 cases are terminal.
+    lifecycle = case_lifecycle.fetch(conn, clinician_id, patient_id)
+    if lifecycle is not None and not lifecycle.is_open:
+        raise ResetError(f"case {patient_id!r} is {lifecycle.state}; a closed case cannot be reset")
 
     # Delete first, rewind second: a failure between the two leaves the walk
     # intact for a retry instead of a rewound frontier over orphaned answers
@@ -478,6 +484,172 @@ def reset_progress(
         to_t_index=to_t_index,
         deleted_answers=deleted,
     )
+
+
+# ---------------------------------------------------------------------------
+# abandon-case / case-status (S11e)
+# ---------------------------------------------------------------------------
+
+
+class AbandonError(OperatorError):
+    """The case cannot be abandoned; nothing was written."""
+
+
+@dataclass(frozen=True)
+class AbandonReport:
+    clinician_id: str
+    replacement_patient_id: str | None  # S11f: planned replacement, if any
+    planning_error: str | None = None  # the abandon stands even when planning fails
+
+
+def abandon_case(
+    conn: Any, *, clinician_name: str, patient_id: str, now: datetime
+) -> AbandonReport:
+    """Mark one open case ``incomplete`` (``operator_abandoned``), then plan its
+    replacement in a separate commit (S11f; a planning failure keeps the abandon).
+    """
+    from ehr_simulator import case_lifecycle, replacement
+    from ehr_simulator.db import clinicians
+    from ehr_simulator.db.exceptions import CaseLifecycleError
+
+    clinician_id = clinicians.lookup(conn, clinician_name)
+    if clinician_id is None:
+        raise AbandonError(f"unknown clinician {clinician_name!r}")
+
+    try:
+        case_lifecycle.abandon(conn, clinician_id=clinician_id, patient_id=patient_id, now=now)
+    except CaseLifecycleError as exc:
+        raise AbandonError(str(exc)) from exc
+
+    try:
+        plan = replacement.plan_replacement(
+            conn, clinician_id=clinician_id, original_patient_id=patient_id, now=now
+        )
+    except Exception as exc:  # noqa: BLE001 — Start case re-plans; report, don't fail
+        return AbandonReport(clinician_id, None, planning_error=str(exc))
+    return AbandonReport(clinician_id, plan.replacement_patient_id if plan else None)
+
+
+class ExpiryMode(StrEnum):
+    APPLY = "apply"
+    DRY_RUN = "dry_run"
+
+
+@dataclass(frozen=True)
+class ExpiredCase:
+    clinician_id: str
+    patient_id: str
+    reason: str
+    deadline: datetime
+    replacement_patient_id: str | None = None  # S11f: planned replacement, if any
+    planning_error: str | None = None  # the expiry stands even when planning fails
+
+
+def expire_cases(conn: Any, *, now: datetime, mode: ExpiryMode) -> list[ExpiredCase]:
+    """Time out every open case past its pinned grace, as a contact at ``now``
+    would; each case in its own commit, then its replacement plan in another.
+
+    A clinician who never returns leaves an ``active`` row no lazy check will
+    ever reach; this materialises it (Phase 2 gate §8.5) before an export.
+    """
+    from ehr_simulator import case_lifecycle, replacement
+
+    overdue = case_lifecycle.overdue_cases(conn, now)
+    if mode is ExpiryMode.DRY_RUN:
+        return [
+            ExpiredCase(case.clinician_id, case.patient_id, str(t.reason), t.deadline)
+            for case, t in overdue
+        ]
+
+    expired = []
+    for case, _ in overdue:
+        policy = case_lifecycle.pinned_policy(conn, case)
+        timeout = case_lifecycle.expire_if_overdue(conn, case, policy, now)
+        if timeout is None:
+            continue  # a contact reached the case first
+
+        try:
+            plan = replacement.plan_replacement(
+                conn, clinician_id=case.clinician_id, original_patient_id=case.patient_id, now=now
+            )
+        except Exception as exc:  # noqa: BLE001 — Start case re-plans; report, don't fail
+            expired.append(
+                ExpiredCase(
+                    case.clinician_id,
+                    case.patient_id,
+                    str(timeout.reason),
+                    timeout.deadline,
+                    planning_error=str(exc),
+                )
+            )
+            continue
+
+        expired.append(
+            ExpiredCase(
+                case.clinician_id,
+                case.patient_id,
+                str(timeout.reason),
+                timeout.deadline,
+                replacement_patient_id=plan.replacement_patient_id if plan else None,
+            )
+        )
+    return expired
+
+
+@dataclass(frozen=True)
+class CaseStatusReport:
+    counts: dict[str, Any]  # clinician_id -> LifecycleCounts
+    target_completed: int | None
+    max_activated: int | None
+    study_target_completed: int | None
+
+    @property
+    def study_completed(self) -> int:
+        return sum(c.completed for c in self.counts.values())
+
+
+def case_status(conn: Any, study: StudyConfig) -> CaseStatusReport:
+    """Per-clinician lifecycle counts under one snapshot; never writes."""
+    from ehr_simulator.db import case_lifecycle
+
+    conn.execute("BEGIN")
+    try:
+        counts = case_lifecycle.counts_by_clinician(conn)
+    finally:
+        conn.rollback()
+
+    limits = study.case_lifecycle
+    return CaseStatusReport(
+        counts=counts,
+        target_completed=limits.target_completed_cases_per_clinician if limits else None,
+        max_activated=limits.max_activated_cases_per_clinician if limits else None,
+        study_target_completed=limits.study_target_completed_cases if limits else None,
+    )
+
+
+def format_case_status(report: CaseStatusReport) -> str:
+    """Plain table keyed by pseudonymous ``clinician_id`` (never the name)."""
+
+    def remaining(limit: int | None, used: int) -> str:
+        return "-" if limit is None else str(max(limit - used, 0))
+
+    header = (
+        "clinician_id      active paused completed incomplete activated "
+        "completed_left activated_left"
+    )
+    lines = [header]
+    for clinician_id, c in report.counts.items():
+        lines.append(
+            f"{clinician_id:<17} {c.active:>6} {c.paused:>6} {c.completed:>9} "
+            f"{c.incomplete:>10} {c.activated:>9} "
+            f"{remaining(report.target_completed, c.completed):>14} "
+            f"{remaining(report.max_activated, c.activated):>14}"
+        )
+
+    target = report.study_target_completed
+    suffix = f" / {target} (informational)" if target is not None else ""
+    lines.append(f"study completed cases: {report.study_completed}{suffix}")
+    return "\n".join(lines)
 
 
 def assert_schema_current(conn: Any) -> None:
