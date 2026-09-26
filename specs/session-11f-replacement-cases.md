@@ -89,7 +89,7 @@ For each eligible candidate compute this deterministic score tuple after hypothe
 
 Choose the lexicographically smallest tuple.
 
-### Arm mismatch (study decision, 2026-09-25)
+### Arm mismatch (phase2-gate §8.6)
 
 `0` when `candidate.planned_arm` equals the incomplete case's arm, else `1`.
 

@@ -129,6 +129,16 @@ def list_for_clinician(conn: sqlite3.Connection, clinician_id: str) -> dict[str,
     return {row[1]: _row(row) for row in rows}
 
 
+def list_open(conn: sqlite3.Connection) -> list[CaseLifecycle]:
+    """Every ``active`` or ``paused`` case, across clinicians."""
+    rows = conn.execute(
+        f"SELECT {_COLUMNS} FROM case_lifecycle WHERE state IN (?, ?) "
+        "ORDER BY clinician_id, patient_id",
+        (CaseState.ACTIVE, CaseState.PAUSED),
+    ).fetchall()
+    return [_row(row) for row in rows]
+
+
 def counts_for_clinician(conn: sqlite3.Connection, clinician_id: str) -> LifecycleCounts:
     return counts_by_clinician(conn).get(clinician_id, LifecycleCounts())
 

@@ -28,10 +28,12 @@ timepoints: [0, 60, 180]
 
 # Each block_sequence entry is one block of block_length cases; `start` =
 # the clinician's starting arm, `other` = the opposite arm. One cycle must
-# hold equal start/other counts. master_seed: 0 .. 2^63 - 1.
+# hold equal start/other counts, and the first
+# target_completed_cases_per_clinician positions must split 50:50 (block_length
+# 2 with target 2 would give 2:0). master_seed: 0 .. 2^63 - 1.
 randomisation:
   master_seed: 123456
-  block_length: 2
+  block_length: 1
   block_sequence: [start, other]
 
 # S11e case lifecycle (optional; without it no timeout, pause or stopping

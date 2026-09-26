@@ -38,6 +38,8 @@ Ten commands after S11b:
   refusal.
 - ``abandon-case`` (S11e) — mark one open Phase 2 case ``incomplete`` with
   reason ``operator_abandoned``; terminal or unknown cases exit 1 unwritten.
+- ``expire-cases`` (S11e) — mark every open case past its pinned grace
+  ``incomplete``; ``--dry-run`` lists them without writing.
 - ``case-status`` (S11e) — read-only per-clinician lifecycle counts and
   remaining limits, keyed by ``clinician_id``.
 
@@ -587,6 +589,49 @@ def abandon_case_cmd(
         typer.echo(f"Warning: replacement not planned: {report.planning_error}", err=True)
 
 
+@app_typer.command("expire-cases")
+def expire_cases_cmd(
+    study_path: Path = typer.Argument(..., exists=True, dir_okay=False),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite DB; defaults to the study's db_path / data/study_<study_id>.db.",
+    ),
+    dry_run: bool = typer.Option(False, "--dry-run", help="List overdue cases; write nothing."),
+) -> None:
+    """Mark every open case past its grace incomplete, as its next contact would."""
+    from datetime import UTC, datetime
+
+    from ehr_simulator.cli_support import ExpiryMode, expire_cases
+    from ehr_simulator.db.case_lifecycle import to_db_timestamp
+    from ehr_simulator.db.exceptions import ConfigurationProvenanceError
+    from ehr_simulator.logging import setup_logging
+
+    setup_logging(Path("logs"))
+    mode = ExpiryMode.DRY_RUN if dry_run else ExpiryMode.APPLY
+    _study, conn = _open_study_db(study_path, db_path, read_only=dry_run)
+    try:
+        expired = expire_cases(conn, now=datetime.now(UTC), mode=mode)
+    except ConfigurationProvenanceError as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    finally:
+        conn.close()
+
+    verb = "Would expire" if dry_run else "Expired"
+    typer.echo(f"{verb} {len(expired)} case(s).")
+    for case in expired:
+        line = (
+            f"  {case.clinician_id} {case.patient_id} {case.reason} "
+            f"(deadline {to_db_timestamp(case.deadline)})"
+        )
+        if case.replacement_patient_id is not None:
+            line += f"; replacement planned: {case.replacement_patient_id}"
+        typer.echo(line)
+        if case.planning_error is not None:
+            typer.echo(f"Warning: replacement not planned: {case.planning_error}", err=True)
+
+
 @app_typer.command("case-status")
 def case_status_cmd(
     study_path: Path = typer.Argument(..., exists=True, dir_okay=False),
@@ -644,7 +689,7 @@ def export_answers(
     """Export the study's recorded answers to a guarded, analysis-ready CSV."""
     from datetime import UTC, datetime
 
-    from ehr_simulator import export
+    from ehr_simulator import case_lifecycle, export
     from ehr_simulator.cli_support import OperatorError, assert_schema_current
     from ehr_simulator.config import (
         compute_config_hash_from_models,
@@ -653,7 +698,7 @@ def export_answers(
     )
     from ehr_simulator.db import connect, resolve_db_path
     from ehr_simulator.db.connection import AccessMode
-    from ehr_simulator.db.exceptions import StudyIdentityError
+    from ehr_simulator.db.exceptions import ConfigurationProvenanceError, StudyIdentityError
     from ehr_simulator.db.study_identity import require as require_study_identity
     from ehr_simulator.logging import get_logger, setup_logging
 
@@ -677,6 +722,8 @@ def export_answers(
         try:
             assert_schema_current(conn)
             require_study_identity(conn, study.study_id)
+            # S11e: cases no contact will ever time out still read as open.
+            overdue = case_lifecycle.overdue_cases(conn, datetime.now(UTC))
             bundle = export.build_export(
                 conn,
                 study=study,
@@ -701,11 +748,19 @@ def export_answers(
         export.ExportError,
         OperatorError,
         StudyIdentityError,
+        ConfigurationProvenanceError,
         OSError,
         sqlite3.Error,
     ) as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
+
+    if overdue:
+        typer.echo(
+            f"Warning: {len(overdue)} open case(s) are past their grace and export as "
+            "open; run expire-cases first.",
+            err=True,
+        )
 
     report = bundle.frame.report
     get_logger().info(

@@ -87,13 +87,37 @@ def load_study_config(path: Path) -> StudyConfig:
     data = _read_yaml(path)
     observed_version = data.get("schema_version")
     try:
-        return StudyConfig.model_validate(data, context={"yaml_dir": path.parent})
+        study = StudyConfig.model_validate(data, context={"yaml_dir": path.parent})
     except ValidationError as exc:
         if observed_version is not None and observed_version != "2":
             raise ConfigError(
                 f"{path.name}: schema_version mismatch — expected '2', got {observed_version!r}"
             ) from exc
         raise ConfigError.from_validation_error(exc, path=path) from exc
+
+    _check_balance_at_target(study, path)
+    return study
+
+
+def _check_balance_at_target(study: StudyConfig, path: Path) -> None:
+    """Phase 2 gate §7.1: a clinician stopping at the target gets 50:50 arms.
+
+    Checked on YAML only, never on stored snapshots, so activated history
+    stays readable. An odd target allows a one-case difference.
+    """
+    if study.randomisation is None or study.case_lifecycle is None:
+        return
+
+    target = study.case_lifecycle.target_completed_cases_per_clinician
+    starts, others = study.randomisation.planned_split(target)
+    if abs(starts - others) <= target % 2:
+        return
+
+    raise ConfigError(
+        f"{path.name}: target_completed_cases_per_clinician {target} stops mid-block at "
+        f"{starts}:{others} arms (block_length {study.randomisation.block_length}); "
+        "choose a target or block design that reaches 50:50"
+    )
 
 
 def load_questions(path: Path) -> Questions:

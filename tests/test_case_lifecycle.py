@@ -30,8 +30,13 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from ehr_simulator import cli
-from ehr_simulator.config import compute_config_hash_from_models, load_questions
-from ehr_simulator.config.snapshot import render_study_snapshot
+from ehr_simulator.config import (
+    ConfigError,
+    compute_config_hash_from_models,
+    load_questions,
+    load_study_config,
+)
+from ehr_simulator.config.snapshot import parse_study_snapshot, render_study_snapshot
 from ehr_simulator.config.study import (
     MIN_RECONNECTION_GRACE_SECONDS,
     CaseLifecycleConfig,
@@ -278,6 +283,101 @@ def test_validate_config_warns_on_randomisation_without_lifecycle(
     assert "Warning: randomisation without case_lifecycle" in bare.stderr
     assert full.exit_code == 0
     assert "Warning" not in full.stderr
+
+
+def _blocks_yaml(
+    tmp_path: Path, study_fixture_dir: Path, *, block_length: int, sequence: list[str], target: int
+) -> Path:
+    data = yaml.safe_load((study_fixture_dir / "study_lifecycle.yaml").read_text())
+    data["randomisation"].update(block_length=block_length, block_sequence=sequence)
+    data["case_lifecycle"].update(
+        target_completed_cases_per_clinician=target, max_activated_cases_per_clinician=target
+    )
+    path = tmp_path / "study_blocks.yaml"
+    path.write_text(yaml.safe_dump(data))
+    return path
+
+
+@pytest.mark.parametrize(
+    ("block_length", "sequence", "target"),
+    [
+        (2, ["start", "other"], 2),  # 2:0 at target
+        (3, ["start", "other"], 4),  # 3:1
+        (2, ["start", "other", "other", "start"], 6),  # 4:2
+    ],
+)
+def test_target_that_cuts_a_block_unbalanced_is_refused(
+    tmp_path: Path, study_fixture_dir: Path, block_length: int, sequence: list[str], target: int
+) -> None:
+    path = _blocks_yaml(
+        tmp_path, study_fixture_dir, block_length=block_length, sequence=sequence, target=target
+    )
+    with pytest.raises(ConfigError, match="target_completed_cases_per_clinician"):
+        load_study_config(path)
+
+
+@pytest.mark.parametrize(
+    ("block_length", "sequence", "target"),
+    [
+        (1, ["start", "other"], 2),
+        (2, ["start", "other"], 4),
+        (2, ["start", "other"], 3),  # odd target: 2:1 is the closest split
+        (1, ["start", "other", "other", "start"], 2),
+    ],
+)
+def test_target_with_a_balanced_block_prefix_is_accepted(
+    tmp_path: Path, study_fixture_dir: Path, block_length: int, sequence: list[str], target: int
+) -> None:
+    path = _blocks_yaml(
+        tmp_path, study_fixture_dir, block_length=block_length, sequence=sequence, target=target
+    )
+    assert load_study_config(path).case_lifecycle is not None
+
+
+def test_stored_snapshot_with_an_unbalanced_target_still_parses() -> None:
+    # The rule guards new YAML only; activated history must stay readable.
+    study = StudyConfig.model_validate(
+        {
+            "schema_version": "2",
+            "study_id": "s",
+            "dataset": "synthetic",
+            "patient_ids": ["synth_001", "synth_002"],
+            "time_unit": "minutes",
+            "timepoints": [0],
+            "randomisation": {
+                "master_seed": 1,
+                "block_length": 2,
+                "block_sequence": ["start", "other"],
+            },
+            "case_lifecycle": VALID_LIFECYCLE,
+        }
+    )
+    assert parse_study_snapshot(render_study_snapshot(study)) == study
+
+
+@pytest.mark.parametrize(
+    "study_yaml",
+    [
+        Path(__file__).parent / "fixtures" / "study" / "study_lifecycle.yaml",
+        Path(__file__).parents[1] / "configs" / "example_phase2_config.yaml",
+    ],
+    ids=["fixture", "example"],
+)
+def test_clinicians_stopping_at_target_get_equal_arms(
+    tmp_path: Path, study_fixture_dir: Path, study_yaml: Path
+) -> None:
+    lh = _harness(tmp_path, study_yaml, study_fixture_dir / "questions.yaml")
+    target = lh.v1.study.case_lifecycle.target_completed_cases_per_clinician
+    clinicians = [lh.clinician_id, lh.add_clinician(SECOND_CLINICIAN)]
+
+    for clinician_id in clinicians:
+        with lh.client(clinician_id=clinician_id) as client:
+            while (response := _start(client)).status_code != HTTP_CONFLICT:
+                _finish(client, _started_patient(response))
+
+        arms = [a.arm for a in lh.assignments(clinician_id)]
+        assert len(arms) == target
+        assert arms.count("ai") == arms.count("no_ai")
 
 
 # ---------------------------------------------------------------------------
@@ -948,6 +1048,88 @@ def test_case_status_is_read_only_and_pseudonymous(lh: LifecycleHarness) -> None
     assert lh.dump() == before
 
 
+def _overdue_and_fresh_cases(lh: LifecycleHarness) -> dict[str, tuple[str, str]]:
+    """Three clinicians' open cases: silent, paused (both at T0) and fresh (now).
+
+    The CLI runs on the system clock, so T0 cases are long overdue.
+    """
+    ids = {
+        "silent": lh.clinician_id,
+        "paused": lh.add_clinician("Dr. Paused"),
+        "fresh": lh.add_clinician("Dr. Fresh"),
+    }
+    cases = {}
+    for label, clinician_id in ids.items():
+        if label == "fresh":
+            lh.clock.moment = datetime.now(UTC)
+        with lh.client(clinician_id=clinician_id) as client:
+            patient_id = _started_patient(_start(client))
+            if label == "paused":
+                _post(client, f"/case/{patient_id}/pause")
+        cases[label] = (clinician_id, patient_id)
+    return cases
+
+
+def test_expire_cases_closes_overdue_open_cases(lh: LifecycleHarness) -> None:
+    cases = _overdue_and_fresh_cases(lh)
+
+    result = _cli(lh, "expire-cases", str(lh.v1.study_yaml))
+    again = _cli(lh, "expire-cases", str(lh.v1.study_yaml))
+
+    assert result.exit_code == 0, result.output
+    silent = lh.lifecycle(cases["silent"][1], cases["silent"][0])
+    paused = lh.lifecycle(cases["paused"][1], cases["paused"][0])
+    fresh = lh.lifecycle(cases["fresh"][1], cases["fresh"][0])
+    assert silent.incomplete_reason is IncompleteReason.RECONNECTION_TIMEOUT
+    assert paused.incomplete_reason is IncompleteReason.PAUSE_TIMEOUT
+    assert fresh.state is CaseState.ACTIVE
+    assert sorted(lh.events("case.incomplete"), key=lambda e: e["reason"]) == [
+        {
+            "reason": "pause_timeout",
+            "deadline": "2026-01-01 12:10:00",
+            "grace_seconds": PAUSE_GRACE,
+        },
+        {
+            "reason": "reconnection_timeout",
+            "deadline": "2026-01-01 12:05:00",
+            "grace_seconds": GRACE,
+        },
+    ]
+    assert "Expired 2 case(s)" in result.stdout
+    assert again.exit_code == 0
+    assert "Expired 0 case(s)" in again.stdout
+
+
+def test_expire_cases_dry_run_writes_nothing(lh: LifecycleHarness) -> None:
+    cases = _overdue_and_fresh_cases(lh)
+    before = lh.dump()
+
+    result = _cli(lh, "expire-cases", str(lh.v1.study_yaml), "--dry-run")
+
+    assert result.exit_code == 0, result.output
+    assert lh.dump() == before
+    assert cases["silent"][1] in result.stdout
+    assert "reconnection_timeout" in result.stdout
+    assert "pause_timeout" in result.stdout
+    assert "Would expire 2 case(s)" in result.stdout
+
+
+def test_expire_cases_plans_replacements(tmp_path: Path, study_fixture_dir: Path) -> None:
+    lh = _harness(
+        tmp_path,
+        study_fixture_dir / "study_lifecycle_replacement.yaml",
+        study_fixture_dir / "questions.yaml",
+    )
+    with lh.client() as client:
+        _started_patient(_start(client))
+
+    result = _cli(lh, "expire-cases", str(lh.v1.study_yaml))
+
+    assert result.exit_code == 0, result.output
+    assert len(lh.events("case.replacement_planned")) == 1
+    assert "replacement planned" in result.stdout
+
+
 def test_reset_progress_respects_terminal_cases(lh: LifecycleHarness) -> None:
     with lh.client() as client:
         done = _started_patient(_start(client))
@@ -1029,6 +1211,29 @@ def test_incomplete_cases_export_unless_only_complete(lh: LifecycleHarness) -> N
 
     assert [r["patient_id"] for r in export() if r["deterioration_6h"]] == [patient_id]
     assert export("--only-complete") == []
+
+
+def test_export_warns_about_overdue_open_cases(lh: LifecycleHarness) -> None:
+    _overdue_and_fresh_cases(lh)
+
+    def export() -> Any:
+        return _cli(
+            lh,
+            "export-answers",
+            str(lh.v1.study_yaml),
+            str(lh.v1.questions_yaml),
+            "--out",
+            str(lh.tmp_path / "export.csv"),
+            "--force",
+        )
+
+    before = export()
+    _cli(lh, "expire-cases", str(lh.v1.study_yaml))
+    after = export()
+
+    assert before.exit_code == after.exit_code == 0
+    assert "Warning: 2 open case(s) are past their grace" in before.stderr
+    assert "Warning" not in after.stderr
 
 
 # ---------------------------------------------------------------------------

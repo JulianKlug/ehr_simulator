@@ -26,6 +26,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
@@ -527,6 +528,72 @@ def abandon_case(
     except Exception as exc:  # noqa: BLE001 — Start case re-plans; report, don't fail
         return AbandonReport(clinician_id, None, planning_error=str(exc))
     return AbandonReport(clinician_id, plan.replacement_patient_id if plan else None)
+
+
+class ExpiryMode(StrEnum):
+    APPLY = "apply"
+    DRY_RUN = "dry_run"
+
+
+@dataclass(frozen=True)
+class ExpiredCase:
+    clinician_id: str
+    patient_id: str
+    reason: str
+    deadline: datetime
+    replacement_patient_id: str | None = None  # S11f: planned replacement, if any
+    planning_error: str | None = None  # the expiry stands even when planning fails
+
+
+def expire_cases(conn: Any, *, now: datetime, mode: ExpiryMode) -> list[ExpiredCase]:
+    """Time out every open case past its pinned grace, as a contact at ``now``
+    would; each case in its own commit, then its replacement plan in another.
+
+    A clinician who never returns leaves an ``active`` row no lazy check will
+    ever reach; this materialises it (Phase 2 gate §8.5) before an export.
+    """
+    from ehr_simulator import case_lifecycle, replacement
+
+    overdue = case_lifecycle.overdue_cases(conn, now)
+    if mode is ExpiryMode.DRY_RUN:
+        return [
+            ExpiredCase(case.clinician_id, case.patient_id, str(t.reason), t.deadline)
+            for case, t in overdue
+        ]
+
+    expired = []
+    for case, _ in overdue:
+        policy = case_lifecycle.pinned_policy(conn, case)
+        timeout = case_lifecycle.expire_if_overdue(conn, case, policy, now)
+        if timeout is None:
+            continue  # a contact reached the case first
+
+        try:
+            plan = replacement.plan_replacement(
+                conn, clinician_id=case.clinician_id, original_patient_id=case.patient_id, now=now
+            )
+        except Exception as exc:  # noqa: BLE001 — Start case re-plans; report, don't fail
+            expired.append(
+                ExpiredCase(
+                    case.clinician_id,
+                    case.patient_id,
+                    str(timeout.reason),
+                    timeout.deadline,
+                    planning_error=str(exc),
+                )
+            )
+            continue
+
+        expired.append(
+            ExpiredCase(
+                case.clinician_id,
+                case.patient_id,
+                str(timeout.reason),
+                timeout.deadline,
+                replacement_patient_id=plan.replacement_patient_id if plan else None,
+            )
+        )
+    return expired
 
 
 @dataclass(frozen=True)

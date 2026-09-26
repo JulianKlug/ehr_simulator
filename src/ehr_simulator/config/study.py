@@ -118,6 +118,19 @@ class RandomisationConfig(BaseModel):
             )
         return v
 
+    def planned_split(self, n_cases: int) -> tuple[int, int]:
+        """``(start, other)`` arm counts over the first ``n_cases`` positions.
+
+        Example: ``block_length: 2``, ``[start, other]``, 2 cases → ``(2, 0)``.
+        """
+        starts = sum(
+            1
+            for index in range(n_cases)
+            if self.block_sequence[(index // self.block_length) % len(self.block_sequence)]
+            == "start"
+        )
+        return starts, n_cases - starts
+
 
 class CaseLifecycleConfig(BaseModel):
     """S11e reconnection, pause and clinician stopping policy.

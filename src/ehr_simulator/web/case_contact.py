@@ -83,24 +83,14 @@ def _expire_atomically(
     conn: sqlite3.Connection, app_state: Any, row: CaseLifecycle, policy: LifecyclePolicy
 ) -> CaseLifecycle:
     """Re-read under the write lock, then time the case out in one commit."""
-    moment = now(app_state)
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        current = lifecycle_dao.fetch(conn, row.clinician_id, row.patient_id)
-        timeout = case_lifecycle.evaluate(current, policy, moment) if current else None
-        if current is None or timeout is None:
-            conn.rollback()
-            return current or row
-
-        case_lifecycle.expire(conn, current, timeout, moment)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+    timeout = case_lifecycle.expire_if_overdue(conn, row, policy, now(app_state))
+    current = lifecycle_dao.fetch(conn, row.clinician_id, row.patient_id)
+    if timeout is None:
+        return current or row
 
     _bump(app_state)
     get_logger().info("case timed out", event_kind="case.incomplete", reason=str(timeout.reason))
-    return lifecycle_dao.fetch(conn, row.clinician_id, row.patient_id)  # type: ignore[return-value]
+    return current  # type: ignore[return-value]
 
 
 def _plan_replacement_after_expiry(

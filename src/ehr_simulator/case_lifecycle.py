@@ -29,16 +29,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from ehr_simulator.config.snapshot import parse_study_snapshot
 from ehr_simulator.config.study import CaseLifecycleConfig
+from ehr_simulator.db import arm_assignments, config_history, events, sessions
 from ehr_simulator.db import case_lifecycle as lifecycle_dao
-from ehr_simulator.db import events, sessions
 from ehr_simulator.db.case_lifecycle import (
     CaseLifecycle,
     CaseState,
     IncompleteReason,
     LifecycleCounts,
 )
-from ehr_simulator.db.exceptions import CaseLifecycleError
+from ehr_simulator.db.exceptions import CaseLifecycleError, ConfigurationProvenanceError
 
 
 @dataclass(frozen=True)
@@ -96,6 +97,32 @@ def evaluate(case: CaseLifecycle, policy: LifecyclePolicy, now: datetime) -> Tim
             return Timeout(IncompleteReason.PAUSE_TIMEOUT, deadline, grace)
 
     return None
+
+
+def pinned_policy(conn: sqlite3.Connection, case: CaseLifecycle) -> LifecyclePolicy:
+    """Policy of the configuration the case was activated under."""
+    assignment = arm_assignments.fetch_for_pair(conn, case.clinician_id, case.patient_id)
+    if assignment is None or assignment.config_version is None:
+        raise ConfigurationProvenanceError(
+            f"case {case.patient_id!r} has no activation configuration"
+        )
+
+    row = config_history.require_known(conn, assignment.config_version, assignment.config_hash)
+    return LifecyclePolicy.from_config(parse_study_snapshot(row.study_json).case_lifecycle)
+
+
+def overdue_cases(conn: sqlite3.Connection, now: datetime) -> list[tuple[CaseLifecycle, Timeout]]:
+    """Open cases past their pinned grace at ``now``; never writes.
+
+    Covers clinicians who never come back, whose case no contact would
+    ever time out lazily.
+    """
+    overdue = []
+    for case in lifecycle_dao.list_open(conn):
+        timeout = evaluate(case, pinned_policy(conn, case), now)
+        if timeout is not None:
+            overdue.append((case, timeout))
+    return overdue
 
 
 def limit_reached(counts: LifecycleCounts, config: CaseLifecycleConfig | None) -> bool:
@@ -187,6 +214,31 @@ def mark_incomplete(
 def expire(conn: sqlite3.Connection, case: CaseLifecycle, timeout: Timeout, now: datetime) -> None:
     """Apply a lazy timeout decision (uncommitted)."""
     mark_incomplete(conn, case, reason=timeout.reason, now=now, timeout=timeout)
+
+
+def expire_if_overdue(
+    conn: sqlite3.Connection, case: CaseLifecycle, policy: LifecyclePolicy, now: datetime
+) -> Timeout | None:
+    """Re-read under the write lock, then time the case out in one commit.
+
+    ``None``: the case is no longer open or no longer overdue (a racing
+    contact won); nothing is written.
+    """
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        current = lifecycle_dao.fetch(conn, case.clinician_id, case.patient_id)
+        timeout = evaluate(current, policy, now) if current else None
+        if current is None or timeout is None:
+            conn.rollback()
+            return None
+
+        expire(conn, current, timeout, now)
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    return timeout
 
 
 def pause(conn: sqlite3.Connection, case: CaseLifecycle, *, now: datetime) -> None:

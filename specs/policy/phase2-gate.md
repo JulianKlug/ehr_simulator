@@ -310,6 +310,12 @@ A clinician must never see the same patient twice.
 
 Replacement selection should preserve the study's balance and sequence constraints as closely as possible.
 
+A replacement matches the incomplete case's arm first; clinician balance, patient balance and sequence distance break ties.
+
+Rationale: the replacement is drawn from the clinician's own schedule, so arm totals at stopping are nearly unchanged, while an opposite-arm replacement would break block runs (7.6).
+
+Cost: intention to treat arm imbalance may grow by up to one case per incomplete case.
+
 The replacement does not overwrite the original incomplete case.
 
 ## 8.7 Per clinician stopping
