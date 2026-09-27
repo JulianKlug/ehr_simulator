@@ -3,8 +3,14 @@
      data-t-index="{{ patient_slice.timepoint_index }}"
      data-t-count="{{ timepoint_count }}"
      data-t-minutes="{{ patient_slice.t_minutes }}"
-     data-chrome="{{ chrome }}">
+     data-chrome="{{ chrome }}"
+     data-visit-kind="{{ visit_kind }}"
+     data-observation-mode="{{ observation_mode }}">
     {{ summary_html | safe }}
+    {#- S11i: practice is always labelled; it never counts toward the study. -#}
+    {% if observation_mode == "practice" %}
+    <p class="practice-banner" role="note">Practice case — does not count toward the study.</p>
+    {% endif %}
     <div class="patient-layout{% if questions_html %} has-questions{% endif %}">
         <div class="patient-chrome">{{ chrome_html | safe }}</div>
         {% if questions_html %}

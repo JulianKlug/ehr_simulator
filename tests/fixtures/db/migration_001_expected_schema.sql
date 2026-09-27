@@ -2,7 +2,7 @@
 -- "sessions_open_unique", 003 "progress", 004 "study_identity", 005
 -- "s11b_config_version_history", 006 "s11c_randomisation_schedules", 007
 -- "s11d_case_activation", 008 "s11e_case_lifecycle", 009
--- "s11f_case_replacements"); the
+-- "s11f_case_replacements", 010 "s11h_answer_source", 011 "s11i_practice"); the
 -- filename predates 002. The
 -- drift-check test in tests/test_db.py reads sqlite_master.sql (the exact
 -- DDL text SQLite stored) sorted by name, joins with ";\n\n", and asserts
@@ -24,7 +24,7 @@ CREATE TABLE answers (
     value         TEXT NOT NULL,
     arm           TEXT NOT NULL,
     config_hash   TEXT NOT NULL,
-    ts_recorded   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, config_version TEXT,
+    ts_recorded   TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, config_version TEXT, answer_source TEXT NOT NULL DEFAULT 'clinician' CHECK (answer_source IN ('clinician', 'rule')), derived_from_question_id TEXT, observation_mode TEXT NOT NULL DEFAULT 'measured' CHECK (observation_mode IN ('measured', 'practice')),
     CONSTRAINT ux_answers_cell UNIQUE (clinician_id, patient_id, timepoint, question_id)
 );
 
@@ -128,13 +128,24 @@ CREATE INDEX ix_events_session_id        ON events (session_id);
 
 CREATE INDEX ix_ingestion_issues_boot_id ON ingestion_issues (boot_id);
 
+CREATE TABLE practice_cases (
+    clinician_id   TEXT NOT NULL REFERENCES clinicians(clinician_id),
+    patient_id     TEXT NOT NULL,
+    arm            TEXT NOT NULL CHECK (arm IN ('ai', 'no_ai')),
+    config_version TEXT NOT NULL,
+    config_hash    TEXT NOT NULL,
+    started_at     TIMESTAMP NOT NULL,
+    completed_at   TIMESTAMP,
+    PRIMARY KEY (clinician_id, patient_id)
+);
+
 CREATE TABLE progress (
     clinician_id      TEXT NOT NULL REFERENCES clinicians(clinician_id),
     patient_id        TEXT NOT NULL,
     unlocked_t_index  INTEGER NOT NULL DEFAULT 0,
     completed_at      TIMESTAMP,
     config_hash       TEXT NOT NULL,
-    updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, config_version TEXT,
+    updated_at        TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, config_version TEXT, observation_mode TEXT NOT NULL DEFAULT 'measured' CHECK (observation_mode IN ('measured', 'practice')),
     PRIMARY KEY (clinician_id, patient_id)
 );
 
@@ -181,13 +192,27 @@ CREATE TABLE sessions (
     ended_at      TIMESTAMP,
     arm           TEXT NOT NULL,
     config_hash   TEXT NOT NULL
-, config_version TEXT);
+, config_version TEXT, observation_mode TEXT NOT NULL DEFAULT 'measured' CHECK (observation_mode IN ('measured', 'practice')));
 
 CREATE TABLE study_identity (
     singleton   INTEGER PRIMARY KEY CHECK (singleton = 1),
     study_id    TEXT NOT NULL UNIQUE,
     created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TRIGGER trg_answers_source_insert
+BEFORE INSERT ON answers
+WHEN (NEW.answer_source = 'rule') <> (NEW.derived_from_question_id IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'rule answers, and only rule answers, name derived_from_question_id');
+END;
+
+CREATE TRIGGER trg_answers_source_update
+BEFORE UPDATE ON answers
+WHEN (NEW.answer_source = 'rule') <> (NEW.derived_from_question_id IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'rule answers, and only rule answers, name derived_from_question_id');
+END;
 
 CREATE TRIGGER trg_arm_phase2_complete
 BEFORE INSERT ON arm_assignments
@@ -246,6 +271,25 @@ CREATE TRIGGER trg_case_replacements_no_delete
 BEFORE DELETE ON case_replacements
 BEGIN
     SELECT RAISE(ABORT, 'replacement plans are permanent');
+END;
+
+CREATE TRIGGER trg_practice_cases_complete_once
+BEFORE UPDATE ON practice_cases
+WHEN OLD.completed_at IS NOT NULL
+  OR NEW.clinician_id IS NOT OLD.clinician_id
+  OR NEW.patient_id IS NOT OLD.patient_id
+  OR NEW.arm IS NOT OLD.arm
+  OR NEW.config_version IS NOT OLD.config_version
+  OR NEW.config_hash IS NOT OLD.config_hash
+  OR NEW.started_at IS NOT OLD.started_at
+BEGIN
+    SELECT RAISE(ABORT, 'practice cases are immutable except a first completed_at');
+END;
+
+CREATE TRIGGER trg_practice_cases_no_delete
+BEFORE DELETE ON practice_cases
+BEGIN
+    SELECT RAISE(ABORT, 'practice cases are never deleted');
 END;
 
 CREATE UNIQUE INDEX ux_arm_schedule_position

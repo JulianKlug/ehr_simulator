@@ -14,12 +14,19 @@ deleted, so S9b's gate reads the cell as unanswered.
 
 Event rows never carry the raw value (it lives in ``answers``; duplicating
 free-text into ``payload_json`` would double the pseudonymization surface).
+
+S11h: one submission is one transaction over the whole branch::
+
+    stored cell ─▶ evaluate (before) ─▶ target EDITABLE? else refuse
+                ─▶ plan_submission ─▶ clinician write + dependent deletes /
+                   rule upserts + one event each ─▶ single commit
 """
 
 from __future__ import annotations
 
 import re
 import sqlite3
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
@@ -43,6 +50,15 @@ from ehr_simulator.config.questions import Question, Questions
 from ehr_simulator.db import answers, events
 from ehr_simulator.db.exceptions import ConfigurationProvenanceError
 from ehr_simulator.logging import get_logger
+from ehr_simulator.question_branching import (
+    AnswerSource,
+    BranchWrite,
+    QuestionState,
+    StoredAnswer,
+    changed_question_ids,
+    evaluate,
+    plan_submission,
+)
 from ehr_simulator.web.study_session import SessionContext
 
 CLIENT_SEQ_MIN = 0
@@ -56,6 +72,21 @@ _SQLITE_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 _INT_RE = re.compile(r"^[+-]?\d+$")
 
 AnswerOutcome = Literal["saved", "cleared"]
+
+
+class QuestionNotEditableError(Exception):
+    """S11h: the question is hidden or set automatically under the current branch."""
+
+    def __init__(self, question_id: str, state: QuestionState) -> None:
+        reason = "is not shown" if state is QuestionState.HIDDEN else "is set automatically"
+        super().__init__(f"Question '{question_id}' {reason}")
+        self.state = state
+
+
+@dataclass(frozen=True)
+class RecordedAnswer:
+    outcome: AnswerOutcome
+    changed_question_ids: tuple[str, ...]  # other questions whose branch state moved
 
 
 # ---------------------------------------------------------------------------
@@ -141,6 +172,38 @@ def saved_answers(
     return {qid: deserialize_answer(by_id[qid], value) for qid, (value, _h, _v) in known.items()}
 
 
+def stored_cell(
+    conn: sqlite3.Connection,
+    *,
+    clinician_id: str,
+    patient_id: str,
+    t_minutes: float,
+    config_hash: str,
+    config_version: str | None = None,
+) -> dict[str, StoredAnswer]:
+    """The cell's persisted answers with their source (S11h).
+
+    Same S11b provenance lock as :func:`saved_answers`.
+    """
+    rows = answers.fetch_cell_answers(
+        conn, clinician_id=clinician_id, patient_id=patient_id, timepoint=t_minutes
+    )
+    stale = sorted(
+        qid
+        for qid, row in rows.items()
+        if row.config_version != config_version or row.config_hash != config_hash
+    )
+    if stale:
+        raise ConfigurationProvenanceError(
+            "stored answer provenance disagrees with the case configuration "
+            f"(clinician={clinician_id}, patient={patient_id}, "
+            f"timepoint={t_minutes}, question_ids={stale})"
+        )
+    return {
+        qid: StoredAnswer(row.value, AnswerSource(row.answer_source)) for qid, row in rows.items()
+    }
+
+
 def record_answer(
     conn: sqlite3.Connection,
     app_state: Any,
@@ -149,42 +212,108 @@ def record_answer(
     clinician_id: str,
     patient_id: str,
     t_minutes: float,
+    questions: Questions,
     question: Question,
     raw_values: list[str],
     client_ts: str | None,
     client_seq: str | None,
-) -> AnswerOutcome:
-    """Validate, persist (upsert or delete), and emit the matching event row."""
+) -> RecordedAnswer:
+    """Validate, then persist the answer and its branch consequences atomically.
+
+    Raises:
+        AnswerValidationError: the value does not fit the question.
+        QuestionNotEditableError: hidden or derived under the current branch.
+        ConfigurationProvenanceError: a stored row is pinned elsewhere.
+    """
     value = serialize_answer(question, raw_values)
+    stored = stored_cell(
+        conn,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        t_minutes=t_minutes,
+        config_hash=ctx.config_hash,
+        config_version=ctx.config_version,
+    )
+    before = evaluate(questions, {qid: row.value for qid, row in stored.items()})
+    current = before.get(question.question_id)
+    if current is None or current.state is not QuestionState.EDITABLE:
+        raise QuestionNotEditableError(
+            question.question_id, current.state if current else QuestionState.HIDDEN
+        )
+
+    by_id = {q.question_id: q for q in questions.questions}
+    writes = plan_submission(questions, stored, question.question_id, value)
+    clock = {
+        "client_ts": normalize_client_ts(client_ts),
+        "client_seq": normalize_client_seq(client_seq),
+    }
+    changed_rows = 0
+    try:
+        for write in writes:
+            changed_rows += _apply_write(
+                conn, app_state, ctx, clinician_id, patient_id, t_minutes, by_id, write, clock
+            )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        get_logger().exception(
+            "answer transaction rolled back (branch state restored)",
+            event_kind="answer.rollback",
+        )
+        raise
+    if changed_rows and app_state is not None:
+        app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
+
+    after_values = {qid: row.value for qid, row in stored.items()}
+    for write in writes:
+        if write.value is None:
+            after_values.pop(write.question_id, None)
+        else:
+            after_values[write.question_id] = write.value
+    after = evaluate(questions, after_values)
+    return RecordedAnswer(
+        outcome="cleared" if value is None else "saved",
+        changed_question_ids=changed_question_ids(before, after, exclude=question.question_id),
+    )
+
+
+def _apply_write(
+    conn: sqlite3.Connection,
+    app_state: Any,
+    ctx: SessionContext,
+    clinician_id: str,
+    patient_id: str,
+    t_minutes: float,
+    by_id: dict[str, Question],
+    write: BranchWrite,
+    clock: dict[str, Any],
+) -> int:
+    """One uncommitted row change + its event; returns the rows changed."""
     cell = {
         "clinician_id": clinician_id,
         "patient_id": patient_id,
         "timepoint": t_minutes,
-        "question_id": question.question_id,
+        "question_id": write.question_id,
+        "config_hash": ctx.config_hash,
+        "config_version": ctx.config_version,
+        "observation_mode": ctx.observation_mode,
     }
-
-    if value is None:
-        deleted = answers.delete_one(
-            conn,
-            **cell,
-            config_hash=ctx.config_hash,
-            config_version=ctx.config_version,
-            app_state=app_state,
-        )
-        outcome: AnswerOutcome = "cleared"
+    if write.value is None:
+        deleted = answers.delete_one(conn, **cell, commit=False)
+        changed = deleted
         detail: dict[str, Any] = {"deleted": deleted > 0}
     else:
         answers.upsert(
             conn,
             **cell,
-            value=value,
+            value=write.value,
             arm=ctx.arm,
-            config_hash=ctx.config_hash,
-            config_version=ctx.config_version,
-            app_state=app_state,
+            answer_source=str(write.source),
+            derived_from_question_id=write.derived_from_question_id,
+            commit=False,
         )
-        outcome = "saved"
-        detail = {"value_chars": len(value)}
+        changed = 1
+        detail = {"value_chars": len(write.value)}
 
     events.append(
         conn,
@@ -192,14 +321,16 @@ def record_answer(
         clinician_id=clinician_id,
         patient_id=patient_id,
         timepoint=t_minutes,
-        kind="answer.clear" if value is None else "answer.upsert",
+        kind="answer.clear" if write.value is None else "answer.upsert",
         payload={
-            "question_id": question.question_id,
-            "response_type": question.response_type,
+            "question_id": write.question_id,
+            "response_type": by_id[write.question_id].response_type,
             **detail,
+            "source": str(write.source),
+            "reason": str(write.reason),
         },
-        client_ts=normalize_client_ts(client_ts),
-        client_seq=normalize_client_seq(client_seq),
+        **clock,
         app_state=app_state,
+        commit=False,
     )
-    return outcome
+    return changed

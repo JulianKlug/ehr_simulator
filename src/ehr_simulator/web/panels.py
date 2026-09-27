@@ -8,21 +8,42 @@ only — they have no path to future data.
 
 The data-locality invariant becomes a structural property of the codebase,
 not a discipline. (Decision **D5**.)
+
+S11g intervention selection runs *after* the slice, on the already time
+bounded frames::
+
+    slice_to_timepoint ─▶ PatientSlice ─▶ select_measured_ai(slice, ctx)
+                                              │  row at exactly t, model_id
+                                              ▼  from the pinned config
+                                          MeasuredAI(row | unavailable reason)
+
+:func:`exposed_field_ids` is the clinician facing field inventory preflight
+checks against the study's prohibited fields; it mirrors what the panel
+renderers display.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Literal, Protocol, runtime_checkable
+from enum import StrEnum
+from typing import Any, Literal, Protocol, runtime_checkable
 
 import pandas as pd
 
+from ehr_simulator.config.study import AIInterventionConfig
 from ehr_simulator.ingestion.canonical import LAB_VAR_SET as _LAB_VARS
 from ehr_simulator.ingestion.canonical import VITAL_VAR_SET as _VITAL_VARS
+from ehr_simulator.ingestion.provenance import AIArtifactProvenance
 
-PanelState = Literal["loading", "empty-expected", "empty-unexpected", "partial", "error"]
+PanelState = Literal[
+    "loading", "empty-expected", "empty-unexpected", "partial", "error", "unavailable"
+]
 PanelName = Literal["vitals", "labs", "admission", "imaging", "ai"]
+
+#: S11g: imaging columns the imaging panel shows.
+_IMAGING_SHOWN_COLUMNS = ("modality", "report_text")
 
 
 @runtime_checkable
@@ -211,3 +232,122 @@ def _ai_panel_state(sliced: pd.DataFrame, full: pd.DataFrame, *, t: float) -> Pa
         if not _AI_REQUIRED_KEYS.issubset(payload.keys()):
             return "partial"
     return "loading"
+
+
+# ---------------------------------------------------------------------------
+# S11g: measured intervention selection
+# ---------------------------------------------------------------------------
+
+
+class InterventionMode(StrEnum):
+    LEGACY = "legacy"  # Phase 1 / non study: every panel, cumulative AI slice
+    AI = "ai"  # measured AI case: the frozen row for exactly t
+    NO_AI = "no_ai"  # measured no AI case: no AI surface at all
+
+
+class AIUnavailableReason(StrEnum):
+    NOT_CONFIGURED = "not_configured"  # pinned snapshot predates ai_intervention
+    ARTIFACT_MISMATCH = "artifact_mismatch"  # pinned artifact is not the loaded one
+    MISSING_ROW = "missing_row"  # no row for (patient, t, model_id)
+
+
+@dataclass(frozen=True)
+class InterventionContext:
+    mode: InterventionMode
+    intervention: AIInterventionConfig | None = None  # from the case pinned snapshot
+    loaded: AIArtifactProvenance | None = None  # from the dataset
+
+
+LEGACY_INTERVENTION = InterventionContext(InterventionMode.LEGACY)
+
+
+@dataclass(frozen=True)
+class MeasuredAI:
+    """The AI row a measured AI case shows, or why none can be shown."""
+
+    t_minutes: float | None = None
+    model_id: str | None = None
+    output_json: str | None = None
+    unavailable: AIUnavailableReason | None = None
+
+
+def provenance_mismatches(
+    configured: AIInterventionConfig, loaded: AIArtifactProvenance | None
+) -> list[str]:
+    """Human-readable differences between the frozen and the loaded artifact.
+
+    Empty means they match. Shared by the boot gate, preflight and rendering.
+    """
+    if loaded is None:
+        return ["the dataset exposes no AI artifact provenance"]
+
+    pairs = (
+        ("prediction SHA256", configured.prediction_artifact_sha256, loaded.prediction_sha256),
+        ("explanation SHA256", configured.explanation_artifact_sha256, loaded.explanation_sha256),
+        ("model/system version", configured.model_system_version, loaded.model_system_version),
+    )
+    return [
+        f"{label}: configured {want!r}, loaded {got!r}" for label, want, got in pairs if want != got
+    ]
+
+
+def select_measured_ai(patient_slice: PatientSlice, ctx: InterventionContext) -> MeasuredAI:
+    """Pick the pinned model's row at exactly the current timepoint.
+
+    Never falls back to an earlier or later row: a gap is ``MISSING_ROW``.
+    """
+    configured = ctx.intervention
+    if configured is None:
+        return MeasuredAI(unavailable=AIUnavailableReason.NOT_CONFIGURED)
+    if provenance_mismatches(configured, ctx.loaded):
+        return MeasuredAI(unavailable=AIUnavailableReason.ARTIFACT_MISMATCH)
+
+    frame = patient_slice.ai_output
+    rows = frame.loc[
+        (frame.t_minutes == patient_slice.t_minutes) & (frame.model_id == configured.model_id)
+    ]
+    if rows.empty:
+        return MeasuredAI(unavailable=AIUnavailableReason.MISSING_ROW)
+
+    row = rows.iloc[0]
+    return MeasuredAI(
+        t_minutes=float(row.t_minutes), model_id=str(row.model_id), output_json=row.output_json
+    )
+
+
+def measured_ai_state(measured: MeasuredAI) -> tuple[PanelState, dict[str, Any]]:
+    """Panel state + decoded payload of a measured AI row."""
+    if measured.unavailable is not None:
+        return "unavailable", {}
+    try:
+        payload = json.loads(measured.output_json or "")
+    except (TypeError, ValueError):
+        return "error", {}
+    if not isinstance(payload, dict):
+        return "error", {}
+    if not _AI_REQUIRED_KEYS.issubset(payload.keys()):
+        return "partial", payload
+    return "loading", payload
+
+
+def exposed_field_ids(
+    patient_slice: PatientSlice, ai_payload_keys: Iterable[str] = ()
+) -> frozenset[str]:
+    """Clinician facing ``<source>:<name>`` ids for one slice.
+
+    Mirrors the renderers: every admission field; only vital/lab scalar
+    variables (other variables are counted, never shown); the imaging
+    columns the imaging panel shows; the keys of the AI payload on screen.
+    Example: ``{"admission:age", "scalar:hr", "ai:prob_deterioration_6h"}``.
+    """
+    ids = {f"admission:{field}" for field in patient_slice.admission["field"].astype(str)}
+
+    shown_vars = _VITAL_VARS | _LAB_VARS
+    scalar_vars = set(patient_slice.scalar_ts["variable"].astype(str))
+    ids.update(f"scalar:{var}" for var in scalar_vars & shown_vars)
+
+    if not patient_slice.imaging.empty:
+        ids.update(f"imaging:{column}" for column in _IMAGING_SHOWN_COLUMNS)
+
+    ids.update(f"ai:{key}" for key in ai_payload_keys)
+    return frozenset(ids)

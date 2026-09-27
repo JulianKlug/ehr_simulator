@@ -35,6 +35,10 @@ only after an explicit Start case (``web/case_start.py``). Resolution and
 bootstrap never create an assignment — an unassigned pair is
 :class:`CaseNotActivatedError`.
 
+S11i practice cases (``db/practice.py``) resolve to their own pinned
+version with ``observation_mode = practice`` and take their fixed arm from
+the practice row — never from ``arm_assignments``.
+
 A "new case" is created only when the pair has no assignment row; every
 write in ``bootstrap_session`` carries the case's ``config_version`` +
 ``config_hash``, and an existing session row whose provenance disagrees with
@@ -55,12 +59,19 @@ from ehr_simulator.config.snapshot import (
     parse_study_snapshot,
 )
 from ehr_simulator.config.study import StudyConfig
-from ehr_simulator.db import arm_assignments, config_history, events, progress, sessions
+from ehr_simulator.db import arm_assignments, config_history, events, practice, progress, sessions
 from ehr_simulator.db.exceptions import (
     ConfigurationProvenanceError,
     StaleConfigurationError,
 )
+from ehr_simulator.db.observation import ObservationMode
+from ehr_simulator.ingestion.provenance import ai_provenance_of
 from ehr_simulator.logging import get_logger
+from ehr_simulator.web.panels import (
+    LEGACY_INTERVENTION,
+    InterventionContext,
+    InterventionMode,
+)
 
 NOT_STARTED_T_INDEX = 0
 
@@ -82,6 +93,7 @@ class SessionContext:
     config_hash: str
     config_version: str | None = None
     frontier: Frontier = Frontier(unlocked_t_index=NOT_STARTED_T_INDEX, completed=False)
+    observation_mode: ObservationMode = ObservationMode.MEASURED
 
 
 @dataclass(frozen=True)
@@ -96,6 +108,8 @@ class CaseConfiguration:
     config_hash: str
     study: StudyConfig
     questions: Questions
+    observation_mode: ObservationMode = ObservationMode.MEASURED
+    practice_arm: str | None = None  # S11i: the fixed arm of a practice case
 
     @property
     def timepoints(self) -> tuple[float, ...]:
@@ -103,6 +117,9 @@ class CaseConfiguration:
 
     @property
     def patient_ids(self) -> tuple[str, ...]:
+        """Patients this case may address: the practice list for a practice case (S11i)."""
+        if self.observation_mode is ObservationMode.PRACTICE:
+            return self.study.practice_patient_ids
         return tuple(self.study.patient_ids)
 
 
@@ -170,6 +187,24 @@ def _resolve_existing_case(
         config_hash=assignment.config_hash,
         study=study,
         questions=questions,
+    )
+
+
+def _resolve_practice_case(
+    conn: sqlite3.Connection, practice_case: practice.PracticeCase
+) -> CaseConfiguration:
+    """S11i: a practice case runs under the version it started with."""
+    row = config_history.require_known(
+        conn, practice_case.config_version, practice_case.config_hash
+    )
+    study, questions = case_from_history_row(row)
+    return CaseConfiguration(
+        config_version=practice_case.config_version,
+        config_hash=practice_case.config_hash,
+        study=study,
+        questions=questions,
+        observation_mode=ObservationMode.PRACTICE,
+        practice_arm=practice_case.arm,
     )
 
 
@@ -245,6 +280,10 @@ def resolve_case_configuration(
     included) — except in Phase 2, where they are not a case at all.
     See the module docstring for the failure modes.
     """
+    practice_case = practice.fetch(conn, clinician_id, patient_id)
+    if practice_case is not None:
+        return _resolve_practice_case(conn, practice_case)
+
     if arm_assignments.fetch_for_pair(conn, clinician_id, patient_id) is not None:
         return _resolve_existing_case(conn, app_state, clinician_id, patient_id)
 
@@ -253,6 +292,43 @@ def resolve_case_configuration(
             f"patient {patient_id!r} is not an activated case; start it from the study index"
         )
     return _active_case_or_raise(conn, app_state)
+
+
+def resolve_intervention(
+    conn: sqlite3.Connection,
+    dataset: Any,
+    *,
+    case: CaseConfiguration | None,
+    clinician_id: str,
+    patient_id: str,
+) -> InterventionContext:
+    """S11g: how the AI intervention renders for this case.
+
+    Only a measured ``phase2_randomized`` assignment renders by arm; the
+    ``phase1_stub`` arm is a placeholder, so Phase 1 and non study mode keep
+    the legacy panels. The intervention identity comes from the case's
+    pinned snapshot, never from the active server configuration.
+    """
+    if case is None:
+        return LEGACY_INTERVENTION
+
+    if case.practice_arm is not None:
+        arm = case.practice_arm
+        mode = InterventionMode.AI if arm == arm_assignments.ARM_AI else InterventionMode.NO_AI
+        return InterventionContext(
+            mode=mode, intervention=case.study.ai_intervention, loaded=ai_provenance_of(dataset)
+        )
+
+    assignment = arm_assignments.fetch_for_pair(conn, clinician_id, patient_id)
+    if assignment is None or assignment.arm_source != arm_assignments.ARM_SOURCE_PHASE2:
+        return LEGACY_INTERVENTION
+
+    mode = (
+        InterventionMode.AI if assignment.arm == arm_assignments.ARM_AI else InterventionMode.NO_AI
+    )
+    return InterventionContext(
+        mode=mode, intervention=case.study.ai_intervention, loaded=ai_provenance_of(dataset)
+    )
 
 
 def read_frontier(
@@ -326,7 +402,10 @@ def bootstrap_session(
         )
     config_hash = case.config_hash
     config_version = case.config_version
-    if is_phase2_mode(app_state):
+    mode = case.observation_mode
+    if case.practice_arm is not None:
+        arm = case.practice_arm
+    elif is_phase2_mode(app_state):
         # S11d: only Start case creates Phase 2 assignments.
         assignment = arm_assignments.fetch_for_pair(conn, clinician_id, patient_id)
         if assignment is None:
@@ -347,7 +426,9 @@ def bootstrap_session(
     if session_id is not None:
         stored = sessions.fetch_for_pair(conn, clinician_id, patient_id)
         if stored is not None and (
-            stored.config_hash != config_hash or stored.config_version != config_version
+            stored.config_hash != config_hash
+            or stored.config_version != config_version
+            or stored.observation_mode != mode
         ):
             raise ConfigurationProvenanceError(
                 "session provenance disagrees with the case configuration "
@@ -361,11 +442,14 @@ def bootstrap_session(
             arm=arm,
             config_hash=config_hash,
             config_version=config_version,
+            observation_mode=mode,
         )
 
     prog = progress.fetch(conn, clinician_id=clinician_id, patient_id=patient_id)
     if prog is not None and (
-        prog.config_hash != config_hash or prog.config_version != config_version
+        prog.config_hash != config_hash
+        or prog.config_version != config_version
+        or prog.observation_mode != mode
     ):
         raise ConfigurationProvenanceError(
             "progress provenance disagrees with the case configuration "
@@ -390,4 +474,5 @@ def bootstrap_session(
         config_hash=config_hash,
         config_version=config_version,
         frontier=frontier,
+        observation_mode=mode,
     )

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ehr_simulator.config.cross_validation import validate_study_questions
 from ehr_simulator.config.exceptions import ConfigError, ConfigValidationError
 from ehr_simulator.config.loader import (
     compute_config_hash,
@@ -57,4 +58,5 @@ __all__ = [
     "validate_config_version",
     "validate_description",
     "validate_reason",
+    "validate_study_questions",
 ]

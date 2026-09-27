@@ -244,11 +244,12 @@ def validate_config(
     questions_path: Path = typer.Argument(..., exists=True, dir_okay=False),
 ) -> None:
     """Validate study_config.yaml + questions.yaml shape."""
-    from ehr_simulator.config import load_questions, load_study_config
+    from ehr_simulator.config import load_questions, load_study_config, validate_study_questions
 
     try:
         study = load_study_config(study_path)
         questions_obj = load_questions(questions_path)
+        validate_study_questions(study, questions_obj)
     except ConfigError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc
@@ -256,7 +257,8 @@ def validate_config(
     typer.echo(
         f"OK: {study_path} ({len(study.patient_ids)} patients, "
         f"{len(study.timepoints)} timepoints), "
-        f"{questions_path} ({len(questions_obj.questions)} questions, schema_version=1)"
+        f"{questions_path} ({len(questions_obj.questions)} questions, "
+        f"schema_version={questions_obj.schema_version})"
     )
     if study.randomisation is not None and study.case_lifecycle is None:
         typer.echo(
@@ -915,7 +917,7 @@ def activate_config_cmd(
 ) -> None:
     """Register the given config as a new configuration version and make it active."""
     from ehr_simulator.cli_support import OperatorError, activate_for_cli
-    from ehr_simulator.config import load_questions, load_study_config
+    from ehr_simulator.config import load_questions, load_study_config, validate_study_questions
     from ehr_simulator.db import resolve_db_path
     from ehr_simulator.db.exceptions import ConfigurationActivationError, StudyIdentityError
     from ehr_simulator.logging import setup_logging
@@ -924,6 +926,7 @@ def activate_config_cmd(
     try:
         study = load_study_config(study_path)
         questions = load_questions(questions_path)
+        validate_study_questions(study, questions)
     except ConfigError as exc:
         typer.echo(f"Error: {exc}", err=True)
         raise typer.Exit(code=1) from exc

@@ -5,11 +5,16 @@
         <button role="tab" aria-controls="tab-vitals" aria-selected="false" data-tab="vitals">Vitals</button>
         <button role="tab" aria-controls="tab-labs" aria-selected="false" data-tab="labs">Labs</button>
         <button role="tab" aria-controls="tab-imaging" aria-selected="false" data-tab="imaging">Imaging</button>
+        {#- S11g: a measured no AI case has no AI tab at all. -#}
+        {% if show_ai %}
         <button role="tab" aria-controls="tab-ai" aria-selected="false" data-tab="ai">AI</button>
+        {% endif %}
     </nav>
     <div role="tabpanel" id="tab-admission">{{ panels.admission | safe }}</div>
     <div role="tabpanel" id="tab-vitals" hidden>{{ panels.vitals | safe }}</div>
     <div role="tabpanel" id="tab-labs" hidden>{{ panels.labs | safe }}</div>
     <div role="tabpanel" id="tab-imaging" hidden>{{ panels.imaging | safe }}</div>
+    {% if show_ai %}
     <div role="tabpanel" id="tab-ai" hidden>{{ panels.ai | safe }}</div>
+    {% endif %}
 </main>

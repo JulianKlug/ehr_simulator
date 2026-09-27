@@ -64,6 +64,7 @@ from ehr_simulator.config import (
     StudyConfig,
 )
 from ehr_simulator.db import answers, arm_assignments
+from ehr_simulator.db.observation import ObservationMode
 from ehr_simulator.ingestion.canonical import LAB_VAR_SET, VITAL_VAR_SET
 
 if TYPE_CHECKING:
@@ -205,7 +206,11 @@ def build_divergence_figure(
     tps_set = set(tps)
     by_id: Mapping[str, Question] = {q.question_id: q for q in questions.questions}
 
-    all_answers = tuple(a for a in answers.fetch_all(conn) if a.patient_id == patient_id)
+    all_answers = tuple(
+        a
+        for a in answers.fetch_all(conn)
+        if a.patient_id == patient_id and a.observation_mode == ObservationMode.MEASURED
+    )
     # S10 fix: config-hash drift is checked on the assignment rows too, not
     # only the answer rows — with zero answers the drift would otherwise be
     # invisible (spec §5: the patient's answers AND their locked arm were

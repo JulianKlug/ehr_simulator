@@ -80,6 +80,7 @@ from ehr_simulator.ingestion._shared import (
 )
 from ehr_simulator.ingestion.canonical import CanonicalShape, empty_frame
 from ehr_simulator.ingestion.exceptions import IngestionIssue
+from ehr_simulator.ingestion.provenance import AIArtifactProvenance
 
 __all__ = [
     "CategoricalGroup",
@@ -127,6 +128,8 @@ class MimicDataset:
     imaging: pd.DataFrame
     ai_output: pd.DataFrame
     issues: list[IngestionIssue] = field(default_factory=list)
+    # S11g: no AI artifact is loaded for this dataset (S7 adds one).
+    ai_provenance: AIArtifactProvenance | None = None
 
 
 def load_mimic(

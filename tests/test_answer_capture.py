@@ -161,19 +161,20 @@ def _record(
     ctx = bootstrap_session(
         db, state, clinician_id=cid, patient_id="p1", frontier=Frontier(0, False)
     )
-    outcome = record_answer(
+    recorded = record_answer(
         db,
         state,
         ctx=ctx,
         clinician_id=cid,
         patient_id="p1",
         t_minutes=_T,
+        questions=questions,
         question=_q(questions, question_id),
         raw_values=raw,
         client_ts=client_ts,
         client_seq=client_seq,
     )
-    return cid, outcome
+    return cid, recorded.outcome
 
 
 def test_record_answer_upserts_and_emits_event(
@@ -210,6 +211,8 @@ def test_record_answer_upserts_and_emits_event(
         "question_id": "deterioration_6h",
         "response_type": "categorical",
         "value_chars": 2,
+        "source": "clinician",
+        "reason": "user_change",
     }
     assert "value" not in payload
     assert cid

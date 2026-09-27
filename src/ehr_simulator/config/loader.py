@@ -57,6 +57,10 @@ _ConfigLoader.add_implicit_resolver(
 )
 
 
+#: Questions schema generations (S11h added "2": branching).
+_QUESTIONS_SCHEMA_VERSIONS = ("1", "2")
+
+
 def _read_yaml(path: Path) -> dict:
     if not path.exists():
         raise ConfigError(f"{path}: file not found")
@@ -96,7 +100,19 @@ def load_study_config(path: Path) -> StudyConfig:
         raise ConfigError.from_validation_error(exc, path=path) from exc
 
     _check_balance_at_target(study, path)
+    _check_intervention_configured(study, path)
     return study
+
+
+def _check_intervention_configured(study: StudyConfig, path: Path) -> None:
+    """S11g: a randomised study assigns AI cases, so it must name the frozen
+    AI intervention. YAML only: stored snapshots stay readable.
+    """
+    if study.randomisation is not None and study.ai_intervention is None:
+        raise ConfigError(
+            f"{path.name}: a randomisation block requires an ai_intervention block "
+            "(the frozen AI artifact AI assigned cases show)"
+        )
 
 
 def _check_balance_at_target(study: StudyConfig, path: Path) -> None:
@@ -135,9 +151,10 @@ def load_questions(path: Path) -> Questions:
     try:
         return Questions.model_validate(data)
     except ValidationError as exc:
-        if observed_version is not None and observed_version != "1":
+        if observed_version is not None and observed_version not in _QUESTIONS_SCHEMA_VERSIONS:
             raise ConfigError(
-                f"{path.name}: schema_version mismatch — expected '1', got {observed_version!r}"
+                f"{path.name}: schema_version mismatch — expected '1' or '2', "
+                f"got {observed_version!r}"
             ) from exc
         raise ConfigError.from_validation_error(exc, path=path) from exc
 

@@ -15,6 +15,8 @@
             {% endfor %}
         </span>
         <span class="timepoint-nav" role="group" aria-label="walk timepoints">
+            {#- S11i: no backward control when the case prohibits it. -#}
+            {% if show_prev %}
             <button type="button"
                     class="tp-btn tp-prev"
                     {% if at_first %}disabled aria-disabled="true"{% else %}hx-get="/patient/{{ patient_slice.patient_id }}/timepoint/{{ idx - 1 }}?chrome={{ chrome }}" hx-target="#patient-view" hx-swap="outerHTML"{% endif %}
@@ -22,6 +24,7 @@
                     aria-label="previous timepoint (shortcut: [)">
                 ‹ Prev <kbd>[</kbd>
             </button>
+            {% endif %}
             <span class="tp-position" aria-live="polite">
                 t = {{ "%.0f"|format(patient_slice.t_minutes) }} min
                 <small>({{ idx + 1 }}/{{ total }})</small>
@@ -53,7 +56,9 @@
     <div class="summary-counts" aria-label="revealed-row counts">
         <span class="badge badge-scalar" data-count="{{ counts.scalar_ts }}">scalar_ts: {{ counts.scalar_ts }}</span>
         <span class="badge badge-imaging" data-count="{{ counts.imaging }}">imaging: {{ counts.imaging }}</span>
+        {% if show_ai_count %}
         <span class="badge badge-ai" data-count="{{ counts.ai }}">ai: {{ counts.ai }}</span>
+        {% endif %}
         <span class="badge badge-admission" data-count="{{ counts.admission }}">admission: {{ counts.admission }}</span>
     </div>
     <div id="summary-flash" role="status" aria-live="polite"></div>

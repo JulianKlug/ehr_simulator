@@ -1,0 +1,93 @@
+{#- One question slot (S11h). Rendered by _questions_pane.html for each
+    evaluated question, and alone with oob=True when an answer changes its
+    branch state. hidden → empty slot; derived → the rule value, read only;
+    editable → auto-saving form (open pane only). -#}
+{% set q = item.question %}
+{% set state = item.state.value %}
+{% set derived = state == "derived" %}
+{% set editable = mode == "open" and state == "editable" %}
+{% set saved = item.value if derived else prefill.get(q.question_id) %}
+<div class="question-slot" id="q-slot-{{ q.question_id }}" data-q-state="{{ state }}"
+     {%- if oob %} hx-swap-oob="outerHTML"{% endif %}>
+{% if state != "hidden" %}
+{% if q.response_type == "free-text" %}
+    {% set trigger = "change, submit, input changed delay:" ~ free_text_autosave_delay_ms ~ "ms" %}
+{% else %}
+    {% set trigger = "change, submit" %}
+{% endif %}
+<form class="question"
+      data-question-id="{{ q.question_id }}"
+      data-response-type="{{ q.response_type }}"
+      data-required="{{ 'true' if item.required_now else 'false' }}"
+      {% if editable %}
+      hx-post="/patient/{{ patient_id }}/timepoint/{{ t_index }}/answer?chrome={{ chrome }}"
+      hx-trigger="{{ trigger }}"
+      hx-target="find .answer-status"
+      hx-swap="outerHTML"
+      hx-sync="this:queue last"
+      {% endif %}>
+    <input type="hidden" name="question_id" value="{{ q.question_id }}">
+    <fieldset{% if not editable %} disabled{% endif %}>
+        <legend><span class="q-index"></span> {{ q.prompt }}{% if state == "editable" and not q.required %} <small class="q-optional">(optional)</small>{% endif %}</legend>
+
+        {% if q.response_type == "categorical" %}
+        <div class="choices">
+            {% for opt in q.options %}
+            <label class="choice">
+                <input type="radio" name="value" value="{{ opt }}"{% if saved == opt %} checked{% endif %}>
+                {{ opt }}
+            </label>
+            {% endfor %}
+        </div>
+
+        {% elif q.response_type == "likert" %}
+        <div class="choices choices-likert">
+            {% for point in range(q.scale_min, q.scale_max + 1) %}
+            <label class="choice">
+                <input type="radio" name="value" value="{{ point }}"{% if saved == point|string %} checked{% endif %}>
+                {{ point }}{% if q.scale_labels %} <span class="likert-label">{{ q.scale_labels[loop.index0] }}</span>{% endif %}
+            </label>
+            {% endfor %}
+        </div>
+        {% if q.scale_min_label or q.scale_max_label %}
+        <div class="likert-anchors" aria-hidden="true">
+            <span>{{ q.scale_min_label or "" }}</span>
+            <span>{{ q.scale_max_label or "" }}</span>
+        </div>
+        {% endif %}
+
+        {% elif q.response_type == "multi-select" %}
+        <div class="choices">
+            {% for opt in q.options %}
+            <label class="choice">
+                <input type="checkbox" name="value" value="{{ opt }}"{% if saved and opt in saved %} checked{% endif %}>
+                {{ opt }}
+            </label>
+            {% endfor %}
+        </div>
+
+        {% elif q.response_type == "probability-0-100" %}
+        <label class="choice choice-number">
+            <span class="visually-hidden">Probability in percent</span>
+            <input type="number" name="value"
+                   min="{{ probability_min }}" max="{{ probability_max }}" step="1"
+                   inputmode="numeric" value="{{ saved or '' }}">
+            <span aria-hidden="true">%</span>
+        </label>
+
+        {% elif q.response_type == "free-text" %}
+        <label class="choice choice-text">
+            <span class="visually-hidden">Answer</span>
+            <textarea name="value" rows="3" maxlength="{{ free_text_max_chars }}">{{ saved or "" }}</textarea>
+        </label>
+        {% endif %}
+        {% if derived %}
+        <p class="q-derived-note" role="note">Set automatically from an earlier answer.</p>
+        {% endif %}
+    </fieldset>
+    {% with state=("saved" if saved else "blank"), question_id=q.question_id, error=None %}
+    {% include "_answer_status.html" %}
+    {% endwith %}
+</form>
+{% endif %}
+</div>

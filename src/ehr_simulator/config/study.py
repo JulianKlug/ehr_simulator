@@ -21,17 +21,29 @@ pre-S11c snapshots and their ``config_hash`` stay byte-identical.
 S11e: optional ``case_lifecycle`` block (:class:`CaseLifecycleConfig`) sets
 reconnection grace, voluntary pause and per-clinician stopping limits.
 Omitted from serialization when absent, like ``randomisation``.
+
+S11g: optional ``ai_intervention`` (:class:`AIInterventionConfig`, the frozen
+AI artifact and presentation a measured AI case shows) and
+``clinician_facing`` (:class:`ClinicianFacingConfig`, fields preflight must
+never find on screen). Both omitted from serialization when absent.
+
+S11i: optional ``study_behaviour`` (:class:`StudyBehaviourConfig`) — backward
+navigation, feedback, practice cases and free text, pinned per case like
+every other block. Omitted from serialization when absent (legacy
+behaviour: read-only revisits, no practice, free text allowed).
 """
 
 from __future__ import annotations
 
 import re
+from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
 from pydantic import (
     BaseModel,
     ConfigDict,
+    Field,
     SerializerFunctionWrapHandler,
     StrictBool,
     StrictInt,
@@ -46,9 +58,18 @@ from ehr_simulator.config.exceptions import ConfigError
 __all__ = [
     "MASTER_SEED_MAX",
     "MIN_RECONNECTION_GRACE_SECONDS",
+    "PROHIBITED_FIELD_PATTERN",
     "STUDY_ID_PATTERN",
+    "AIInterventionConfig",
+    "BackwardNavigation",
     "BlockEntry",
     "CaseLifecycleConfig",
+    "ClinicianFacingConfig",
+    "FeedbackConfig",
+    "FreeTextConfig",
+    "FreeTextExport",
+    "PracticeConfig",
+    "StudyBehaviourConfig",
     "RandomisationConfig",
     "StudyConfig",
 ]
@@ -71,6 +92,16 @@ MIN_RECONNECTION_GRACE_SECONDS = 180
 
 #: ``start`` = the clinician's starting arm, ``other`` = the opposite arm.
 BlockEntry = Literal["start", "other"]
+
+#: S11g: artifact hashes are lowercase hex SHA256 digests.
+_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+
+#: S11g: longest intervention identifier (model id, versions, build id).
+_INTERVENTION_ID_MAX_CHARS = 128
+
+#: S11g: ``<source>:<name>`` — the clinician facing source a field is shown
+#: from, then its canonical name. Example: ``admission:mrs_3mo``.
+PROHIBITED_FIELD_PATTERN = re.compile(r"^(admission|scalar|imaging|ai):[^\s:]+$")
 
 
 class RandomisationConfig(BaseModel):
@@ -208,6 +239,143 @@ class CaseLifecycleConfig(BaseModel):
         return self.voluntary_pause_grace_seconds
 
 
+class AIInterventionConfig(BaseModel):
+    """S11g frozen AI intervention: which rows a measured AI case shows and
+    the artifact identity they must come from.
+
+    ``model_id`` selects rows of the canonical ``ai_output`` frame (unique on
+    patient, timepoint and model). ``explanation_artifact_sha256`` is
+    omitted from serialization when null.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    model_id: str
+    model_system_version: str
+    prediction_artifact_sha256: str
+    explanation_artifact_sha256: str | None = None
+    presentation_version: str
+    intervention_build_id: str
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_explanation(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if self.explanation_artifact_sha256 is None and isinstance(data, dict):
+            data.pop("explanation_artifact_sha256", None)
+        return data
+
+    @field_validator("prediction_artifact_sha256", "explanation_artifact_sha256")
+    @classmethod
+    def _sha256_shape(cls, v: str | None) -> str | None:
+        if v is not None and not _SHA256_PATTERN.fullmatch(v):
+            raise ValueError(f"must be 64 lowercase hex characters; got {v!r}")
+        return v
+
+    @field_validator(
+        "model_id", "model_system_version", "presentation_version", "intervention_build_id"
+    )
+    @classmethod
+    def _identifier_shape(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("must be non-blank")
+        if len(v) > _INTERVENTION_ID_MAX_CHARS:
+            raise ValueError(f"must be at most {_INTERVENTION_ID_MAX_CHARS} characters")
+        return v
+
+
+class ClinicianFacingConfig(BaseModel):
+    """S11g: fields that directly encode the reference outcome and so must
+    never be clinician facing. An explicit empty list is the study's
+    declaration that none exist.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    prohibited_fields: list[str]
+
+    @field_validator("prohibited_fields")
+    @classmethod
+    def _fields_shape(cls, v: list[str]) -> list[str]:
+        bad = [f for f in v if not PROHIBITED_FIELD_PATTERN.fullmatch(f)]
+        if bad:
+            raise ValueError(
+                f"prohibited fields must match {PROHIBITED_FIELD_PATTERN.pattern!r}; got {bad}"
+            )
+        if len(set(v)) != len(v):
+            raise ValueError("prohibited fields must be unique")
+        return v
+
+
+class BackwardNavigation(StrEnum):
+    ALLOW_READONLY = "allow_readonly"
+    PROHIBIT = "prohibit"
+
+
+class FreeTextExport(StrEnum):
+    EXCLUDE = "exclude"
+    INCLUDE_EXPLICIT = "include_explicit"
+
+
+class FeedbackConfig(BaseModel):
+    """S11i: performance feedback surfaces. None is implemented, so every flag
+    must stay false; the block records the explicit policy in the snapshot."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    show_ground_truth: StrictBool = False
+    show_correctness: StrictBool = False
+    show_running_score: StrictBool = False
+    show_ai_correctness: StrictBool = False
+
+    @model_validator(mode="after")
+    def _all_disabled(self) -> FeedbackConfig:
+        enabled = [name for name, value in self if value]
+        if enabled:
+            raise ValueError(f"performance feedback is not implemented; {enabled} must be false")
+        return self
+
+
+class PracticeConfig(BaseModel):
+    """S11i practice cases: a fixed arm on dedicated patients, never measured."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool = False
+    patient_ids: list[str] = Field(default_factory=list)
+    arm: Literal["ai", "no_ai"] = "no_ai"
+
+    @model_validator(mode="after")
+    def _patients_match_switch(self) -> PracticeConfig:
+        if self.enabled and not self.patient_ids:
+            raise ValueError("practice.enabled requires practice.patient_ids")
+        if not self.enabled and self.patient_ids:
+            raise ValueError("practice.patient_ids must be empty while practice is disabled")
+        if len(set(self.patient_ids)) != len(self.patient_ids):
+            raise ValueError("practice.patient_ids must be unique")
+        return self
+
+
+class FreeTextConfig(BaseModel):
+    """S11i: free text is opt in; its routine export treatment is explicit."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: StrictBool = False
+    routine_export: FreeTextExport = FreeTextExport.EXCLUDE
+
+
+class StudyBehaviourConfig(BaseModel):
+    """S11i clinician-facing study policies. ``backward_navigation`` has no
+    default: a study declaring this block must choose (gate §26 item 9)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    backward_navigation: BackwardNavigation
+    feedback: FeedbackConfig = Field(default_factory=FeedbackConfig)
+    practice: PracticeConfig = Field(default_factory=PracticeConfig)
+    free_text: FreeTextConfig = Field(default_factory=FreeTextConfig)
+
+
 class StudyConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -222,6 +390,9 @@ class StudyConfig(BaseModel):
     timepoints: list[float]
     randomisation: RandomisationConfig | None = None
     case_lifecycle: CaseLifecycleConfig | None = None
+    ai_intervention: AIInterventionConfig | None = None
+    clinician_facing: ClinicianFacingConfig | None = None
+    study_behaviour: StudyBehaviourConfig | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_randomisation(self, handler: SerializerFunctionWrapHandler) -> Any:
@@ -235,6 +406,12 @@ class StudyConfig(BaseModel):
             data.pop("randomisation", None)
         if self.case_lifecycle is None:
             data.pop("case_lifecycle", None)
+        if self.ai_intervention is None:
+            data.pop("ai_intervention", None)
+        if self.clinician_facing is None:
+            data.pop("clinician_facing", None)
+        if self.study_behaviour is None:
+            data.pop("study_behaviour", None)
         return data
 
     @model_validator(mode="before")
@@ -328,6 +505,35 @@ class StudyConfig(BaseModel):
         if self.dataset == "synthetic" and (csv_set or params_set):
             raise ValueError("csv_path and params_dir are forbidden when dataset='synthetic'")
         return self
+
+    @model_validator(mode="after")
+    def _practice_consistent(self) -> StudyConfig:
+        """S11i: practice needs Phase 2, its own patients, and a deliverable arm."""
+        if self.study_behaviour is None or not self.study_behaviour.practice.enabled:
+            return self
+
+        practice = self.study_behaviour.practice
+        if self.randomisation is None:
+            raise ValueError("practice cases require a randomisation block (Phase 2)")
+        overlap = sorted(set(practice.patient_ids) & set(self.patient_ids))
+        if overlap:
+            raise ValueError(f"practice.patient_ids overlap measured patient_ids: {overlap}")
+        if practice.arm == "ai" and self.ai_intervention is None:
+            raise ValueError("practice.arm 'ai' requires an ai_intervention block")
+        return self
+
+    @property
+    def backward_navigation(self) -> BackwardNavigation:
+        """The case's backward policy; legacy configs keep read-only revisits."""
+        if self.study_behaviour is None:
+            return BackwardNavigation.ALLOW_READONLY
+        return self.study_behaviour.backward_navigation
+
+    @property
+    def practice_patient_ids(self) -> tuple[str, ...]:
+        if self.study_behaviour is None or not self.study_behaviour.practice.enabled:
+            return ()
+        return tuple(self.study_behaviour.practice.patient_ids)
 
     @property
     def timepoints_minutes(self) -> list[float]:

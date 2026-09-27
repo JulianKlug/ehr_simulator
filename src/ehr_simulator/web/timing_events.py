@@ -41,7 +41,11 @@ from ehr_simulator.db import events
 from ehr_simulator.timing import ENTER_KIND, EXIT_KIND
 from ehr_simulator.web.study_session import SessionContext
 
-__all__ = ["record_enter", "record_exit"]
+__all__ = ["REVISIT_KIND", "record_enter", "record_exit", "record_revisit"]
+
+#: S11i: a render behind the editable frontier (an occurrence marker, never
+#: a timing interval — S10 enter/exit stay untouched).
+REVISIT_KIND = "timepoint.revisit"
 
 
 def record_enter(
@@ -103,4 +107,27 @@ def record_exit(
         kind=EXIT_KIND,
         payload={"t_index": t_index, "reason": reason},
         commit=commit,
+    )
+
+
+def record_revisit(
+    conn: sqlite3.Connection,
+    app_state: Any,
+    *,
+    ctx: SessionContext,
+    clinician_id: str,
+    patient_id: str,
+    t_index: int,
+    t_minutes: float,
+) -> None:
+    """S11i: one ``timepoint.revisit`` after a successful read-only render."""
+    events.append(
+        conn,
+        app_state=app_state,
+        session_id=ctx.session_id,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        timepoint=float(t_minutes),
+        kind=REVISIT_KIND,
+        payload={"t_index": t_index},
     )

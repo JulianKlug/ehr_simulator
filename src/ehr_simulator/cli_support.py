@@ -23,6 +23,7 @@ be unit-tested without spinning up Typer. The three helpers:
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -30,8 +31,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any, Literal
 
-from ehr_simulator.config import ConfigError, Questions, StudyConfig
-from ehr_simulator.web.panels import DatasetLike, slice_to_timepoint
+from ehr_simulator.config import ConfigError, Questions, StudyConfig, validate_study_questions
+from ehr_simulator.ingestion.provenance import ai_provenance_of
+from ehr_simulator.web.panels import (
+    DatasetLike,
+    PatientSlice,
+    exposed_field_ids,
+    provenance_mismatches,
+    slice_to_timepoint,
+)
 
 
 def build_dataset_loader(
@@ -76,7 +84,9 @@ def build_dataset_loader(
     # filter is always active when the CLI builds the loader.
     def _pids() -> tuple[str, ...]:
         # dict.fromkeys: ordered de-duplication, active patients first.
-        return tuple(dict.fromkeys([*study.patient_ids, *extra_patient_ids()]))
+        return tuple(
+            dict.fromkeys([*study.patient_ids, *study.practice_patient_ids, *extra_patient_ids()])
+        )
 
     if dataset_name == "geneva":
         from ehr_simulator.ingestion.geneva import load_geneva
@@ -103,6 +113,11 @@ def build_dataset_loader(
 
 
 PreflightStatus = Literal["OK", "WARN", "FAIL"]
+
+#: Study-level preflight rows (artifact identity, missing declarations) have
+#: no patient or timepoint coordinate.
+_STUDY_LEVEL_PATIENT = "*"
+_STUDY_LEVEL_T = float("nan")
 
 
 @dataclass(frozen=True)
@@ -136,7 +151,7 @@ class PreflightReport:
 
 def walk_preflight(
     study: StudyConfig,
-    questions: Questions,  # noqa: ARG001  (accepted for forward-compat with S9)
+    questions: Questions,
     dataset: DatasetLike,
 ) -> PreflightReport:
     """Walk every ``(patient_id, t_minutes)`` cell and aggregate per-cell status.
@@ -148,8 +163,13 @@ def walk_preflight(
       empty-expected vs empty-unexpected ambiguity from S2 panel-state
       taxonomy. Non-fatal.
     - ``OK`` — at least one ``scalar_ts`` row at-or-before the timepoint.
+
+    S11g adds FAIL rows for a loaded AI artifact that is not the frozen one,
+    a missing ``(patient, t, model_id)`` AI row, a slice row after ``t``,
+    a prohibited field on screen, and a Phase 2 study that declares no
+    ``clinician_facing`` block.
     """
-    rows: list[PreflightRow] = []
+    rows: list[PreflightRow] = _study_level_rows(study, questions, dataset)
     known_pids = set(dataset.admission["patient_id"].astype(str).unique().tolist())
 
     for patient_id in study.patient_ids:
@@ -190,8 +210,96 @@ def walk_preflight(
                         message=f"patient {patient_id} t={t:g}",
                     )
                 )
+            rows.extend(
+                PreflightRow(patient_id=patient_id, t_minutes=t, status="FAIL", message=message)
+                for message in _cell_failures(study, sliced)
+            )
 
     return PreflightReport(rows=rows)
+
+
+def _study_level_rows(
+    study: StudyConfig, questions: Questions, dataset: DatasetLike
+) -> list[PreflightRow]:
+    """S11g: artifact identity and the Phase 2 leakage declaration.
+
+    S11i: the study/questions cross-model rules and practice patients that
+    the dataset does not hold.
+    """
+    messages: list[str] = []
+    try:
+        validate_study_questions(study, questions)
+    except ConfigError as exc:
+        messages.append(str(exc))
+    known = set(dataset.admission["patient_id"].astype(str))
+    messages.extend(
+        f"practice patient {pid} not found in dataset"
+        for pid in study.practice_patient_ids
+        if pid not in known
+    )
+    if study.ai_intervention is not None:
+        messages.extend(
+            f"AI artifact mismatch — {m}"
+            for m in provenance_mismatches(study.ai_intervention, ai_provenance_of(dataset))
+        )
+    if study.randomisation is not None and study.clinician_facing is None:
+        messages.append(
+            "Phase 2 study declares no clinician_facing.prohibited_fields "
+            "(use [] to declare that none exist)"
+        )
+    return [
+        PreflightRow(
+            patient_id=_STUDY_LEVEL_PATIENT, t_minutes=_STUDY_LEVEL_T, status="FAIL", message=m
+        )
+        for m in messages
+    ]
+
+
+def _cell_failures(study: StudyConfig, sliced: PatientSlice) -> list[str]:
+    """S11g per-cell checks on the clinician facing slice. Example message:
+    ``patient synth_001 t=60: no AI row for model 'demo_v0'``."""
+    t = sliced.t_minutes
+    where = f"patient {sliced.patient_id} t={t:g}"
+    failures: list[str] = []
+
+    # Defends against a slicer regression: nothing after t may reach a renderer.
+    for name, frame in (
+        ("scalar_ts", sliced.scalar_ts),
+        ("imaging", sliced.imaging),
+        ("ai_output", sliced.ai_output),
+    ):
+        if (frame["t_minutes"] > t).any():
+            failures.append(f"{where}: {name} row after the timepoint reached the slice")
+
+    ai_frame = sliced.ai_output
+    configured = study.ai_intervention
+    if configured is None:
+        ai_rows = ai_frame
+    else:
+        ai_rows = ai_frame.loc[
+            (ai_frame.t_minutes == t) & (ai_frame.model_id == configured.model_id)
+        ]
+        if study.randomisation is not None and len(ai_rows) != 1:
+            failures.append(f"{where}: no AI row for model {configured.model_id!r}")
+
+    payload_keys: set[str] = set()
+    for raw in ai_rows["output_json"]:
+        try:
+            payload = json.loads(raw)
+        except (TypeError, ValueError):
+            payload = None
+        if not isinstance(payload, dict):
+            failures.append(f"{where}: AI payload is not a JSON object")
+            continue
+        payload_keys.update(str(k) for k in payload)
+
+    if study.clinician_facing is not None:
+        exposed = exposed_field_ids(sliced, payload_keys)
+        leaked = sorted(set(study.clinician_facing.prohibited_fields) & exposed)
+        if leaked:
+            failures.append(f"{where}: prohibited clinician facing field(s) shown: {leaked}")
+
+    return failures
 
 
 # ---------------------------------------------------------------------------

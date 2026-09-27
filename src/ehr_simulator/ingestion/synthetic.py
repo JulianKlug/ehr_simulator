@@ -13,10 +13,18 @@ the ``"imputed"`` substring (e.g., ``"synthetic_pop_imputed"``,
 before calling :func:`validate`, mirroring the real-world failure mode for
 the MIMIC and Geneva CSVs where composite source strings like
 ``EHR_pop_imputed`` or ``stroke_registry_locf_imputed`` must be filtered.
+
+S11g AI artifact identity: the synthetic predictions have no source file,
+so their SHA256 is taken over one canonical representation of the
+validated ``ai_output`` frame — rows sorted by ``(patient_id, t_minutes,
+model_id)``, each as ``[patient_id, t_minutes, model_id, output_json]``,
+the list dumped with ``json.dumps(sort_keys=True, separators=(",", ":"))``
+and UTF-8 encoded. The same seed always yields the same identity.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import dataclass
 
@@ -24,9 +32,12 @@ import numpy as np
 import pandas as pd
 
 from ehr_simulator.ingestion.canonical import CanonicalShape, validate
+from ehr_simulator.ingestion.provenance import AIArtifactProvenance
 
 _TIMEPOINTS: tuple[float, ...] = (0.0, 60.0, 180.0)
 _MODEL_ID = "demo_v0"
+MODEL_SYSTEM_VERSION = "synthetic_demo_v0"
+_AI_ROW_ORDER = ["patient_id", "t_minutes", "model_id"]
 _DATASET_NAME = "synthetic"
 
 _VITALS: tuple[tuple[str, str, float, float], ...] = (
@@ -85,6 +96,7 @@ class SyntheticDataset:
     admission: pd.DataFrame
     imaging: pd.DataFrame
     ai_output: pd.DataFrame
+    ai_provenance: AIArtifactProvenance | None = None
 
 
 def load_synthetic(*, seed: int = 42) -> SyntheticDataset:
@@ -116,7 +128,23 @@ def load_synthetic(*, seed: int = 42) -> SyntheticDataset:
         admission=admission,
         imaging=imaging,
         ai_output=ai_output,
+        ai_provenance=AIArtifactProvenance(
+            prediction_sha256=ai_output_sha256(ai_output),
+            explanation_sha256=None,
+            model_system_version=MODEL_SYSTEM_VERSION,
+        ),
     )
+
+
+def ai_output_sha256(ai_output: pd.DataFrame) -> str:
+    """SHA256 of the canonical representation described in the module docstring."""
+    ordered = ai_output.sort_values(_AI_ROW_ORDER)
+    rows = [
+        [str(r.patient_id), float(r.t_minutes), str(r.model_id), str(r.output_json)]
+        for r in ordered.itertuples(index=False)
+    ]
+    canonical = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _build_scalar_ts(rng: np.random.Generator) -> pd.DataFrame:

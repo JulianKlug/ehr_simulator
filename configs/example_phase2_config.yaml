@@ -6,10 +6,12 @@
 # study_id gives it its own database (data/study_example_phase2.db), so it
 # never collides with the Phase 1 example.
 #
-#   uv run ehr-simulator validate-config configs/example_phase2_config.yaml configs/example_questions.yaml
-#   uv run ehr-simulator activate-config configs/example_phase2_config.yaml configs/example_questions.yaml \
+# Pair it with the first use case questions (schema v2, branching):
+#
+#   uv run ehr-simulator validate-config configs/example_phase2_config.yaml configs/phase2_first_use_case_questions.yaml
+#   uv run ehr-simulator activate-config configs/example_phase2_config.yaml configs/phase2_first_use_case_questions.yaml \
 #       --version v1 --description "Phase 2 example"
-#   uv run ehr-simulator serve --config  configs/example_phase2_config.yaml --questions configs/example_questions.yaml
+#   uv run ehr-simulator serve --config  configs/example_phase2_config.yaml --questions configs/phase2_first_use_case_questions.yaml
 #
 # Editing this file changes config_hash: stop the server, activate a new
 # --version, restart.
@@ -52,3 +54,44 @@ case_lifecycle:
   # S11f: an incomplete case gets one replacement from the clinician's own
   # unused schedule items (same arm first). Omitted/false keeps the hash.
   replacement_cases_enabled: false
+
+# S11g frozen AI intervention (required with `randomisation`). AI assigned
+# cases show the `model_id` row for exactly the current timepoint; boot and
+# preflight refuse when the loaded artifact's identity differs. The hash is
+# the synthetic adapter's canonical ai_output digest.
+ai_intervention:
+  model_id: demo_v0
+  model_system_version: synthetic_demo_v0
+  prediction_artifact_sha256: 90c5448853d63e90b68310a26ba5bab110070a6334e94e0e07c64d6f2d245ca9
+  explanation_artifact_sha256: null
+  presentation_version: ai_panel_v1
+  intervention_build_id: example_phase2_build
+
+# S11g: `<source>:<name>` fields that encode the reference outcome and must
+# never be clinician facing (sources: admission, scalar, imaging, ai).
+# Preflight fails if one is shown. `[]` declares that none exist.
+clinician_facing:
+  prohibited_fields: []
+
+# S11i clinician-facing policies, pinned per case. backward_navigation is
+# required once this block exists (allow_readonly: earlier timepoints stay
+# viewable read-only and each revisit is logged; prohibit: only the current
+# timepoint). Feedback flags must stay false (no feedback is implemented).
+# Practice cases (enabled: true) need their own patient_ids, disjoint from
+# patient_ids in every version. Free text is off; enabling it makes
+# `routine_export` decide whether export-answers includes those columns.
+# The first use case must still choose its backward policy (gate §26.9).
+study_behaviour:
+  backward_navigation: allow_readonly
+  feedback:
+    show_ground_truth: false
+    show_correctness: false
+    show_running_score: false
+    show_ai_correctness: false
+  practice:
+    enabled: false
+    patient_ids: []
+    arm: no_ai
+  free_text:
+    enabled: false
+    routine_export: exclude

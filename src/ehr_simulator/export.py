@@ -40,7 +40,9 @@ from typing import Any
 from ehr_simulator import timing
 from ehr_simulator.answer_codec import AnswerValidationError, decode_stored_answer
 from ehr_simulator.config import Question, Questions, StudyConfig
-from ehr_simulator.db import answers, arm_assignments, clinicians, progress
+from ehr_simulator.config.study import FreeTextExport
+from ehr_simulator.db import answers, arm_assignments, clinicians, practice, progress
+from ehr_simulator.db.observation import ObservationMode
 
 __all__ = [
     "METADATA_COLUMNS",
@@ -174,13 +176,22 @@ def build_export(
 
     conn.execute("BEGIN")
     try:
-        answer_rows = tuple(answers.fetch_all(conn))
-        progress_rows = tuple(progress.fetch_all(conn).values())
+        # S11i: practice observations never reach the routine export.
+        measured = ObservationMode.MEASURED
+        practice_pairs = practice.fetch_all_pairs(conn)
+        answer_rows = tuple(r for r in answers.fetch_all(conn) if r.observation_mode == measured)
+        progress_rows = tuple(
+            r for r in progress.fetch_all(conn).values() if r.observation_mode == measured
+        )
         assignment_rows = tuple(arm_assignments.fetch_all(conn))
         clinician_ids = set(clinicians.fetch_all_ids(conn))
         # S10: the enter/exit history must be read in the same snapshot as
         # the answers it will be paired with (spec §4, rejection list).
-        timing_events = timing.fetch_timing_events(conn)
+        timing_events = tuple(
+            e
+            for e in timing.fetch_timing_events(conn)
+            if (e.clinician_id, e.patient_id) not in practice_pairs
+        )
         return _build_under_snapshot(
             conn,
             study=study,
@@ -387,7 +398,7 @@ def _build_under_snapshot(
 
     # -- 6) Selection + ordering (spec §6.2) ------------------------------
     selected = frozenset(completed) if options.only_complete else pairs
-    question_ids = tuple(q.question_id for q in questions.questions)
+    question_ids = _exported_question_ids(study, questions)
     header = METADATA_COLUMNS + question_ids
 
     ordered = sorted(selected, key=lambda p: (pid_rank[p[1]], p[0]))
@@ -452,6 +463,25 @@ def _build_under_snapshot(
         keyfile_rows = _fetch_keyfile_rows(conn, ids)
 
     return ExportBundle(frame=frame, keyfile_rows=keyfile_rows)
+
+
+def _exported_question_ids(study: StudyConfig, questions: Questions) -> tuple[str, ...]:
+    """Answer columns, questions.yaml order.
+
+    S11i: a study declaring ``study_behaviour`` exports free-text columns
+    only under ``free_text.routine_export: include_explicit`` (the rows stay
+    in the DB). Legacy configs export every question as before.
+    """
+    behaviour = study.study_behaviour
+    exclude_free_text = (
+        behaviour is not None
+        and behaviour.free_text.routine_export is not FreeTextExport.INCLUDE_EXPLICIT
+    )
+    return tuple(
+        q.question_id
+        for q in questions.questions
+        if not (exclude_free_text and q.response_type == "free-text")
+    )
 
 
 def _refuse_hash_drift(live_hash: str, *tables: tuple[str, tuple[Any, ...]]) -> None:
