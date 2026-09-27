@@ -48,6 +48,8 @@ EventKind = Literal[
     # divergence figure.
     "timepoint.enter",
     "timepoint.exit",
+    # S11i: a read-only render behind the frontier (payload: t_index only).
+    "timepoint.revisit",
     # S11d: Start case realised one planned schedule item (payload:
     # schedule_id, case_position, arm — never the clinician name).
     "case.activated",
@@ -63,6 +65,10 @@ EventKind = Literal[
     # replacement_id, replacement_patient_id, replacement_case_position —
     # never the planned arm).
     "case.replacement_planned",
+    # S11i: a practice case started / was completed (payload: arm on start —
+    # a fixed training presentation, not a randomised assignment).
+    "practice.started",
+    "practice.completed",
 ]
 EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 

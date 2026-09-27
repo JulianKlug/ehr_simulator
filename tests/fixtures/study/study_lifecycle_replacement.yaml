@@ -15,3 +15,11 @@ case_lifecycle:
   target_completed_cases_per_clinician: 2
   max_activated_cases_per_clinician: 3
   replacement_cases_enabled: true
+ai_intervention:
+  model_id: demo_v0
+  model_system_version: synthetic_demo_v0
+  prediction_artifact_sha256: 90c5448853d63e90b68310a26ba5bab110070a6334e94e0e07c64d6f2d245ca9
+  presentation_version: ai_panel_v1
+  intervention_build_id: fixture_build
+clinician_facing:
+  prohibited_fields: []

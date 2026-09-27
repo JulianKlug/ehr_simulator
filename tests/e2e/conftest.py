@@ -276,3 +276,26 @@ def live_clock_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Cloc
     finally:
         server.should_exit = True
         thread.join(timeout=10)
+
+
+@pytest.fixture(scope="session")
+def live_branching_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """S11h: Phase 1 study mode on the first use case (branching) questions."""
+    study_yaml = str(_FIXTURES_DIR / "study_synthetic.yaml")
+    questions_yaml = str(
+        Path(__file__).resolve().parents[2] / "configs" / "example_phase2_questions.yaml"
+    )
+    yield from _boot_server(
+        tmp_path_factory,
+        label="e2e-branching",
+        extra_args=["--config", study_yaml, "--questions", questions_yaml],
+        activation=[
+            "activate-config",
+            study_yaml,
+            questions_yaml,
+            "--version",
+            "e2e",
+            "--description",
+            "e2e branching",
+        ],
+    )

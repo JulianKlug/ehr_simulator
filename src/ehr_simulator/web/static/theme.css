@@ -519,6 +519,26 @@ body.chrome-epic [role="tabpanel"][hidden] {
     margin-right: 0.25rem;
 }
 
+/* S11h: numbers count only the questions on screen, so a hidden
+   conditional question leaves no gap and a swap needs no renumbering. */
+.questions-pane {
+    counter-reset: question;
+}
+
+.questions-pane .question {
+    counter-increment: question;
+}
+
+.question .q-index::before {
+    content: counter(question) ".";
+}
+
+.q-derived-note,
+.likert-label {
+    color: var(--color-muted);
+    font-size: 0.85em;
+}
+
 .choices {
     display: flex;
     flex-wrap: wrap;
@@ -713,4 +733,12 @@ body.chrome-epic [role="tabpanel"][hidden] {
 
 .case-pause {
     margin: 0 0 0.5rem 0;
+}
+
+/* S11i: practice cases are labelled on every page. */
+.practice-banner {
+    margin: 0.5rem 0;
+    padding: 0.35rem 0.6rem;
+    border-left: 3px solid var(--color-focus-ring);
+    color: var(--color-muted);
 }

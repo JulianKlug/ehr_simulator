@@ -276,19 +276,25 @@ def answer_all_required(client: object, patient_id: str, t_index: int) -> list[s
     Derived from ``app.state.questions`` so a fixture change breaks loudly
     (review-fix R15). Returns the question ids answered.
     """
+    from ehr_simulator.question_branching import evaluate
+
     questions = client.app.state.questions  # type: ignore[attr-defined]
     answered: list[str] = []
+    values: dict[str, str] = {}
     for q in questions.questions:
-        if not q.required:
+        # S11h: follow the branch the answers so far select.
+        item = evaluate(questions, values).get(q.question_id)
+        if item is None or not item.required_now:
             continue
+        value = _valid_value(q)
         r = client.post(  # type: ignore[attr-defined]
             f"/patient/{patient_id}/timepoint/{t_index}/answer",
-            data={"question_id": q.question_id, "value": _valid_value(q)},
+            data={"question_id": q.question_id, "value": value},
         )
         assert r.status_code == 200, (q.question_id, r.status_code, r.text)
         answered.append(q.question_id)
-    required = [q.question_id for q in questions.questions if q.required]
-    assert answered == required
+        values[q.question_id] = value
+    assert evaluate(questions, values).remaining == ()
     return answered
 
 

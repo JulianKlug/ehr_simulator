@@ -1,9 +1,13 @@
 <section class="panel panel-ai panel-state-{{ state }}"
          aria-label="ai panel — {{ state }}"
          data-panel="ai"
+         {%- if measured %} data-intervention="ai"{% endif %}
          data-state="{{ state }}">
     <header>AI output</header>
-    {% if state == "empty-expected" %}
+    {#- S11g: a measured AI case shows only the frozen row for exactly t. -#}
+    {% if state == "unavailable" %}
+        <p class="error">AI output unavailable for this timepoint.</p>
+    {% elif state == "empty-expected" %}
         <p class="empty">No AI output for this patient.</p>
     {% elif state == "empty-unexpected" %}
         <p class="empty">No AI output at this timepoint yet (data exists later).</p>

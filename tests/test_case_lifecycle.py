@@ -379,17 +379,23 @@ def test_stored_snapshot_with_an_unbalanced_target_still_parses() -> None:
 
 
 @pytest.mark.parametrize(
-    "study_yaml",
+    ("study_yaml", "questions_yaml"),
     [
-        Path(__file__).parent / "fixtures" / "study" / "study_lifecycle.yaml",
-        Path(__file__).parents[1] / "configs" / "example_phase2_config.yaml",
+        (
+            Path(__file__).parent / "fixtures" / "study" / "study_lifecycle.yaml",
+            Path(__file__).parent / "fixtures" / "study" / "questions.yaml",
+        ),
+        (
+            Path(__file__).parents[1] / "configs" / "example_phase2_config.yaml",
+            Path(__file__).parents[1] / "configs" / "example_phase2_questions.yaml",
+        ),
     ],
     ids=["fixture", "example"],
 )
 def test_clinicians_stopping_at_target_get_equal_arms(
-    tmp_path: Path, study_fixture_dir: Path, study_yaml: Path
+    tmp_path: Path, study_yaml: Path, questions_yaml: Path
 ) -> None:
-    lh = _harness(tmp_path, study_yaml, study_fixture_dir / "questions.yaml")
+    lh = _harness(tmp_path, study_yaml, questions_yaml)
     target = lh.v1.study.case_lifecycle.target_completed_cases_per_clinician
     clinicians = [lh.clinician_id, lh.add_clinician(SECOND_CLINICIAN)]
 
@@ -437,7 +443,7 @@ def test_migration_8_backfills_realised_cases(tmp_db_path: Path, monkeypatch) ->
     conn.commit()
 
     monkeypatch.setattr(migrations_module, "MIGRATIONS", all_migrations)
-    assert apply_migrations(conn) == [8, 9]
+    assert apply_migrations(conn) == [8, 9, 10, 11]
     rows = lifecycle_dao.list_for_clinician(conn, "c1")
     conn.close()
 

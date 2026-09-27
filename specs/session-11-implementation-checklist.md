@@ -169,28 +169,28 @@ For every realised assignment retain:
 
 # 10. AI condition delivery
 
-- [ ] Show AI panel only in AI assigned cases.
-- [ ] Remove the AI panel entirely in no AI cases.
-- [ ] Do not render an AI placeholder in no AI cases.
-- [ ] Do not render an AI unavailable message.
-- [ ] Do not leave intervention revealing empty space where avoidable.
-- [ ] Preserve identical non AI functionality across arms.
-- [ ] Associate displayed AI output with frozen artifact identity.
-- [ ] Preserve AI prediction artifact hash.
-- [ ] Preserve explanation artifact hash where applicable.
-- [ ] Preserve model/system version.
-- [ ] Preserve template/presentation version.
-- [ ] Preserve intervention build identifier.
+- [x] Show AI panel only in AI assigned cases.
+- [x] Remove the AI panel entirely in no AI cases.
+- [x] Do not render an AI placeholder in no AI cases.
+- [x] Do not render an AI unavailable message.
+- [x] Do not leave intervention revealing empty space where avoidable.
+- [x] Preserve identical non AI functionality across arms.
+- [x] Associate displayed AI output with frozen artifact identity.
+- [x] Preserve AI prediction artifact hash.
+- [x] Preserve explanation artifact hash where applicable.
+- [x] Preserve model/system version.
+- [x] Preserve template/presentation version.
+- [x] Preserve intervention build identifier.
 
 ---
 
 # 11. Temporal validity checks
 
-- [ ] Add study preflight checks preventing direct outcome leakage.
-- [ ] Verify no clinician facing variable directly encodes the reference outcome.
-- [ ] Verify no post timepoint clinical data is exposed.
-- [ ] Verify precomputed AI output corresponds to the appropriate timepoint.
-- [ ] Preserve evidence of the frozen AI artifact used by the study.
+- [x] Add study preflight checks preventing direct outcome leakage.
+- [x] Verify no clinician facing variable directly encodes the reference outcome.
+- [x] Verify no post timepoint clinical data is exposed.
+- [x] Verify precomputed AI output corresponds to the appropriate timepoint.
+- [x] Preserve evidence of the frozen AI artifact used by the study.
 
 ---
 
@@ -200,14 +200,14 @@ The question system must support branching.
 
 Required first use case logic:
 
-- [ ] `deterioration_6h = Yes` displays primary cause question.
-- [ ] `deterioration_6h = No` hides and ungates primary cause question.
-- [ ] `mRS 0 to 2 at 3 months = Yes` automatically sets death at 3 months to No.
-- [ ] `mRS 0 to 2 = No` permits explicit death at 3 months response.
-- [ ] Conditional question state survives refresh/resume.
-- [ ] Gating uses only questions currently required under the active branch.
-- [ ] Hidden conditional questions cannot leave stale responses unless explicitly defined.
-- [ ] Add regression coverage for branch changes after an answer has already been saved.
+- [x] `deterioration_6h = Yes` displays primary cause question.
+- [x] `deterioration_6h = No` hides and ungates primary cause question.
+- [x] `mRS 0 to 2 at 3 months = Yes` automatically sets death at 3 months to No.
+- [x] `mRS 0 to 2 = No` permits explicit death at 3 months response.
+- [x] Conditional question state survives refresh/resume.
+- [x] Gating uses only questions currently required under the active branch.
+- [x] Hidden conditional questions cannot leave stale responses unless explicitly defined.
+- [x] Add regression coverage for branch changes after an answer has already been saved.
 
 ---
 
@@ -215,18 +215,18 @@ Required first use case logic:
 
 Support configuration of:
 
-- [ ] deterioration within next six hours, Yes or No
-- [ ] confidence, five point Likert scale
-- [ ] primary cause of deterioration, categorical
-- [ ] mRS 0 to 2 at three months, Yes or No
-- [ ] death at three months, Yes or No
+- [x] deterioration within next six hours, Yes or No
+- [x] confidence, five point Likert scale
+- [x] primary cause of deterioration, categorical
+- [x] mRS 0 to 2 at three months, Yes or No
+- [x] death at three months, Yes or No
 
 The first study must not silently inherit the existing example questions for:
 
-- [ ] hospital survival
-- [ ] six month death
-- [ ] contributing factors
-- [ ] free notes
+- [x] hospital survival
+- [x] six month death
+- [x] contributing factors
+- [x] free notes
 
 Update example or study specific question configuration accordingly.
 
@@ -459,14 +459,14 @@ Support a study setting controlling backward timepoint navigation.
 
 When enabled:
 
-- [ ] previous answers remain frozen
-- [ ] revisits are distinguishable from first presentation
-- [ ] revisit timing does not overwrite original timing
-- [ ] panel exposure during revisits remains identifiable
+- [x] previous answers remain frozen
+- [x] revisits are distinguishable from first presentation
+- [x] revisit timing does not overwrite original timing
+- [x] panel exposure during revisits remains identifiable
 
 When disabled:
 
-- [ ] reject backward measured case navigation cleanly
+- [x] reject backward measured case navigation cleanly
 
 ---
 
@@ -476,10 +476,10 @@ Support study configurable performance feedback.
 
 Default:
 
-- [ ] no ground truth
-- [ ] no correctness feedback
-- [ ] no running score
-- [ ] no AI correctness feedback
+- [x] no ground truth
+- [x] no correctness feedback
+- [x] no running score
+- [x] no AI correctness feedback
 
 First use case uses this default.
 
@@ -493,14 +493,14 @@ Practice observations must be distinguishable from measured observations.
 
 Practice data must not affect:
 
-- [ ] ITT population
-- [ ] PP population
-- [ ] target completed case count
-- [ ] randomisation balance
+- [x] ITT population
+- [x] PP population
+- [x] target completed case count
+- [x] randomisation balance
 
 First use case:
 
-- [ ] practice cases disabled
+- [x] practice cases disabled
 
 ---
 
@@ -519,12 +519,12 @@ Historical data do not require migration solely to remove names from old event p
 
 # 29. Free text
 
-- [ ] Free text disabled by default.
-- [ ] Study configuration may explicitly enable free text.
-- [ ] Treat enabled free text as potentially identifying.
-- [ ] Do not expose free text through telemetry summaries.
-- [ ] Do not expose free text through behavioural figures.
-- [ ] Make routine export behaviour explicit when free text is enabled.
+- [x] Free text disabled by default.
+- [x] Study configuration may explicitly enable free text.
+- [x] Treat enabled free text as potentially identifying.
+- [x] Do not expose free text through telemetry summaries.
+- [x] Do not expose free text through behavioural figures.
+- [x] Make routine export behaviour explicit when free text is enabled.
 
 ---
 

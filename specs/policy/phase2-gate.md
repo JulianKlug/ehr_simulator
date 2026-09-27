@@ -375,6 +375,8 @@ The simulator should support:
 
 Where revisits are permitted, revisits must be distinguishable from the original timepoint exposure.
 
+The first use case permits read only review of previous timepoints (`allow_readonly`, decided 2026-09-27).
+
 ## 10.2 Outcome and performance feedback
 
 Feedback is study specific and disabled by default.
@@ -973,8 +975,8 @@ Before measured data collection for the first use case begins, the following mus
 6. Final block structure.
 7. Reconnection grace period.
 8. Voluntary pause policy.
-9. Backward navigation policy.
-10. Exact deterioration reference field and coding.
+9. ~~Backward navigation policy.~~ Decided 2026-09-27: `allow_readonly` (§10.1).
+10. Exact deterioration reference field and coding. Field identified 2026-09-27: `early_neurological_deterioration` (prohibited from every clinician facing source); coding and interpretation still to document. The 3-month mRS 0 to 2 and 3-month death labels must be prohibited as well; their exact column names are still to be supplied.
 11. Final cause of deterioration categories.
 12. Target completed cases per clinician.
 13. Maximum activated cases per clinician.

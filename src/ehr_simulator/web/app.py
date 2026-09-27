@@ -34,6 +34,7 @@ import sys
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import matplotlib  # noqa: F401  (eager import so plotnine's first render is fast)
@@ -41,7 +42,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from ehr_simulator.db import arm_assignments
+from ehr_simulator.db import arm_assignments, practice
 from ehr_simulator.db.backup import create_backup
 from ehr_simulator.db.connection import AccessMode, connect, resolve_db_path
 from ehr_simulator.db.exceptions import (
@@ -53,6 +54,7 @@ from ehr_simulator.db.ingestion_issues import record_batch as record_ingestion_i
 from ehr_simulator.db.migrations import apply_migrations
 from ehr_simulator.db.study_identity import bind as bind_study_identity
 from ehr_simulator.ingestion.exceptions import AdapterError
+from ehr_simulator.ingestion.provenance import ai_provenance_of
 from ehr_simulator.ingestion.synthetic import load_synthetic
 from ehr_simulator.logging import (
     bind_request_context,
@@ -63,7 +65,7 @@ from ehr_simulator.logging import (
 )
 from ehr_simulator.web.case_contact import Clock, system_clock
 from ehr_simulator.web.middleware import CSPMiddleware, NoStoreMiddleware
-from ehr_simulator.web.panels import DatasetLike
+from ehr_simulator.web.panels import DatasetLike, provenance_mismatches
 
 _THIS_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _THIS_DIR / "templates"
@@ -246,7 +248,8 @@ def _verify_active_configuration(app: FastAPI) -> None:
     * the supplied YAML's computed hash differs from the active hash;
     * the active history row belongs to another ``study_id``;
     * a persisted snapshot does not revalidate (integrity error);
-    * the snapshot models' recomputed hash disagrees with the stored hash.
+    * the snapshot models' recomputed hash disagrees with the stored hash;
+    * S11g: the loaded AI artifact is not the one ``ai_intervention`` freezes.
 
     On success sets ``app.state.config_version``, ``app.state.config_hash``
     (unchanged, but re-asserted equal) and ``app.state.active_configuration``.
@@ -289,22 +292,38 @@ def _verify_active_configuration(app: FastAPI) -> None:
         )
     if recomputed != supplied:
         raise ValueError("supplied YAML no longer hashes to the active configuration")
+    _verify_ai_artifact(study_snap, app.state.dataset)
     app.state.config_version = active.config_version
     app.state.config_hash = active.config_hash
     app.state.active_configuration = active
+
+
+def _verify_ai_artifact(study: Any, dataset: Any) -> None:
+    """S11g: a measured study must serve exactly its frozen AI artifact."""
+    if study.ai_intervention is None:
+        return
+
+    mismatches = provenance_mismatches(study.ai_intervention, ai_provenance_of(dataset))
+    if mismatches:
+        raise ValueError(
+            "the loaded AI artifact differs from the active configuration's "
+            "ai_intervention: " + "; ".join(mismatches)
+        )
 
 
 def _assigned_patient_ids(db_path: Path) -> tuple[str, ...]:
     """Patients of existing cases, read before the lifespan opens the DB.
 
     Read-only and never creates the file: a fresh study has no cases yet.
+    S11i: practice cases count, so a practice patient an older version
+    listed stays loadable.
     """
     if not db_path.exists():
         return ()
 
     conn = connect(db_path, access=AccessMode.READ_ONLY)
     try:
-        return arm_assignments.assigned_patient_ids(conn)
+        return (*arm_assignments.assigned_patient_ids(conn), *practice.held_patient_ids(conn))
     finally:
         conn.close()
 
@@ -336,11 +355,12 @@ def app_from_study_config(
     routes fall back to ``patient_timepoints(dataset, pid)`` in that case.
     """
     from ehr_simulator.cli_support import build_dataset_loader
-    from ehr_simulator.config import load_questions, load_study_config
+    from ehr_simulator.config import load_questions, load_study_config, validate_study_questions
     from ehr_simulator.config.loader import compute_config_hash_from_models
 
     study = load_study_config(study_path)
     questions = load_questions(questions_path)
+    validate_study_questions(study, questions)
     resolved_db_path = db_path if db_path is not None else resolve_db_path(study)
     loader = build_dataset_loader(
         study, extra_patient_ids=lambda: _assigned_patient_ids(resolved_db_path)

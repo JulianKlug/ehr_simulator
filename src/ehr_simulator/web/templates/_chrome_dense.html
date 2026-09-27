@@ -4,5 +4,5 @@
     {{ panels.labs | safe }}
     {{ panels.admission | safe }}
     {{ panels.imaging | safe }}
-    {{ panels.ai | safe }}
+    {% if show_ai %}{{ panels.ai | safe }}{% endif %}
 </main>

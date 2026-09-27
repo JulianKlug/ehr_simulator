@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from uuid import uuid4
 
 from ehr_simulator.db.answers import _require_version_provenance
+from ehr_simulator.db.observation import ObservationMode
 
 
 @dataclass(frozen=True)
@@ -33,10 +34,12 @@ class SessionRow:
     config_hash: str
     config_version: str | None = None
     ended_at: object | None = None
+    observation_mode: str = ObservationMode.MEASURED
 
 
 _FETCH_PAIR_SQL = (
-    "SELECT session_id, clinician_id, patient_id, arm, config_hash, config_version, ended_at "
+    "SELECT session_id, clinician_id, patient_id, arm, config_hash, config_version, ended_at, "
+    "observation_mode "
     "FROM sessions WHERE clinician_id = ? AND patient_id = ? "
     "ORDER BY started_at DESC, rowid DESC LIMIT 1"
 )
@@ -72,6 +75,7 @@ def start_or_resume(
     config_hash: str,
     config_version: str | None = None,
     commit: bool = True,
+    observation_mode: ObservationMode = ObservationMode.MEASURED,
 ) -> str:
     """Return the open ``session_id`` for ``(clinician_id, patient_id)``,
     creating a new row if no open session exists.
@@ -91,9 +95,17 @@ def start_or_resume(
     session_id = uuid4().hex
     conn.execute(
         "INSERT INTO sessions (session_id, clinician_id, patient_id, arm, "
-        "config_hash, config_version) "
-        "VALUES (?, ?, ?, ?, ?, ?)",
-        (session_id, clinician_id, patient_id, arm, config_hash, config_version),
+        "config_hash, config_version, observation_mode) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            session_id,
+            clinician_id,
+            patient_id,
+            arm,
+            config_hash,
+            config_version,
+            str(observation_mode),
+        ),
     )
     if commit:
         conn.commit()

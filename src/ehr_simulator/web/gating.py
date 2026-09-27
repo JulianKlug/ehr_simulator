@@ -7,9 +7,11 @@
                     read-only editable
     completed:      locked   locked   locked    every pane read-only
 
-- viewable  ⇔ t_index ≤ unlocked_t_index
+- viewable  ⇔ t_index ≤ unlocked_t_index (S11i ``prohibit``: t_index ==
+  unlocked_t_index — no backward navigation)
 - open      ⇔ t_index == unlocked_t_index and not completed
-- complete  ⇔ every ``required`` question has a saved row for the cell
+- complete  ⇔ every question required under the current branch (S11h
+  ``question_branching.evaluate``) has a saved row for the cell
 - advance   moves the frontier by exactly one; the last timepoint's
   advance marks the walk complete and closes the session instead.
 
@@ -22,7 +24,8 @@ transaction (``commit=False`` everywhere, a single ``conn.commit()``), so
 a failed exit rolls the frontier (and the final close) back with it.
 ``write_counter`` is bumped exactly once, after that commit succeeds.
 S11e: the final advance also marks a tracked Phase 2 case ``completed``
-(+ ``case.completed``) inside that same transaction.
+(+ ``case.completed``) inside that same transaction; S11i does the same for
+a practice case (``practice_cases.completed_at`` + ``practice.completed``).
 """
 
 from __future__ import annotations
@@ -34,9 +37,12 @@ from typing import Any, Literal
 
 from ehr_simulator import case_lifecycle
 from ehr_simulator.config.questions import Questions
-from ehr_simulator.db import events, progress, sessions
+from ehr_simulator.config.study import BackwardNavigation
+from ehr_simulator.db import events, practice, progress, sessions
 from ehr_simulator.db.events import EventKind
+from ehr_simulator.db.observation import ObservationMode
 from ehr_simulator.logging import get_logger
+from ehr_simulator.question_branching import evaluate
 from ehr_simulator.web import case_contact, timing_events
 from ehr_simulator.web.answer_capture import (
     normalize_client_seq,
@@ -54,7 +60,7 @@ SESSION_END_REASON_COMPLETE = "patient_complete"
 
 @dataclass(frozen=True)
 class Completeness:
-    remaining: tuple[str, ...]  # required question_ids without a row, questions.yaml order
+    remaining: tuple[str, ...]  # required-now question_ids without a row, questions.yaml order
 
     @property
     def complete(self) -> bool:
@@ -81,13 +87,16 @@ class PatientProgress:
 
 
 def completeness(questions: Questions, saved: Mapping[str, object]) -> Completeness:
-    remaining = tuple(
-        q.question_id for q in questions.questions if q.required and q.question_id not in saved
-    )
-    return Completeness(remaining=remaining)
+    return Completeness(remaining=evaluate(questions, saved).remaining)
 
 
-def is_viewable(frontier: Frontier, t_index: int) -> bool:
+def is_viewable(
+    frontier: Frontier,
+    t_index: int,
+    policy: BackwardNavigation = BackwardNavigation.ALLOW_READONLY,
+) -> bool:
+    if policy is BackwardNavigation.PROHIBIT:
+        return t_index == frontier.unlocked_t_index
     return t_index <= frontier.unlocked_t_index
 
 
@@ -97,8 +106,9 @@ def pane_mode(frontier: Frontier, t_index: int) -> PaneMode:
     return "locked"
 
 
-def required_count(questions: Questions) -> int:
-    return sum(1 for q in questions.questions if q.required)
+def required_count(questions: Questions, saved: Mapping[str, object]) -> int:
+    """Questions required under the branch ``saved`` selects (S11h)."""
+    return evaluate(questions, saved).required_count
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +183,7 @@ def advance(
         config_version=ctx.config_version,
     )
     comp = completeness(questions, saved)
-    n_required = required_count(questions)
+    n_required = required_count(questions, saved)
     base_payload: dict[str, Any] = {
         "t_index": t_index,
         "answered_required": n_required - len(comp.remaining),
@@ -233,6 +243,7 @@ def advance(
                 config_version=ctx.config_version,
                 app_state=app_state,
                 commit=False,
+                observation_mode=ctx.observation_mode,
             )
             sessions.close(conn, ctx.session_id, commit=False)
             case_lifecycle.complete(
@@ -242,6 +253,14 @@ def advance(
                 session_id=ctx.session_id,
                 now=case_contact.now(app_state),
             )
+            if ctx.observation_mode is ObservationMode.PRACTICE:
+                practice.mark_completed(
+                    conn,
+                    clinician_id=clinician_id,
+                    patient_id=patient_id,
+                    now=case_contact.now(app_state),
+                )
+                _event("practice.completed", None, {}, commit=False)
             _event(
                 "advance.ok",
                 t_minutes,
@@ -289,6 +308,7 @@ def advance(
             config_version=ctx.config_version,
             app_state=app_state,
             commit=False,
+            observation_mode=ctx.observation_mode,
         )
         if not moved:
             # CAS miss (and possibly a failed INSERT OR IGNORE): discard the

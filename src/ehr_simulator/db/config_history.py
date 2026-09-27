@@ -208,7 +208,25 @@ def _check_existing_history(
                 f"study.dataset may not change within one study: history {row[0]!r} "
                 f"was activated on {stored.dataset!r}, the new activation uses {study.dataset!r}"
             )
+        _refuse_practice_overlap(row[0], stored, study)
     return prior
+
+
+def _refuse_practice_overlap(version: str, stored: StudyConfig, study: StudyConfig) -> None:
+    """S11i: a practice patient is never measured anywhere in the study (gate §9).
+
+    Study wide, across versions, so no clinician can meet a patient first as
+    practice and later as a measured case (or the reverse).
+    """
+    overlap = sorted(
+        (set(study.patient_ids) & set(stored.practice_patient_ids))
+        | (set(study.practice_patient_ids) & set(stored.patient_ids))
+    )
+    if overlap:
+        raise ConfigurationActivationError(
+            f"patients {overlap} are practice patients in one version and measured in "
+            f"another ({version!r}); a practice patient may never be measured"
+        )
 
 
 def _s11a_backfill(conn: sqlite3.Connection, config_version: str, config_hash: str) -> int:

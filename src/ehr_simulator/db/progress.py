@@ -24,6 +24,7 @@ from typing import Any
 
 from ehr_simulator.db.answers import _require_version_provenance
 from ehr_simulator.db.exceptions import ConfigurationProvenanceError
+from ehr_simulator.db.observation import ObservationMode
 
 
 @dataclass(frozen=True)
@@ -34,10 +35,12 @@ class Progress:
     completed_at: datetime | None
     config_hash: str
     config_version: str | None = None
+    observation_mode: str = ObservationMode.MEASURED
 
 
 _SELECT_COLUMNS = (
-    "clinician_id, patient_id, unlocked_t_index, completed_at, config_hash, config_version"
+    "clinician_id, patient_id, unlocked_t_index, completed_at, config_hash, config_version, "
+    "observation_mode"
 )
 
 
@@ -49,6 +52,7 @@ def _row_to_progress(row: tuple) -> Progress:
         completed_at=row[3],
         config_hash=row[4],
         config_version=row[5],
+        observation_mode=row[6],
     )
 
 
@@ -64,8 +68,10 @@ def _require_row_provenance(
     patient_id: str,
     config_hash: str,
     config_version: str | None,
+    observation_mode: ObservationMode = ObservationMode.MEASURED,
 ) -> None:
-    """Refuse to move a walk pinned to another configuration (S11b).
+    """Refuse to move a walk pinned to another configuration (S11b) or
+    recorded under another observation mode (S11i).
 
     E.g. a walk started under v1/h1 cannot be unlocked or completed by a
     v2/h2 caller. No row yet → nothing to check.
@@ -82,6 +88,11 @@ def _require_row_provenance(
             "refusing to modify progress recorded under a different configuration "
             f"provenance (clinician={clinician_id}, patient={patient_id}, "
             f"stored version={row.config_version!r}, write version={config_version!r})"
+        )
+    if row.observation_mode != observation_mode:
+        raise ConfigurationProvenanceError(
+            f"refusing to modify {row.observation_mode} progress as {observation_mode} "
+            f"(clinician={clinician_id}, patient={patient_id})"
         )
 
 
@@ -120,6 +131,7 @@ def unlock(
     config_version: str | None = None,
     app_state: Any = None,
     commit: bool = True,
+    observation_mode: ObservationMode = ObservationMode.MEASURED,
 ) -> bool:
     """Move the frontier ``from_t_index → to_t_index`` iff it still sits at ``from_t_index``.
 
@@ -140,6 +152,7 @@ def unlock(
         patient_id=patient_id,
         config_hash=config_hash,
         config_version=config_version,
+        observation_mode=observation_mode,
     )
     cursor = conn.execute(
         "UPDATE progress SET unlocked_t_index = ?, updated_at = CURRENT_TIMESTAMP "
@@ -151,9 +164,16 @@ def unlock(
     if not moved and from_t_index == 0:
         cursor = conn.execute(
             "INSERT OR IGNORE INTO progress "
-            "(clinician_id, patient_id, unlocked_t_index, config_hash, config_version) "
-            "VALUES (?, ?, ?, ?, ?)",
-            (clinician_id, patient_id, to_t_index, config_hash, config_version),
+            "(clinician_id, patient_id, unlocked_t_index, config_hash, config_version, "
+            "observation_mode) VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                clinician_id,
+                patient_id,
+                to_t_index,
+                config_hash,
+                config_version,
+                str(observation_mode),
+            ),
         )
         moved = cursor.rowcount == 1
 
@@ -174,6 +194,7 @@ def mark_complete(
     config_version: str | None = None,
     app_state: Any = None,
     commit: bool = True,
+    observation_mode: ObservationMode = ObservationMode.MEASURED,
 ) -> None:
     """Set ``completed_at`` once (upsert; a second call leaves the first timestamp).
 
@@ -188,15 +209,23 @@ def mark_complete(
         patient_id=patient_id,
         config_hash=config_hash,
         config_version=config_version,
+        observation_mode=observation_mode,
     )
     conn.execute(
         "INSERT INTO progress "
-        "(clinician_id, patient_id, unlocked_t_index, completed_at, config_hash, config_version) "
-        "VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?) "
+        "(clinician_id, patient_id, unlocked_t_index, completed_at, config_hash, config_version, "
+        "observation_mode) VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?, ?, ?) "
         "ON CONFLICT(clinician_id, patient_id) DO UPDATE SET "
         "completed_at = COALESCE(progress.completed_at, CURRENT_TIMESTAMP), "
         "updated_at = CURRENT_TIMESTAMP",
-        (clinician_id, patient_id, unlocked_t_index, config_hash, config_version),
+        (
+            clinician_id,
+            patient_id,
+            unlocked_t_index,
+            config_hash,
+            config_version,
+            str(observation_mode),
+        ),
     )
     if commit:
         conn.commit()

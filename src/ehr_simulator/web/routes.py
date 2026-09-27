@@ -38,25 +38,41 @@ case resolves — a timed-out case is made incomplete there (one commit) and
 the request is refused; a paused case renders only the Resume interstitial
 and refuses answer/advance. A successful contact touches ``last_seen_at``.
 ``POST /case/{pid}/heartbeat|pause|resume`` are the lifecycle endpoints.
+
+S11g intervention: a measured case renders by its stored arm — a no AI case
+gets no AI panel, tab or count; an AI case gets the pinned model's row for
+exactly the current timepoint. Phase 1 and non study mode are unchanged.
+
+S11i backward navigation follows the case's pinned policy: ``prohibit``
+bounces any non-frontier GET like the forward gate; ``allow_readonly``
+renders it read-only, marked ``data-visit-kind="revisit"``, and records one
+``timepoint.revisit``. ``POST /practice/start`` is the separate practice
+entry point; a practice pair is a case for every case route.
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Literal
 
 from fastapi import APIRouter, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
-from ehr_simulator.db import arm_assignments, clinicians, cookies, events
+from ehr_simulator.config.questions import Questions
+from ehr_simulator.config.study import BackwardNavigation
+from ehr_simulator.db import arm_assignments, clinicians, cookies, events, practice
 from ehr_simulator.db.exceptions import (
     CaseLifecycleError,
     ConfigurationProvenanceError,
     RandomisationIntegrityError,
     StaleConfigurationError,
 )
+from ehr_simulator.db.observation import ObservationMode
 from ehr_simulator.logging import get_logger, update_request_context
+from ehr_simulator.question_branching import evaluate
 from ehr_simulator.randomisation import ScheduleIncompatibleError
 from ehr_simulator.web import case_contact
 from ehr_simulator.web.answer_capture import (
@@ -65,6 +81,7 @@ from ehr_simulator.web.answer_capture import (
     PROBABILITY_MAX,
     PROBABILITY_MIN,
     AnswerValidationError,
+    QuestionNotEditableError,
     record_answer,
     saved_answers,
 )
@@ -87,9 +104,19 @@ from ehr_simulator.web.gating import (
     progress_overview,
 )
 from ehr_simulator.web.panels import (
+    LEGACY_INTERVENTION,
+    InterventionContext,
+    InterventionMode,
     PatientSlice,
+    measured_ai_state,
     patient_timepoints,
+    select_measured_ai,
     slice_to_timepoint,
+)
+from ehr_simulator.web.practice_start import (
+    PracticeRefusedError,
+    practice_index_state,
+    start_practice_case,
 )
 from ehr_simulator.web.study_session import (
     CaseConfiguration,
@@ -100,8 +127,9 @@ from ehr_simulator.web.study_session import (
     is_phase2_mode,
     read_frontier,
     resolve_case_configuration,
+    resolve_intervention,
 )
-from ehr_simulator.web.timing_events import record_enter
+from ehr_simulator.web.timing_events import record_enter, record_revisit
 
 router = APIRouter()
 
@@ -158,11 +186,14 @@ def _try_resolve_case(
 
 
 def _is_unactivated_phase2_patient(request: Request, clinician_id: str, patient_id: str) -> bool:
-    """Phase 2 pair with no assignment: not a case, nothing may be resolved or written."""
+    """Phase 2 pair with no assignment or practice case: not a case, nothing
+    may be resolved or written."""
     state = request.app.state
     if not is_phase2_mode(state):
         return False
 
+    if practice.fetch(state.db, clinician_id, patient_id) is not None:
+        return False
     return arm_assignments.fetch_for_pair(state.db, clinician_id, patient_id) is None
 
 
@@ -277,6 +308,13 @@ def _require_clinician(request: Request) -> tuple[str | None, Response | None]:
     if clinician_id is None or clinician_id not in known:
         return None, _htmx_aware_redirect(request, "/login")
     return clinician_id, None
+
+
+def _backward_policy(case: CaseConfiguration | None) -> BackwardNavigation:
+    """S11i: the case's pinned backward navigation policy."""
+    if case is None:
+        return BackwardNavigation.ALLOW_READONLY
+    return case.study.backward_navigation
 
 
 def _logged_in_name(request: Request) -> str | None:
@@ -499,7 +537,7 @@ def _render_questions_pane(
         t_index=t_index,
         t_minutes=t_minutes,
         chrome=chrome,
-        questions=questions.questions,
+        evaluated=evaluate(questions, prefill).questions,
         prefill=prefill,
         mode=mode,
         completed=ctx.frontier.completed,
@@ -540,7 +578,12 @@ def _render_patient_view(
     at_last = t_index == timepoint_count - 1
 
     patient_slice = slice_to_timepoint(state.dataset, patient_id, t_minutes, t_index)
-    panels_html = _render_panels(patient_slice, request)
+    intervention = LEGACY_INTERVENTION
+    if ctx is not None:
+        intervention = resolve_intervention(
+            state.db, state.dataset, case=case, clinician_id=clinician_id, patient_id=patient_id
+        )
+    panels_html = _render_panels(patient_slice, request, intervention)
 
     # Forward navigation by plain hx-get is allowed only into already
     # unlocked timepoints; at the frontier the pane CTA is the one path.
@@ -581,13 +624,17 @@ def _render_patient_view(
         show_next=show_next,
         resume_t_index=resume_t_index,
         patient_ids=jumper_patient_ids,
+        intervention_mode=intervention.mode,
+        backward=_backward_policy(case),
     )
+    is_revisit = ctx is not None and pane_mode(ctx.frontier, t_index) != "open"
     logged_in_name = _logged_in_name(request)
     template_name = "_chrome_dense.html" if chrome == "dense" else "_chrome_epic.html"
     chrome_html = templates.get_template(template_name).render(
         request=request,
         patient_slice=patient_slice,
         panels=panels_html,
+        show_ai="ai" in panels_html,
         chrome=chrome,
         logged_in_name=logged_in_name,
     )
@@ -600,6 +647,8 @@ def _render_patient_view(
         questions_html=questions_html,
         timepoint_count=timepoint_count,
         logged_in_name=logged_in_name,
+        visit_kind="revisit" if is_revisit else "primary",
+        observation_mode=case.observation_mode if case is not None else ObservationMode.MEASURED,
     )
 
 
@@ -700,6 +749,7 @@ async def index(request: Request) -> HTMLResponse:
     study_patient_ids = getattr(state, "study_patient_ids", None)
     patient_progress: dict[str, PatientProgress] | None = None
     case_state = index_state(state.db, state, clinician_id or "") if is_phase2_mode(state) else None
+    practice_state = practice_index_state(state.db, state, clinician_id or "")
     lifecycle_states: dict[str, str] = {}
     replacements: dict[str, str] = {}
     if case_state is not None:
@@ -722,6 +772,7 @@ async def index(request: Request) -> HTMLResponse:
             "patient_ids": patient_ids,
             "patient_progress": patient_progress,
             "case_state": case_state,
+            "practice_state": practice_state,
             "lifecycle_states": lifecycle_states,
             "replacements": replacements,
             "logged_in_name": _logged_in_name(request),
@@ -761,6 +812,29 @@ async def case_start(request: Request, chrome: Chrome = "epic") -> Response:
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             ),
         )
+
+    update_request_context(patient_id=started.patient_id)
+    return _htmx_aware_redirect(
+        request, _timepoint_url(started.patient_id, started.resume_t_index, chrome)
+    )
+
+
+@router.post("/practice/start")
+async def practice_start(request: Request, chrome: Chrome = "epic") -> Response:
+    """Resume or start a practice case (S11i); never a measured allocation."""
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect
+    update_request_context(clinician_id=clinician_id)
+    state = request.app.state
+
+    try:
+        started = start_practice_case(state.db, state, clinician_id=clinician_id or "")
+    except (PracticeRefusedError, StaleConfigurationError) as exc:
+        get_logger().warning(
+            "practice start refused", event_kind="practice.start.refused", error=str(exc)
+        )
+        return _form_refusal(request, _conflict(str(exc)))
 
     update_request_context(patient_id=started.patient_id)
     return _htmx_aware_redirect(
@@ -936,7 +1010,7 @@ async def patient_timepoint(
             patient_id=patient_id,
             timepoints=case.timepoints if case is not None else None,
         )
-        if not is_viewable(frontier, t_index):
+        if not is_viewable(frontier, t_index, _backward_policy(case)):
             get_logger().warning(
                 "timepoint beyond the frontier; redirecting",
                 event_kind="gate.redirect",
@@ -981,9 +1055,11 @@ async def patient_timepoint(
             headers={"HX-Push-Url": _timepoint_url(patient_id, t_index, chrome)},
         )
 
-    # Only a successfully rendered editable frontier counts as an enter.
-    if state.study is not None and ctx is not None and pane_mode(ctx.frontier, t_index) == "open":
-        record_enter(
+    # Only a successfully rendered editable frontier counts as an enter;
+    # any other study render is a read-only revisit (S11i marker only).
+    if state.study is not None and ctx is not None:
+        record = record_enter if pane_mode(ctx.frontier, t_index) == "open" else record_revisit
+        record(
             state.db,
             state,
             ctx=ctx,
@@ -1110,13 +1186,14 @@ async def patient_answer(
 
     raw_values = [v for v in form.getlist("value") if isinstance(v, str)]
     try:
-        outcome = record_answer(
+        recorded = record_answer(
             state.db,
             state,
             ctx=ctx,
             clinician_id=clinician_id or "",
             patient_id=patient_id,
             t_minutes=t_minutes,
+            questions=questions,
             question=question,
             raw_values=raw_values,
             client_ts=_form_str(form.get("client_ts")),
@@ -1129,6 +1206,15 @@ async def patient_answer(
             question_id=question_id,
             error=str(exc),
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        )
+    except QuestionNotEditableError as exc:
+        # S11h: hidden or derived under the current branch — nothing written.
+        return _answer_status(
+            request,
+            state="error",
+            question_id=question_id,
+            error=str(exc),
+            status_code=status.HTTP_409_CONFLICT,
         )
     except ConfigurationProvenanceError as exc:
         # The stored answer is pinned to another configuration: integrity error.
@@ -1159,8 +1245,57 @@ async def patient_answer(
         is_last=t_index == len(resolved.timepoints) - 1,
         oob=True,
     )
+    slots_html = _render_changed_slots(
+        request,
+        questions=questions,
+        saved=saved,
+        changed=recorded.changed_question_ids,
+        patient_id=patient_id,
+        t_index=t_index,
+        chrome=chrome,
+    )
     _touch_contact(request, contact)
-    return _answer_status(request, state=outcome, question_id=question_id, trailing_html=cta_html)
+    return _answer_status(
+        request,
+        state=recorded.outcome,
+        question_id=question_id,
+        trailing_html=cta_html + slots_html,
+    )
+
+
+def _render_changed_slots(
+    request: Request,
+    *,
+    questions: Questions,
+    saved: dict[str, str | list[str]],
+    changed: tuple[str, ...],
+    patient_id: str,
+    t_index: int,
+    chrome: str,
+) -> str:
+    """S11h: out-of-band replacements of the slots whose branch state moved."""
+    if not changed:
+        return ""
+
+    template = request.app.state.templates.get_template("_question.html")
+    evaluated = evaluate(questions, saved)
+    return "".join(
+        template.render(
+            request=request,
+            item=evaluated.get(qid),
+            prefill=saved,
+            mode="open",
+            oob=True,
+            patient_id=patient_id,
+            t_index=t_index,
+            chrome=chrome,
+            free_text_max_chars=FREE_TEXT_MAX_CHARS,
+            free_text_autosave_delay_ms=FREE_TEXT_AUTOSAVE_DELAY_MS,
+            probability_min=PROBABILITY_MIN,
+            probability_max=PROBABILITY_MAX,
+        )
+        for qid in changed
+    )
 
 
 @router.post(
@@ -1367,8 +1502,15 @@ def _render_summary(
     show_next: bool,
     resume_t_index: dict[str, int],
     patient_ids: list[str] | None = None,
+    intervention_mode: InterventionMode = InterventionMode.LEGACY,
+    backward: BackwardNavigation = BackwardNavigation.ALLOW_READONLY,
 ) -> str:
-    """``patient_ids`` overrides the jumper list (S11d Phase 2: own cases only)."""
+    """``patient_ids`` overrides the jumper list (S11d Phase 2: own cases only).
+
+    Measured cases drop the AI row count (S11g): it must not exist in a no
+    AI case, and the AI arm keeps identical chrome. ``prohibit`` drops the
+    Prev button (S11i).
+    """
     templates = request.app.state.templates
     dataset = request.app.state.dataset
     admission_facts = {
@@ -1400,22 +1542,37 @@ def _render_summary(
         timepoint_count=timepoint_count,
         show_next=show_next,
         resume_t_index=resume_t_index,
+        show_ai_count=intervention_mode is InterventionMode.LEGACY,
+        show_prev=backward is BackwardNavigation.ALLOW_READONLY,
     )
 
 
-def _render_panels(patient_slice: PatientSlice, request: Request) -> dict[str, str]:
+def _render_panels(
+    patient_slice: PatientSlice,
+    request: Request,
+    intervention: InterventionContext = LEGACY_INTERVENTION,
+) -> dict[str, str]:
     """Render each panel inside its own try/except so a failure in one panel
-    cannot take down the whole page (Decision **D9**)."""
+    cannot take down the whole page (Decision **D9**).
+
+    S11g: a measured no AI case never calls the AI renderer, so the result
+    has no ``"ai"`` key at all; a measured AI case renders the frozen row.
+    """
 
     log = get_logger()
     out: dict[str, str] = {}
-    for panel_name, render_fn in (
+    renderers: list[tuple[str, Callable[[PatientSlice, Request], str]]] = [
         ("vitals", _render_vitals),
         ("labs", _render_labs),
         ("admission", _render_admission),
         ("imaging", _render_imaging),
-        ("ai", _render_ai),
-    ):
+    ]
+    if intervention.mode is InterventionMode.LEGACY:
+        renderers.append(("ai", _render_ai))
+    elif intervention.mode is InterventionMode.AI:
+        renderers.append(("ai", partial(_render_measured_ai, intervention=intervention)))
+
+    for panel_name, render_fn in renderers:
         try:
             out[panel_name] = render_fn(patient_slice, request)
         except Exception as exc:  # noqa: BLE001
@@ -1714,4 +1871,31 @@ def _render_ai(patient_slice: PatientSlice, request: Request) -> str:
         state=state,
         error=patient_slice.panel_errors.get("ai"),
         rows=rows,
+    )
+
+
+def _render_measured_ai(
+    patient_slice: PatientSlice, request: Request, *, intervention: InterventionContext
+) -> str:
+    """S11g AI arm: the pinned model's row at exactly t, or ``unavailable``."""
+    measured = select_measured_ai(patient_slice, intervention)
+    state, payload = measured_ai_state(measured)
+    if measured.unavailable is not None:
+        get_logger().warning(
+            "measured AI output unavailable",
+            event_kind="intervention.ai.unavailable",
+            reason=str(measured.unavailable),
+        )
+
+    rows = []
+    if measured.unavailable is None:
+        rows.append(
+            {"t_minutes": measured.t_minutes, "model_id": measured.model_id, "payload": payload}
+        )
+    return request.app.state.templates.get_template("_panel_ai.html").render(
+        request=request,
+        state=state,
+        error=None,
+        rows=rows,
+        measured=True,
     )

@@ -376,6 +376,77 @@ END;
 """
 
 
+# S11h: answer provenance. ``rule`` rows are system derived (auto_value) and
+# name their controlling question; clinician rows never do.
+_S11H_ANSWER_SOURCE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    (
+        "answers",
+        "answer_source",
+        "TEXT NOT NULL DEFAULT 'clinician' CHECK (answer_source IN ('clinician', 'rule'))",
+    ),
+    ("answers", "derived_from_question_id", "TEXT"),
+)
+
+_S11H_ANSWER_SOURCE_DDL = """
+CREATE TRIGGER IF NOT EXISTS trg_answers_source_insert
+BEFORE INSERT ON answers
+WHEN (NEW.answer_source = 'rule') <> (NEW.derived_from_question_id IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'rule answers, and only rule answers, name derived_from_question_id');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_answers_source_update
+BEFORE UPDATE ON answers
+WHEN (NEW.answer_source = 'rule') <> (NEW.derived_from_question_id IS NOT NULL)
+BEGIN
+    SELECT RAISE(ABORT, 'rule answers, and only rule answers, name derived_from_question_id');
+END;
+"""
+
+# S11i: practice observations are marked at insert on every case table, and
+# practice cases live in their own table — never in schedules or
+# ``arm_assignments``, so no measured count or balance can see them.
+_OBSERVATION_MODE_DECL = (
+    "TEXT NOT NULL DEFAULT 'measured' CHECK (observation_mode IN ('measured', 'practice'))"
+)
+_S11I_OBSERVATION_MODE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("sessions", "observation_mode", _OBSERVATION_MODE_DECL),
+    ("progress", "observation_mode", _OBSERVATION_MODE_DECL),
+    ("answers", "observation_mode", _OBSERVATION_MODE_DECL),
+)
+
+_S11I_PRACTICE_DDL = """
+CREATE TABLE IF NOT EXISTS practice_cases (
+    clinician_id   TEXT NOT NULL REFERENCES clinicians(clinician_id),
+    patient_id     TEXT NOT NULL,
+    arm            TEXT NOT NULL CHECK (arm IN ('ai', 'no_ai')),
+    config_version TEXT NOT NULL,
+    config_hash    TEXT NOT NULL,
+    started_at     TIMESTAMP NOT NULL,
+    completed_at   TIMESTAMP,
+    PRIMARY KEY (clinician_id, patient_id)
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_practice_cases_complete_once
+BEFORE UPDATE ON practice_cases
+WHEN OLD.completed_at IS NOT NULL
+  OR NEW.clinician_id IS NOT OLD.clinician_id
+  OR NEW.patient_id IS NOT OLD.patient_id
+  OR NEW.arm IS NOT OLD.arm
+  OR NEW.config_version IS NOT OLD.config_version
+  OR NEW.config_hash IS NOT OLD.config_hash
+  OR NEW.started_at IS NOT OLD.started_at
+BEGIN
+    SELECT RAISE(ABORT, 'practice cases are immutable except a first completed_at');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_practice_cases_no_delete
+BEFORE DELETE ON practice_cases
+BEGIN
+    SELECT RAISE(ABORT, 'practice cases are never deleted');
+END;
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
@@ -397,6 +468,19 @@ MIGRATIONS: tuple[Migration, ...] = (
     ),
     Migration(version=8, name="s11e_case_lifecycle", up_sql=_S11E_CASE_LIFECYCLE_DDL),
     Migration(version=9, name="s11f_case_replacements", up_sql=_S11F_CASE_REPLACEMENTS_DDL),
+    Migration(
+        version=10,
+        name="s11h_answer_source",
+        up_sql="",
+        add_columns=_S11H_ANSWER_SOURCE_COLUMNS,
+        post_sql=_S11H_ANSWER_SOURCE_DDL,
+    ),
+    Migration(
+        version=11,
+        name="s11i_practice",
+        up_sql=_S11I_PRACTICE_DDL,
+        add_columns=_S11I_OBSERVATION_MODE_COLUMNS,
+    ),
 )
 
 
