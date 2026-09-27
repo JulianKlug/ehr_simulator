@@ -40,7 +40,7 @@ from ehr_simulator.web.app import app_from_study_config
 from tests.conftest import _activate_configuration, _seed_clinician
 
 REPO = Path(__file__).parent.parent
-FIRST_USE_CASE = REPO / "configs" / "phase2_first_use_case_questions.yaml"
+FIRST_USE_CASE = REPO / "configs" / "example_phase2_questions.yaml"
 FIXTURES = Path(__file__).parent / "fixtures" / "study"
 V1_QUESTIONS = FIXTURES / "questions.yaml"
 STUDY = FIXTURES / "study_synthetic.yaml"
@@ -630,3 +630,29 @@ def test_branch_state_survives_pause_and_resume(tmp_path: Path) -> None:
     assert paused.status_code == resumed.status_code == 303
     assert _slot_state(html, "primary_cause") == "editable"
     assert _slot_state(html, "death_3mo") == "derived"
+
+
+@pytest.mark.parametrize(
+    ("setup", "target"),
+    [([], "primary_cause"), ([("good_outcome_3mo", "Yes")], "death_3mo")],
+    ids=["hidden", "derived"],
+)
+def test_invalid_value_to_non_editable_question_is_409(
+    client: TestClient, setup: list[tuple[str, str]], target: str
+) -> None:
+    """Editability is decided before the value is validated (spec order)."""
+    for qid, value in setup:
+        _post(client, qid, value)
+    before = _rows(client)
+
+    response = _post(client, target, "not an option")
+
+    assert response.status_code == HTTP_CONFLICT
+    assert _rows(client) == before
+
+
+def test_noop_clear_still_bumps_write_counter(client: TestClient) -> None:
+    """A clear of an unanswered question commits its audit event: a DB write."""
+    before = client.app.state.write_counter
+    assert _post(client, "confidence", None).status_code == HTTP_OK
+    assert client.app.state.write_counter == before + 1

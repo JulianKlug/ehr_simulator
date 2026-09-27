@@ -283,7 +283,7 @@ def live_branching_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[
     """S11h: Phase 1 study mode on the first use case (branching) questions."""
     study_yaml = str(_FIXTURES_DIR / "study_synthetic.yaml")
     questions_yaml = str(
-        Path(__file__).resolve().parents[2] / "configs" / "phase2_first_use_case_questions.yaml"
+        Path(__file__).resolve().parents[2] / "configs" / "example_phase2_questions.yaml"
     )
     yield from _boot_server(
         tmp_path_factory,

@@ -387,7 +387,7 @@ def test_stored_snapshot_with_an_unbalanced_target_still_parses() -> None:
         ),
         (
             Path(__file__).parents[1] / "configs" / "example_phase2_config.yaml",
-            Path(__file__).parents[1] / "configs" / "phase2_first_use_case_questions.yaml",
+            Path(__file__).parents[1] / "configs" / "example_phase2_questions.yaml",
         ),
     ],
     ids=["fixture", "example"],

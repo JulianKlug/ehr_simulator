@@ -225,7 +225,6 @@ def record_answer(
         QuestionNotEditableError: hidden or derived under the current branch.
         ConfigurationProvenanceError: a stored row is pinned elsewhere.
     """
-    value = serialize_answer(question, raw_values)
     stored = stored_cell(
         conn,
         clinician_id=clinician_id,
@@ -241,16 +240,19 @@ def record_answer(
             question.question_id, current.state if current else QuestionState.HIDDEN
         )
 
+    # Validated only once the question is known to be editable (a malformed
+    # value to a hidden or derived question is a 409, not a 422).
+    value = serialize_answer(question, raw_values)
+
     by_id = {q.question_id: q for q in questions.questions}
     writes = plan_submission(questions, stored, question.question_id, value)
     clock = {
         "client_ts": normalize_client_ts(client_ts),
         "client_seq": normalize_client_seq(client_seq),
     }
-    changed_rows = 0
     try:
         for write in writes:
-            changed_rows += _apply_write(
+            _apply_write(
                 conn, app_state, ctx, clinician_id, patient_id, t_minutes, by_id, write, clock
             )
         conn.commit()
@@ -261,7 +263,8 @@ def record_answer(
             event_kind="answer.rollback",
         )
         raise
-    if changed_rows and app_state is not None:
+    # Every submission commits at least its audit event, so it always counts.
+    if app_state is not None:
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
 
     after_values = {qid: row.value for qid, row in stored.items()}
@@ -287,8 +290,8 @@ def _apply_write(
     by_id: dict[str, Question],
     write: BranchWrite,
     clock: dict[str, Any],
-) -> int:
-    """One uncommitted row change + its event; returns the rows changed."""
+) -> None:
+    """One uncommitted row change + its event."""
     cell = {
         "clinician_id": clinician_id,
         "patient_id": patient_id,
@@ -300,7 +303,6 @@ def _apply_write(
     }
     if write.value is None:
         deleted = answers.delete_one(conn, **cell, commit=False)
-        changed = deleted
         detail: dict[str, Any] = {"deleted": deleted > 0}
     else:
         answers.upsert(
@@ -312,7 +314,6 @@ def _apply_write(
             derived_from_question_id=write.derived_from_question_id,
             commit=False,
         )
-        changed = 1
         detail = {"value_chars": len(write.value)}
 
     events.append(
@@ -333,4 +334,3 @@ def _apply_write(
         app_state=app_state,
         commit=False,
     )
-    return changed

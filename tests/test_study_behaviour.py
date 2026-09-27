@@ -43,7 +43,7 @@ from tests.conftest import _activate_configuration, _seed_clinician, answer_all_
 
 REPO = Path(__file__).parent.parent
 FIXTURES = Path(__file__).parent / "fixtures" / "study"
-FUC_QUESTIONS = REPO / "configs" / "phase2_first_use_case_questions.yaml"
+FUC_QUESTIONS = REPO / "configs" / "example_phase2_questions.yaml"
 V1_QUESTIONS = FIXTURES / "questions.yaml"
 PID = "synth_001"
 PRACTICE_PID = "synth_003"
@@ -630,3 +630,30 @@ def test_example_config_keeps_practice_and_feedback_disabled() -> None:
     assert not behaviour.practice.enabled
     assert not any(value for _name, value in behaviour.feedback)
     assert not behaviour.free_text.enabled
+
+
+def test_open_practice_case_resumes_after_practice_disabled(phase2: Study, tmp_path: Path) -> None:
+    """An open practice case stays resumable when a newer version drops practice."""
+    with phase2.client() as client:
+        first = _start_practice(client)
+    assert first.status_code == HTTP_SEE_OTHER
+
+    v2 = _write(tmp_path, "study_v2.yaml", _phase2(practice={"enabled": False}))
+    phase2.activate(v2, "v2")
+    with phase2.client(v2) as client:
+        index = client.get("/").text
+        resumed = _start_practice(client)
+        page = _page(client, 0, pid=PRACTICE_PID)
+
+    assert 'data-practice-action="resume"' in index
+    assert resumed.status_code == HTTP_SEE_OTHER
+    assert resumed.headers["location"] == first.headers["location"]
+    assert page.status_code == HTTP_OK
+
+
+def test_practice_disabled_without_open_case_refuses(phase2: Study, tmp_path: Path) -> None:
+    v2 = _write(tmp_path, "study_v2.yaml", _phase2(practice={"enabled": False}))
+    phase2.activate(v2, "v2")
+    with phase2.client(v2) as client:
+        assert "practice-action" not in client.get("/").text
+        assert _start_practice(client).status_code == HTTP_CONFLICT

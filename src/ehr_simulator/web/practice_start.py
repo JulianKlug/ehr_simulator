@@ -5,11 +5,9 @@
     POST /practice/start
         │
         ▼
-    practice enabled in the ACTIVE configuration? ── no ──► PracticeRefusedError
-        │
-        ▼
     BEGIN IMMEDIATE
-        open practice case? ──► rollback, resume it
+        open practice case? ──► rollback, resume it   (whatever version pinned it)
+        practice enabled in the ACTIVE configuration? ── no ──► PracticeRefusedError
         stale-server check (require_active_case)
         next configured practice patient not yet started ── none ──► refused
         practice_cases row + session (observation_mode=practice)
@@ -83,12 +81,16 @@ def _resume_t_index(conn: sqlite3.Connection, clinician_id: str, patient_id: str
 def practice_index_state(
     conn: sqlite3.Connection, app_state: Any, clinician_id: str
 ) -> PracticeIndexState | None:
-    """The index's practice section; ``None`` when the active config has none. Pure read."""
+    """The index's practice section. Pure read.
+
+    ``None`` when the active config has no practice and the clinician holds
+    no open practice case (an open one stays resumable across versions).
+    """
     configured = _practice_ids(app_state)
-    if not configured:
+    cases = practice.list_for_clinician(conn, clinician_id)
+    if not configured and all(not c.is_open for c in cases):
         return None
 
-    cases = practice.list_for_clinician(conn, clinician_id)
     entries = tuple(
         PracticeEntry(
             c.patient_id,
@@ -118,10 +120,6 @@ def start_practice_case(
         PracticeRefusedError: practice disabled or every practice patient used.
         StaleConfigurationError: DB active configuration ≠ the running server.
     """
-    configured = _practice_ids(app_state)
-    if not configured:
-        raise PracticeRefusedError("Practice cases are not enabled for this study")
-
     conn.execute("BEGIN IMMEDIATE")
     try:
         cases = practice.list_for_clinician(conn, clinician_id)
@@ -131,6 +129,10 @@ def start_practice_case(
             return StartedPractice(
                 opened.patient_id, _resume_t_index(conn, clinician_id, opened.patient_id)
             )
+
+        configured = _practice_ids(app_state)
+        if not configured:
+            raise PracticeRefusedError("Practice cases are not enabled for this study")
 
         active = require_active_case(conn, app_state)
         if active.config_version is None:

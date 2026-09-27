@@ -141,7 +141,7 @@ A clear of the controlling question re-evaluates the same way.
 
 ## First use case questions
 
-New fixture `configs/phase2_first_use_case_questions.yaml` (`schema_version: "2"`), prompts from the Phase 2 gate §19, nothing else:
+New fixture `configs/example_phase2_questions.yaml` (`schema_version: "2"`), prompts from the Phase 2 gate §19, nothing else:
 
 | id | type | rule |
 |---|---|---|

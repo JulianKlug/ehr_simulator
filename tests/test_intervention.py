@@ -509,6 +509,6 @@ def test_example_phase2_config_passes_preflight() -> None:
     root = Path(__file__).parent.parent / "configs"
     study = load_study_config(root / "example_phase2_config.yaml")
     report = walk_preflight(
-        study, load_questions(root / "phase2_first_use_case_questions.yaml"), load_synthetic()
+        study, load_questions(root / "example_phase2_questions.yaml"), load_synthetic()
     )
     assert not report.has_fail

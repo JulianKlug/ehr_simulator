@@ -1,0 +1,58 @@
+# Phase 2 first use case questions (Phase 2 gate §19) — schema v2, branching.
+#
+# Exactly five measured questions; the Phase 1 example's hospital survival,
+# six month death, contributing factors and free notes are deliberately
+# absent, and deterioration has no Unknown option.
+#
+# Branching (evaluated by the server, never the browser):
+# - primary_cause is shown (and required) only while deterioration_6h is Yes;
+#   switching to No deletes a saved cause.
+# - death_3mo is set to No automatically while good_outcome_3mo is Yes;
+#   switching to No clears it and the clinician must answer it.
+#
+# PLACEHOLDER: the primary_cause options below are not the study's final
+# categories (gate §26 item 11 is still open). Replace them — and activate a
+# new configuration version — before measured data collection.
+
+schema_version: "2"
+
+questions:
+  - question_id: deterioration_6h
+    prompt: "Will the patient experience neurological deterioration within the next 6 hours?"
+    response_type: categorical
+    options: [Yes, No]
+
+  - question_id: confidence
+    prompt: "How confident are you in this prediction?"
+    response_type: likert
+    scale_min: 1
+    scale_max: 5
+    scale_labels:
+      - Not at all confident
+      - Slightly confident
+      - Moderately confident
+      - Confident
+      - Very confident
+
+  - question_id: primary_cause
+    prompt: "What is the most likely primary cause of the deterioration?"
+    response_type: categorical
+    options: [Placeholder cause A, Placeholder cause B, Other]
+    display_if:
+      question_id: deterioration_6h
+      equals: "Yes"
+
+  - question_id: good_outcome_3mo
+    prompt: "Will the patient have a good neurological outcome at three months (mRS 0 to 2)?"
+    response_type: categorical
+    options: [Yes, No]
+
+  - question_id: death_3mo
+    prompt: "Will the patient be dead at three months?"
+    response_type: categorical
+    options: [Yes, No]
+    auto_value:
+      when:
+        question_id: good_outcome_3mo
+        equals: "Yes"
+      value: "No"

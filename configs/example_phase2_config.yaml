@@ -8,10 +8,10 @@
 #
 # Pair it with the first use case questions (schema v2, branching):
 #
-#   uv run ehr-simulator validate-config configs/example_phase2_config.yaml configs/phase2_first_use_case_questions.yaml
-#   uv run ehr-simulator activate-config configs/example_phase2_config.yaml configs/phase2_first_use_case_questions.yaml \
+#   uv run ehr-simulator validate-config configs/example_phase2_config.yaml configs/example_phase2_questions.yaml
+#   uv run ehr-simulator activate-config configs/example_phase2_config.yaml configs/example_phase2_questions.yaml \
 #       --version v1 --description "Phase 2 example"
-#   uv run ehr-simulator serve --config  configs/example_phase2_config.yaml --questions configs/phase2_first_use_case_questions.yaml
+#   uv run ehr-simulator serve --config  configs/example_phase2_config.yaml --questions configs/example_phase2_questions.yaml
 #
 # Editing this file changes config_hash: stop the server, activate a new
 # --version, restart.
