@@ -70,8 +70,14 @@ ai_intervention:
 # S11g: `<source>:<name>` fields that encode the reference outcome and must
 # never be clinician facing (sources: admission, scalar, imaging, ai).
 # Preflight fails if one is shown. `[]` declares that none exist.
+# First use case: the deterioration label must never reach any panel.
+# The 3-month mRS 0-2 and 3-month death labels must be added here too once
+# their exact column names are known (gate §26.10).
 clinician_facing:
-  prohibited_fields: []
+  prohibited_fields:
+    - admission:early_neurological_deterioration
+    - scalar:early_neurological_deterioration
+    - ai:early_neurological_deterioration
 
 # S11i clinician-facing policies, pinned per case. backward_navigation is
 # required once this block exists (allow_readonly: earlier timepoints stay
@@ -80,7 +86,7 @@ clinician_facing:
 # Practice cases (enabled: true) need their own patient_ids, disjoint from
 # patient_ids in every version. Free text is off; enabling it makes
 # `routine_export` decide whether export-answers includes those columns.
-# The first use case must still choose its backward policy (gate §26.9).
+# First use case: allow_readonly (gate §10.1).
 study_behaviour:
   backward_navigation: allow_readonly
   feedback:

@@ -599,3 +599,34 @@ def test_v1_and_v2_pinned_cases_coexist(tmp_path: Path) -> None:
     assert "q-slot-primary_cause" not in v1_page
     assert "q-slot-primary_cause" in v2_page
     assert "q-slot-free_notes" not in v2_page
+
+
+def test_branch_state_survives_pause_and_resume(tmp_path: Path) -> None:
+    """S11e pause → resume re-renders the same branch from stored answers."""
+    study_yaml = FIXTURES / "study_lifecycle.yaml"
+    db_path = tmp_path / "study.db"
+    clinician_id = _seed_clinician(db_path, study_id=load_study_config(study_yaml).study_id)
+    _activate_configuration(db_path, study_yaml, FIRST_USE_CASE, version="v1", description="s11h")
+    app = app_from_study_config(
+        study_yaml,
+        FIRST_USE_CASE,
+        log_dir=tmp_path / "logs",
+        db_path=db_path,
+        backup_dir=tmp_path / "backups",
+    )
+    with TestClient(app) as client:
+        client.cookies.set("ehrsim_clinician_id", clinician_id)
+        started = client.post("/case/start", follow_redirects=False)
+        pid = started.headers["location"].split("/")[2]
+        answer_url = f"/patient/{pid}/timepoint/0/answer"
+        for qid, value in (("deterioration_6h", "Yes"), ("good_outcome_3mo", "Yes")):
+            data = {"question_id": qid, "value": value}
+            assert client.post(answer_url, data=data, headers=HX).status_code == HTTP_OK
+
+        paused = client.post(f"/case/{pid}/pause", follow_redirects=False)
+        resumed = client.post(f"/case/{pid}/resume", follow_redirects=False)
+        html = client.get(f"/patient/{pid}/timepoint/0").text
+
+    assert paused.status_code == resumed.status_code == 303
+    assert _slot_state(html, "primary_cause") == "editable"
+    assert _slot_state(html, "death_3mo") == "derived"
