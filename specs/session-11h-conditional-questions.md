@@ -81,12 +81,14 @@ class QuestionState(StrEnum):
 class EvaluatedQuestion:
     question: Question
     state: QuestionState
-    required_now: bool
-    value: str | list[str] | None
-    source: AnswerSource | None  # clinician | rule
+    value: str | list[str] | None      # effective value
+    required_now: bool                 # property: EDITABLE and required
 
-def evaluate(questions: Questions, stored: Mapping[str, StoredAnswer]) -> EvaluatedSet
+def evaluate(questions: Questions, values: Mapping[str, value]) -> EvaluatedSet
+def plan_submission(questions, stored: Mapping[str, StoredAnswer], question_id, value) -> list[BranchWrite]
 ```
+
+Evaluation needs values only: a `DERIVED` value is always the rule value. Provenance (`clinician` | `rule`) lives on `StoredAnswer` and in the `answers` columns, and only `plan_submission` reads it, to find stale rule rows.
 
 Single pass in file order, against the *effective* values computed so far:
 

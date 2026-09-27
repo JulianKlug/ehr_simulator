@@ -111,7 +111,7 @@ CREATE TABLE practice_cases (
 ### Start
 
 - `POST /practice/start` (never a flag on `/case/start`): resume the clinician's open practice case, else start the first `practice.patient_ids` entry of the **active** configuration they have not started. 409 when practice is disabled, the server is stale, or the list is exhausted.
-- The index shows a separate "Practice" section with Start / Resume only when the active configuration enables practice; practice cases are labelled "Practice".
+- The index shows a separate "Practice" section when the active configuration enables practice, or when the clinician holds an open practice case (which stays resumable after a newer version disables practice); practice cases are labelled "Practice".
 - No schedule item, no `arm_assignments` row, no replacement, no lifecycle count.
 
 ### Cross version rule
