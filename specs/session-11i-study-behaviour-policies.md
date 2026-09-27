@@ -2,410 +2,197 @@
 
 ## Goal
 
-Move the remaining clinician facing study behaviour behind explicit configuration instead of embedding first use case assumptions in route or template code.
-
-S11i covers backward navigation, performance feedback, practice state, and free text handling.
+Put the remaining clinician facing study behaviour behind explicit, case pinned configuration: backward navigation, performance feedback, practice cases and free text.
 
 S11a through S11h are assumed complete.
 
+## Review changes (2026-09-26)
+
+1. **Feedback refuses `true`.** No feedback provider or ground truth model exists, and the spec's own non goals exclude one. Accepting `true` would promise a surface that cannot render. The block records the explicit all-false policy in the snapshot; `true` is a validation error naming the missing capability.
+2. **Revisit defined by pane mode:** `primary` ⇔ the editable frontier; anything else viewable (behind the frontier, or a completed case) is a `revisit`.
+3. **`prohibit` reuses the S9b gate redirect** (303 / `HX-Redirect` to the frontier) instead of a new 409 shape. A completed case stays viewable at its last timepoint only.
+4. **Practice made concrete:** routing, case resolution, lifecycle (not tracked by S11e), completion inside the final advance transaction, and a cross version rule. The gate forbids reusing a practice patient as a measured patient, which a per configuration disjointness check alone would miss.
+5. **Practice requires Phase 2** (`randomisation` present), and a practice arm of `ai` requires `ai_intervention`.
+6. **One cross model validator** for study + questions rules (free text), called by `validate-config`, `activate-config`, boot and preflight.
+
 ## Core invariants
 
-1. Measured behaviour is controlled by the case pinned configuration.
-2. A configuration change affects only subsequently activated cases.
-3. Backward navigation never makes a historical answer editable.
-4. Revisit activity never overwrites the original measured timepoint timing.
-5. Practice observations are explicitly distinguishable from measured observations.
-6. Practice data never contributes to measured randomisation balance, ITT, PP, or clinician stopping counts.
-7. Free text is disabled by default for Phase 2.
-8. When free text is enabled it is treated as potentially identifying and is excluded from behavioural telemetry summaries/figures.
-9. The default feedback policy exposes no ground truth, correctness, running score, or AI correctness.
-10. None of these policies may be toggled by a clinician through query parameters or browser state.
+1. Measured behaviour follows the case pinned configuration; a new version affects only cases started afterwards.
+2. Backward navigation never makes a historical answer editable.
+3. Revisits never write or overwrite S10 `timepoint.enter` / `timepoint.exit`.
+4. Practice observations are explicitly marked and never count toward measured randomisation balance, ITT, PP, replacement or clinician stopping.
+5. Free text is off for any study that declares `study_behaviour`, unless enabled explicitly.
+6. No policy can be switched by a clinician through query parameters or browser state.
 
-## Study behaviour configuration
+## Configuration
 
-Extend `StudyConfig` with an optional block:
+Optional `StudyConfig.study_behaviour`, omitted from serialization when absent:
 
-```
+```yaml
 study_behaviour:
-  backward_navigation: allow_readonly | prohibit
-
-  feedback:
+  backward_navigation: allow_readonly   # or prohibit; required, no default
+  feedback:                             # optional; every flag defaults to and must be false
     show_ground_truth: false
     show_correctness: false
     show_running_score: false
     show_ai_correctness: false
-
-  practice:
+  practice:                             # optional; default disabled
     enabled: false
     patient_ids: []
-    arm: no_ai
-
-  free_text:
+    arm: no_ai                          # ai | no_ai
+  free_text:                            # optional; default disabled
     enabled: false
-    routine_export: exclude
+    routine_export: exclude             # exclude | include_explicit
 ```
 
-The block is omitted from canonical serialization when absent so historical snapshots remain byte stable.
+Validation:
 
-For Phase 2 studies that use the new behaviour system, all values are part of the configuration snapshot and therefore participate in `config_hash`.
+- `backward_navigation` is required when the block is present: the first use case must choose explicitly (gate §26.9).
+- Any feedback flag `true` → error "performance feedback is not implemented".
+- `practice.enabled: true` requires non empty unique `patient_ids`, disjoint from `patient_ids`, and a `randomisation` block; `arm: ai` requires `ai_intervention`.
+- `practice.enabled: false` requires an empty `patient_ids`.
 
-### Backward navigation default
+Without `study_behaviour` (legacy): read only backward navigation, no practice, free text allowed and exported as today.
 
-Do not invent a first use case scientific choice that is not locked by the Phase 2 gate.
+## Backward navigation
 
-The platform supports both policies. The real first use case configuration must select one explicitly before measured data collection.
+`gating.is_viewable(frontier, t_index, policy)`:
 
-For legacy configurations without `study_behaviour`, preserve existing read only backward behaviour.
+| policy | viewable |
+|---|---|
+| `allow_readonly` (and legacy) | `t_index <= unlocked_t_index` |
+| `prohibit` | `t_index == unlocked_t_index` |
 
-### Feedback default
+A non viewable GET takes the existing gate redirect to the frontier, before slicing, session bootstrap or any write. Answer and advance already refuse non frontier timepoints (409 / 412) and stay unchanged.
 
-All feedback flags default to false.
+Under `prohibit` the summary card omits the Prev button; `keyboard.js` `[` finds no button and does nothing.
 
-The first use case uses all false.
+### Revisit marking
 
-### Practice default
+- `_patient_view.html` carries `data-visit-kind="primary|revisit"`: `primary` ⇔ `pane_mode == "open"`.
+- After a successful revisit render the GET appends one `timepoint.revisit` event, payload `{"t_index": n}`, where it would otherwise have recorded `timepoint.enter`. An occurrence marker, not a timing interval.
+- S11j/S11k later label telemetry with this flag.
 
-`enabled: false`.
+## Feedback
 
-The first use case uses no practice cases.
+No feedback surface exists. The block is validated and pinned; a regression test asserts that measured pages render no answer correctness, score or reference outcome text.
 
-### Free text default
+## Practice
 
-`enabled: false` in Phase 2 behaviour configuration.
+### Persistence (migration 11)
 
-`routine_export` supports at least:
+- `observation_mode TEXT NOT NULL DEFAULT 'measured' CHECK (observation_mode IN ('measured','practice'))` on `sessions`, `progress`, `answers` (via `add_columns`; existing rows become `measured`).
+- New table:
 
-- `exclude`
-- `include_explicit`
-
-`include_explicit` means the operator has deliberately configured routine research export inclusion. It does not make free text safe for figures or telemetry summaries.
-
-## Backward navigation policy
-
-### `allow_readonly`
-
-A clinician may revisit a previously unlocked timepoint.
-
-Requirements:
-
-- previous answers remain disabled/frozen
-- `POST /answer` continues to refuse the historical timepoint
-- `POST /advance` from a historical timepoint is refused/stale
-- the page is explicitly marked as a revisit in the DOM
-- the server can distinguish a revisit render from the original presentation
-- the S10 original `timepoint.enter`/`timepoint.exit` pair remains untouched
-- later S11j/S11k telemetry can label exposure as `visit_kind=revisit`
-
-Add a non sensitive event such as:
-
-`timepoint.revisit`
-
-with payload:
-
-```
-{
-  "t_index": <int>
-}
+```sql
+CREATE TABLE practice_cases (
+    clinician_id   TEXT NOT NULL REFERENCES clinicians(clinician_id),
+    patient_id     TEXT NOT NULL,
+    arm            TEXT NOT NULL CHECK (arm IN ('ai','no_ai')),
+    config_version TEXT NOT NULL,
+    config_hash    TEXT NOT NULL,
+    started_at     TIMESTAMP NOT NULL,
+    completed_at   TIMESTAMP,
+    PRIMARY KEY (clinician_id, patient_id)
+);
 ```
 
-This is an occurrence marker, not a replacement timing interval.
+  plus triggers refusing DELETE, and UPDATE of anything but a NULL `completed_at`.
+- `db/practice.py` is the sole writer. Session, progress and answer DAOs write `observation_mode` on insert only and refuse a write whose mode differs from the stored row, like the S11b provenance guard.
 
-### `prohibit`
+### Case resolution
 
-A request for any measured `t_index < unlocked_t_index` is refused before slicing patient data.
+- `CaseConfiguration` gains `observation_mode`. `resolve_case_configuration`: a pair in `practice_cases` resolves to its pinned version with `observation_mode = practice`.
+- `bootstrap_session` takes the arm from `practice_cases`, never from `arm_assignments`.
+- `_is_unactivated_phase2_patient` treats a practice pair as a case.
+- S11g: a practice case renders by its fixed arm (`InterventionMode.AI` / `NO_AI`).
+- Practice cases have no `case_lifecycle` row: no timeout, no pause, no heartbeat. The final advance sets `practice_cases.completed_at` inside the S10 transaction.
 
-Behaviour:
+### Start
 
-- ordinary request -> clean 409 or redirect to the current frontier with an explanatory message
-- HTMX request -> whole page safe redirect or equivalent existing route convention
-- no historical patient slice is rendered
-- no revisit event is written
-- no answer/timing state changes
+- `POST /practice/start` (never a flag on `/case/start`): resume the clinician's open practice case, else start the first `practice.patient_ids` entry of the **active** configuration they have not started. 409 when practice is disabled, the server is stale, or the list is exhausted.
+- The index shows a separate "Practice" section with Start / Resume only when the active configuration enables practice; practice cases are labelled "Practice".
+- No schedule item, no `arm_assignments` row, no replacement, no lifecycle count.
 
-The patient jumper and keyboard navigation must not offer a backward measured link when prohibited.
+### Cross version rule
 
-Server enforcement is required even if the link is absent from the UI.
+`config_history.activate` refuses a version whose measured `patient_ids` intersect the practice `patient_ids` of any registered version, or the reverse. Study wide, so a clinician can never meet a practice patient as a measured one.
 
-## Revisit identity for later telemetry
+### Exclusion
 
-Add stable render metadata on `_patient_view.html`, for example:
+`export-answers` and `divergence-view` read measured rows only (`observation_mode = 'measured'`). S11n defines the practice/QA export.
 
-```
-data-visit-kind="primary|revisit"
-```
+## Free text
 
-A primary render is the current editable frontier.
+- Cross model validator `validate_study_questions(study, questions)` (pure, `config/`): a declared `study_behaviour` without `free_text.enabled: true` plus any free-text question is an error. Called by `validate-config`, `activate-config`, study mode boot and preflight. Stored snapshots are not re checked.
+- Enabled free text keeps the existing length limits; events already omit values; divergence never plots values.
+- `export-answers`: with `study_behaviour.free_text.routine_export: exclude`, free-text question columns are omitted (rows stay in the DB); `include_explicit` keeps them with the existing cell guard. Legacy configurations export as today.
 
-A revisit is a permitted render behind the frontier.
+## Preflight
 
-S11j and S11k use this flag so revisit foreground/panel exposure can remain identifiable without contaminating the original primary exposure interval.
-
-## Feedback policy
-
-Create one feedback policy object resolved from the case pinned study configuration.
-
-UI code asks the policy whether each feedback surface is allowed. Do not scatter first use case `False` constants through templates.
-
-Supported switches:
-
-- ground truth
-- clinician correctness
-- running performance score
-- AI correctness
-
-When a flag is false:
-
-- the corresponding information is not present in clinician facing HTML
-- it is not present in hidden DOM or serialized client state
-
-When enabled in a test/future study, rendering must require an explicit feedback provider/source. If the configured feedback source is unavailable, fail preflight rather than silently showing incomplete or fabricated feedback.
-
-S11i does not define a universal clinical ground truth schema. Study specific providers remain adapter/configuration responsibilities.
-
-## Practice mode
-
-Practice support is explicit and separate from measured Start case.
-
-### Initial implementation boundary
-
-To avoid collisions with the measured answer/progress keys, S11i requires configured practice patient IDs to be disjoint from measured `study.patient_ids`.
-
-This is a platform implementation constraint for the first practice implementation. A later session may relax it by extending all analysis keys with observation mode.
-
-Configuration validation refuses overlap.
-
-### Practice start
-
-When enabled, expose a separate practice entry point, for example:
-
-`POST /practice/start`
-
-Never overload measured `POST /case/start` with an implicit practice flag.
-
-Practice cases:
-
-- use only `practice.patient_ids`
-- use the configured fixed practice arm
-- are labelled `observation_mode='practice'`
-- do not consume an S11c schedule item
-- do not write `phase2_randomized` arm assignments
-- do not affect replacement selection
-- do not count toward target completed cases
-- do not count toward maximum activated measured cases
-
-The configured practice arm is a training presentation choice, not a randomised assignment.
-
-### Practice persistence
-
-Add the next schema migration, expected migration 11 after the S11h answer provenance migration.
-
-Add:
-
-```
-observation_mode TEXT NOT NULL DEFAULT 'measured'
-    CHECK (observation_mode IN ('measured', 'practice'))
-```
-
-to at least:
-
-- `sessions`
-- `progress`
-- `answers`
-
-Existing rows backfill `measured`.
-
-Add a small `practice_cases` table keyed by clinician and practice patient to record:
-
-- clinician ID
-- patient ID
-- configured practice arm
-- configuration version/hash
-- started timestamp
-- completed timestamp where applicable
-
-Do not store practice cases in `randomisation_schedule_items` or as `phase2_randomized` assignments.
-
-All answer/progress/session DAOs must validate that a row cannot silently change observation mode.
-
-### Practice lifecycle
-
-The first practice implementation may reuse question gating and answer capture, but practice status must flow through `SessionContext`.
-
-Practice data may be retained for QA/training review, but later Phase 2 research exports must exclude it from ITT and PP datasets by default.
-
-The current first use case keeps practice disabled, so no practice UI is shown there.
-
-## Clinician stopping integration
-
-Every S11e clinician stopping count must explicitly filter to measured Phase 2 cases.
-
-Practice sessions and practice answers must not affect:
-
-- completed measured count
-- activated measured count
-- replacement eligibility
-- randomisation balance
-
-Add regression tests around the existing `index_state()` / Start case limit queries so future refactors cannot accidentally count practice.
-
-## Free text policy
-
-### Configuration validation
-
-When a Phase 2 case's behaviour policy has:
-
-```
-free_text.enabled = false
-```
-
-any free text question in that case's question configuration is a configuration/preflight error.
-
-Do not merely hide the question at runtime while leaving it configured as required.
-
-Legacy non Phase 2 configs remain supported under their historical semantics.
-
-### Enabled free text
-
-When enabled:
-
-- existing autosave length and validation protections remain
-- value is treated as potentially identifying
-- answer audit events continue to omit raw free text
-- behavioural events must never include raw free text
-- divergence/behavioural figures must not display it
-- telemetry summaries must not display it
-
-### Routine export policy
-
-Update the current general answer export so free text handling is explicit.
-
-For `routine_export: exclude`:
-
-- omit free text value columns from routine answer CSV output
-- preserve the underlying database row
-- optionally expose a non identifying `free_text_present` indicator only if the export contract explicitly names it
-
-For `routine_export: include_explicit`:
-
-- include the answer value only because the study configuration explicitly opted in
-- retain existing CSV injection protections
-- clearly identify the column as potentially identifying in documentation
-
-S11n may later replace the current export with the Phase 2 linked export set, but S11i must not leave the existing exporter accidentally leaking newly enabled free text.
-
-## Configuration provenance
-
-These behaviour settings are part of the case pinned study snapshot.
-
-Examples:
-
-- a case started while backward navigation is prohibited remains prohibited even after a new config allows it
-- a case started with free text disabled cannot gain a free text question through a later active version
-- practice policy changes apply to newly started practice cases
-
-## Preflight additions
-
-Extend preflight to verify:
-
-- practice patient IDs exist in the dataset
-- practice and measured patient lists are disjoint for this implementation
-- configured feedback source exists whenever any feedback flag is true
-- Phase 2 free text questions are absent when free text is disabled
-- free text export policy is valid when free text is enabled
+Adds FAIL rows for practice patients missing from the dataset and for a failing `validate_study_questions`.
 
 ## Files expected to change
 
-- `src/ehr_simulator/config/study.py`
-- `src/ehr_simulator/config/loader.py`
-- `src/ehr_simulator/db/migrations.py`
-- session/progress/answers DAOs
-- new practice persistence/service module
-- `src/ehr_simulator/web/study_session.py`
-- `src/ehr_simulator/web/routes.py`
-- `src/ehr_simulator/web/gating.py`
-- index, summary, question, and navigation templates
-- keyboard/navigation JS
-- `src/ehr_simulator/export.py`
-- `src/ehr_simulator/divergence.py` regression coverage for free text exclusion
-- `src/ehr_simulator/cli_support.py` preflight
-- Phase 2 example config and tests
+`config/study.py`, `config/loader.py` or a new `config/cross_validation.py`, `db/migrations.py`, `db/sessions.py`, `db/progress.py`, `db/answers.py`, new `db/practice.py`, `db/config_history.py`, `web/study_session.py`, `web/gating.py`, `web/routes.py`, `web/case_start.py` (index state), templates (`index.html`, `_summary_card.html`, `_patient_view.html`), `export.py`, `divergence.py`, `cli.py`, `cli_support.py`, `web/app.py`, example config, tests, docs.
 
 ## Required tests
 
+### Configuration
+
+1. `study_behaviour` absent keeps historical snapshot bytes.
+2. Block without `backward_navigation` rejected.
+3. Any feedback flag `true` rejected.
+4. Practice/measured overlap rejected.
+5. Practice enabled without `randomisation` rejected; `arm: ai` without `ai_intervention` rejected.
+6. Changing any policy changes `config_hash`.
+
 ### Backward navigation
 
-1. `allow_readonly` permits rendering a prior unlocked timepoint.
-2. Revisited answers are disabled.
-3. POST answer to a revisited timepoint is refused.
-4. POST advance from a revisited timepoint is refused/stale.
-5. Revisit render is marked `visit_kind=revisit`.
-6. Revisit writes a revisit event without raw clinical/answer data.
-7. Revisit does not create or overwrite S10 primary timing events.
-8. `prohibit` refuses a backward GET before patient slicing.
-9. Prohibited UI does not offer a backward control.
-10. Manually typing a backward URL remains refused.
+7. `allow_readonly` renders a prior timepoint with disabled answers and `data-visit-kind="revisit"`.
+8. POST answer to a revisited timepoint → 409; POST advance → 412.
+9. A revisit writes one `timepoint.revisit` and no `timepoint.enter` / `timepoint.exit`.
+10. The frontier renders `data-visit-kind="primary"`.
+11. `prohibit` redirects a backward GET to the frontier before slicing (no event, no session write).
+12. `prohibit` renders no Prev button.
+13. `prohibit` allows the last timepoint of a completed case and redirects earlier ones.
+14. An old case keeps its policy after a new version with the other policy activates.
 
 ### Feedback
 
-11. Default feedback policy renders no ground truth.
-12. Default feedback policy renders no correctness feedback.
-13. Default feedback policy renders no running score.
-14. Default feedback policy renders no AI correctness feedback.
-15. Enabling a feedback flag changes `config_hash`.
-16. An enabled feedback surface is controlled by configuration, not a hard coded constant.
-17. Missing configured feedback source fails preflight.
+15. Measured pages render no correctness, score or ground truth text.
 
 ### Practice
 
-18. Practice disabled shows no practice start control.
-19. Practice/measured patient overlap is rejected by configuration validation.
-20. Practice Start uses only a configured practice patient.
-21. Practice Start does not consume a randomisation schedule item.
-22. Practice Start does not create a `phase2_randomized` assignment.
-23. Practice answer rows are labelled `observation_mode=practice`.
-24. Practice completion does not increment measured completion count.
-25. Practice start does not increment measured activated count.
-26. Practice does not change patient or clinician randomisation balance.
-27. Practice does not trigger replacement scheduling.
-28. Existing rows migrate as `observation_mode=measured`.
+16. Practice disabled → no practice section; `POST /practice/start` → 409.
+17. Practice start picks the first unstarted configured practice patient and resumes an open one.
+18. Practice start writes no schedule, assignment, lifecycle or replacement row.
+19. Practice answers, progress and session carry `observation_mode = practice`.
+20. Completing a practice case sets `completed_at` and leaves measured completed/activated counts unchanged.
+21. Measured Start case works while a practice case exists; balance state unchanged.
+22. A mode changing write is refused by the DAOs.
+23. Existing rows migrate as `measured`.
+24. Activation refuses cross version practice/measured overlap.
+25. Export and divergence exclude practice rows.
+26. A practice case renders by its fixed arm.
 
 ### Free text
 
-29. Phase 2 free text question is rejected when free text is disabled.
-30. Free text renders and saves when explicitly enabled.
-31. Behavioural/audit events contain no raw free text value.
-32. Divergence/behavioural figure path does not display free text.
-33. Routine export excludes free text under `routine_export=exclude`.
-34. Routine export includes it only under `include_explicit`.
-35. Changing free text policy changes `config_hash`.
-
-### Case pinned policy
-
-36. An old case keeps its old backward navigation policy after a new config activates.
-37. An old case keeps its old feedback/free text policy after a new config activates.
-38. New cases use the new active policy.
+27. Free-text question with `study_behaviour` and free text disabled rejected by `validate_study_questions`, `activate-config`, boot and preflight.
+28. Free text enabled renders and saves.
+29. Events carry no free-text value.
+30. Export omits free-text columns under `exclude` and includes them under `include_explicit`.
+31. Divergence never shows free-text values.
 
 ### Regression
 
-39. First use case practice remains disabled.
-40. First use case feedback remains fully disabled.
-41. All S11a through S11h tests remain green.
-42. Full CI remains green.
+32. The first use case example keeps practice disabled and all feedback false.
+33. All earlier tests green; CI green.
 
 ## Explicit non goals
 
-S11i does not implement:
-
-- a universal ground truth data model
-- statistical performance scoring
-- participant eligibility/recruitment workflow
-- clinician covariate collection
-- browser focus/active timing
-- panel exposure
-- PP classification
-- multi tab conflict resolution
-- final Phase 2 exports
+Ground truth model, scoring, recruitment workflow, clinician covariates, telemetry, panel exposure, PP classification, multi tab handling, Phase 2 exports.
 
 ## Acceptance
 
-S11i is complete when backward navigation is enforced from case pinned configuration, feedback defaults to no study outcome/performance information, practice observations are explicit and provably excluded from measured allocation/counting, free text is opt in with explicit export treatment, historical cases retain their original policy, and the complete test suite passes.
+Backward navigation follows the case pinned policy; feedback is recorded and provably absent; practice cases are explicit, routed separately and excluded from every measured count and export; free text is opt in with explicit export treatment; old cases keep their policies; the full suite passes.

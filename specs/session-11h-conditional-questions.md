@@ -2,515 +2,235 @@
 
 ## Goal
 
-Extend the current flat question system into a deterministic, server authoritative branch aware question engine while preserving configuration provenance and answer auditability.
-
-Implement the first use case question logic without hard coding those particular question IDs into the gating or answer capture services.
+Turn the flat question list into a deterministic, server authoritative, branch aware question engine, and ship the first use case question set, without hard coding its question ids into gating or answer capture.
 
 S11a through S11g are assumed complete.
 
+## Review changes (2026-09-26)
+
+1. **No JS mirror.** The original spec asked JavaScript to mirror server state *and* forbade duplicating rules in JS. Now the `/answer` response carries server rendered out of band swaps of every question whose state changed. No condition logic runs in the browser.
+2. **One model, two schema versions.** `Questions.schema_version` accepts `"1" | "2"`. v2 only fields are refused under v1 and omitted from serialization when unset, so v1 snapshots re-render byte for byte. No parallel class hierarchy.
+3. **Generic stale answer rule** replaces the per question description (it produces the same first use case behaviour) and drops the undefined "unless configured" escape hatch.
+4. **Likert per point labels** (`scale_labels`, v2 only): the gate's confidence scale names all five points; the current model has only end labels.
+5. **Tighter condition typing:** the source must be an earlier categorical question and `equals` one of its options; `auto_value` targets are categorical, likert or probability.
+6. **Numbering by CSS counter**, so hidden questions leave no gap and nothing needs renumbering after a swap.
+
 ## Core invariants
 
-1. Question branching is configuration driven.
-2. The server, not JavaScript, is authoritative for question visibility, editability, required state, and derived answers.
-3. The advance gate considers only questions required under the current evaluated branch.
-4. A hidden conditional question cannot retain a stale clinician response unless its configuration explicitly defines that behaviour.
-5. A system derived answer is distinguishable from a clinician entered answer.
-6. Changing a controlling answer updates dependent question state atomically with the controlling answer write.
-7. Refresh and resume reconstruct the same branch from persisted answers and the case pinned question configuration.
-8. Historical question configuration snapshots remain readable and byte stable.
-9. An already activated case continues using the question configuration version under which it started.
-10. No browser supplied branch state is trusted without server re evaluation.
+1. Branching is configuration driven.
+2. The server alone decides visibility, editability, required state and derived answers.
+3. The advance gate considers only questions required under the current branch.
+4. A hidden question keeps no stored answer.
+5. A rule derived answer is distinguishable from a clinician answer.
+6. A controlling answer and all dependent writes commit atomically.
+7. Refresh, resume and restart rebuild the same branch from stored answers and the case pinned questions.
+8. v1 snapshots stay readable and byte stable.
+9. An activated case keeps the question configuration it started with.
+10. No browser supplied branch state is trusted.
 
-## Questions schema generation
+## Schema
 
-Conditional semantics materially change the question model. Introduce a new questions schema generation rather than silently changing the meaning of schema version 1.
-
-Recommended approach:
-
-- keep schema version 1 parseable for historical S11b snapshots
-- add schema version 2 for conditional questions
-- expose a common `QuestionsLike` interface to downstream rendering/gating code
-- never auto rewrite a stored version 1 snapshot as version 2
-
-`render_questions_snapshot()` and `parse_questions_snapshot()` must continue to round trip historical version 1 bytes exactly.
-
-New first use case configuration uses:
-
-```
+```yaml
 schema_version: "2"
+questions:
+  - question_id: deterioration_6h
+    response_type: categorical
+    options: [Yes, No]
+  - question_id: primary_cause
+    response_type: categorical
+    options: [...]
+    display_if: {question_id: deterioration_6h, equals: "Yes"}
+  - question_id: death_3mo
+    response_type: categorical
+    options: [Yes, No]
+    auto_value:
+      when: {question_id: good_outcome_3mo, equals: "Yes"}
+      value: "No"
 ```
 
-## Condition model
+New optional per question fields (v2 only; omitted from serialization when null):
 
-Use a deliberately small declarative condition language. Do not execute arbitrary Python, JavaScript, Jinja, SQL, or user supplied expressions.
+- `display_if: Condition | null`
+- `auto_value: {when: Condition, value: str} | null`
+- `scale_labels: list[str] | null` (likert only; exactly `scale_max - scale_min + 1` non blank labels)
 
-For the first implementation, support equality against a single earlier question:
+`Condition = {question_id, equals}`. Validation refuses:
 
-```
-when:
-  question_id: deterioration_6h
-  equals: "Yes"
-```
+- self, forward or unknown references
+- a non categorical source question
+- an `equals` value not among the source's options
+- `auto_value` on a multi-select or free-text question
+- an `auto_value.value` that `serialize_answer` rejects for the target
+- any v2 field under `schema_version: "1"`
 
-A condition evaluates against the persisted/effective answer mapping for the current clinician, patient, and timepoint.
+YAML booleans in `equals`/`value` are coerced like options (`Yes`/`No`).
 
-### Ordering restriction
+`load_questions` reports a schema version mismatch against `"1"` or `"2"`.
 
-A condition may reference only a question that appears earlier in `questions.yaml`.
+## Evaluation
 
-This provides:
+Pure module `question_branching.py`:
 
-- deterministic single pass evaluation
-- no dependency cycles
-- simple validation
-- stable client rendering order
+```python
+class QuestionState(StrEnum):
+    HIDDEN = "hidden"
+    EDITABLE = "editable"
+    DERIVED = "derived"
 
-Configuration validation refuses forward references, self references, unknown question IDs, and incompatible comparison values.
+@dataclass(frozen=True)
+class EvaluatedQuestion:
+    question: Question
+    state: QuestionState
+    required_now: bool
+    value: str | list[str] | None
+    source: AnswerSource | None  # clinician | rule
 
-## Question state model
-
-Each question evaluates to one of these effective states:
-
-- `hidden`
-- `editable_optional`
-- `editable_required`
-- `derived`
-- `locked` for historical/revisit panes handled by the existing frontier policy
-
-Add pure evaluation code equivalent to:
-
-```
-evaluate_questions(questions, saved_answers) -> EvaluatedQuestionSet
+def evaluate(questions: Questions, stored: Mapping[str, StoredAnswer]) -> EvaluatedSet
 ```
 
-Each evaluated question should expose at least:
+Single pass in file order, against the *effective* values computed so far:
 
-- configured question
-- visible yes/no
-- editable yes/no
-- required_now yes/no
-- effective value, if any
-- value source: clinician, rule, or none
+1. `display_if` false → `HIDDEN`, no value.
+2. else `auto_value.when` true → `DERIVED`, value = rule value.
+3. else → `EDITABLE`, value = the stored clinician answer, if any.
 
-The gating service, template renderer, and answer capture service must use this shared evaluator.
+A condition on a hidden or unanswered source is false. `required_now = state == EDITABLE and question.required`.
 
-Do not duplicate condition rules independently in `gating.py`, templates, and JavaScript.
+The pane mode (`open` / `locked`) stays with the S9b frontier and is orthogonal: a locked pane shows the same evaluated states, read only.
 
-## Configuration fields
+Gating (`completeness`, `required_count`, advance payload counts), the pane renderer and answer capture all use `evaluate`. A derived value satisfies nothing because it is never required; a hidden question never blocks.
 
-Recommended schema version 2 additions on each question:
+## Persistence (migration 10)
 
-```
-display_if: null | Condition
-auto_value: null | AutoValueRule
-```
-
-where:
+`answers` gains, through `Migration.add_columns`:
 
 ```
-AutoValueRule:
-  when: Condition
-  value: <valid encoded value for this response type>
-```
-
-Existing `required: true|false` remains the base requirement.
-
-Effective required state is:
-
-```
-visible AND editable AND configured required
-```
-
-A derived question is never waiting for clinician input.
-
-The implementation may later generalise the condition language, but S11h must not introduce unbounded expression evaluation.
-
-## First use case question configuration
-
-The Phase 2 first use case question file must contain only the following measured questions.
-
-### 1. Neurological deterioration within six hours
-
-```
-question_id: deterioration_6h
-response_type: categorical
-options: [Yes, No]
-required: true
-```
-
-There is no Unknown option.
-
-### 2. Confidence
-
-```
-question_id: confidence
-response_type: likert
-scale_min: 1
-scale_max: 5
-required: true
-```
-
-Labels:
-
-1. Not at all confident
-2. Slightly confident
-3. Moderately confident
-4. Confident
-5. Very confident
-
-### 3. Primary cause of deterioration
-
-Categorical and required only when:
-
-```
-deterioration_6h == Yes
-```
-
-The option list remains study specific configuration. Do not encode a cause taxonomy in platform code.
-
-### 4. Good neurological outcome at three months
-
-```
-question_id: good_outcome_3mo
-response_type: categorical
-options: [Yes, No]
-required: true
-```
-
-Prompt identifies good outcome as mRS 0 to 2.
-
-### 5. Death at three months
-
-```
-question_id: death_3mo
-response_type: categorical
-options: [Yes, No]
-required: true
-```
-
-When:
-
-```
-good_outcome_3mo == Yes
-```
-
-the effective answer becomes `No` through a rule generated answer.
-
-When:
-
-```
-good_outcome_3mo == No
-```
-
-the question requires an explicit clinician response.
-
-The production cause options are supplied by the study configuration and are not decided in this platform spec.
-
-## Questions removed from the first use case
-
-The first use case configuration must not silently inherit the old example questions for:
-
-- hospital survival
-- death at six months
-- contributing factor multi select
-- free notes
-- the old probability formulation of good outcome
-- any Unknown option on the primary deterioration question
-
-The generic Phase 1 example may remain as a separate demonstration fixture if useful. The Phase 2 first use case fixture must be explicit and separate.
-
-## Answer provenance migration
-
-Add the next schema migration, expected migration 10 after S11f.
-
-Extend `answers` with:
-
-```
-answer_source TEXT NOT NULL DEFAULT 'clinician'
-    CHECK (answer_source IN ('clinician', 'rule'))
+answer_source TEXT NOT NULL DEFAULT 'clinician' CHECK (answer_source IN ('clinician','rule'))
 derived_from_question_id TEXT
 ```
 
-Existing rows backfill as:
+`post_sql` adds insert/update triggers refusing `rule` without `derived_from_question_id` and `clinician` with one. Existing rows become `clinician` / NULL.
 
-```
-answer_source = 'clinician'
-derived_from_question_id = NULL
-```
+The DAO gains `commit=False` on `upsert` and `delete_one`, the source columns, and returns the source from `fetch_for_cell` / `fetch_all`.
 
-Rules:
+## Answer submission
 
-- clinician submitted answer -> `answer_source='clinician'`
-- automatic answer -> `answer_source='rule'`
-- rule answer records its controlling question in `derived_from_question_id`
-- a clinician may not directly POST an answer to a question currently in derived state
+One `POST /answer` runs, in one transaction:
 
-Update answer dataclasses and fetch APIs accordingly.
+1. The existing clinician, case, lifecycle, frontier and provenance checks.
+2. Load the stored answers of the cell and evaluate the **current** branch.
+3. Refuse (409, badge fragment, nothing written) when the target question is `HIDDEN` or `DERIVED`.
+4. Validate and serialize the submitted value (blank = clear).
+5. Evaluate the branch **after** the change and reconcile every other question:
+   - `HIDDEN` with a stored row → delete it (`reason: branch_invalidated`);
+   - `DERIVED` → upsert the rule row unless an identical one exists; this overwrites a clinician row (`reason: auto_value`);
+   - `EDITABLE` with a stored `rule` row → delete it (`reason: branch_invalidated`). An older clinician answer is never restored.
+6. Write the submitted clinician answer (`reason: user_change`).
+7. Append one `answer.upsert` / `answer.clear` event per write, payload `{question_id, response_type, source, reason, ...}`, never a raw value.
+8. `conn.commit()`; any failure → `conn.rollback()`, nothing persists. `write_counter` is bumped once after the commit.
 
-## Atomic branch updates
+A clear of the controlling question re-evaluates the same way.
 
-The current answer DAO commits each upsert/delete independently. S11h needs one service transaction when a controlling answer changes dependent state.
+## Rendering
 
-Add `commit=False` support or equivalent internal transaction support to the answer write primitives.
+- `_question.html` renders one question inside a stable slot `<div class="question-slot" id="q-slot-{qid}" data-q-state="...">`. A `HIDDEN` slot is empty.
+- `DERIVED` renders the value checked, the fieldset disabled, and a note "Set automatically from an earlier answer"; disabled inputs never submit.
+- The `/answer` 200 response appends, next to the badge and the out of band CTA, an `hx-swap-oob` replacement of every *other* slot whose evaluated state or value changed. The submitted question is never re-swapped, so focus and typing survive.
+- Question numbers come from a CSS counter over visible `.question` forms.
+- No new JavaScript; a Playwright walk (`tests/e2e/test_branching_walk.py`) pins the swaps in a real browser.
 
-One answer submission must perform, atomically:
+## First use case questions
 
-1. validate clinician/case/frontier/provenance
-2. load current persisted answers
-3. validate the submitted answer against the configured question
-4. simulate the new controlling value
-5. evaluate all dependent states
-6. write the submitted clinician answer
-7. clear stale hidden dependent answers where required
-8. create/update/delete rule generated answers as required
-9. append the corresponding audit events
-10. commit once
+New fixture `configs/phase2_first_use_case_questions.yaml` (`schema_version: "2"`), prompts from the Phase 2 gate §19, nothing else:
 
-On any failure, none of the above writes persist.
+| id | type | rule |
+|---|---|---|
+| `deterioration_6h` | categorical `[Yes, No]` | required |
+| `confidence` | likert 1..5, `scale_labels` = Not at all / Slightly / Moderately / Confident / Very confident | required |
+| `primary_cause` | categorical, placeholder options | `display_if deterioration_6h == Yes` |
+| `good_outcome_3mo` | categorical `[Yes, No]`, prompt names mRS 0 to 2 | required |
+| `death_3mo` | categorical `[Yes, No]` | `auto_value No when good_outcome_3mo == Yes` |
 
-## Stale hidden answer policy
+The cause options are marked in the file as placeholders: the final categories are an open gate item (§26.11). `configs/example_phase2_config.yaml` documents this file; the Phase 1 `example_questions.yaml` stays as is.
 
-S11h locks the following first use case behaviour.
+## Export and figures
 
-### Deterioration cause
-
-If the clinician changes:
-
-```
-deterioration_6h: Yes -> No
-```
-
-then any persisted `primary_cause` answer is deleted in the same transaction.
-
-It must not:
-
-- remain hidden but persisted
-- count toward exports as the current branch answer
-- block or satisfy the advance gate
-
-Append an `answer.clear` event with a reason identifying branch invalidation, not the raw answer value.
-
-### Death at three months
-
-If:
-
-```
-good_outcome_3mo = Yes
-```
-
-persist:
-
-```
-death_3mo = No
-answer_source = rule
-```
-
-If the clinician later changes:
-
-```
-good_outcome_3mo: Yes -> No
-```
-
-clear the rule generated death answer. The clinician must then answer `death_3mo` explicitly.
-
-Do not restore an older hidden clinician death answer automatically.
-
-This prevents stale branch state from silently reappearing.
-
-## Server side write protection
-
-`POST /answer` must refuse:
-
-- hidden question
-- derived question
-- unknown question
-- question outside the case pinned configuration
-- question at a locked timepoint
-
-The client showing or hiding an element is never sufficient authorisation.
-
-## Gating changes
-
-Replace the current static completeness rule:
-
-```
-q.required and q.question_id not in saved
-```
-
-with the shared evaluated branch.
-
-A timepoint is complete when every evaluated question with:
-
-```
-required_now == true
-```
-
-has a valid effective answer.
-
-Rule generated answers count as effective answers for the gate.
-
-Hidden questions never block.
-
-`required_count()` and the advance CTA counts must use the active branch, not the entire static question list.
-
-## Client behaviour
-
-Add a small external JavaScript module, for example `conditional_questions.js`, loaded under the existing CSP.
-
-Responsibilities:
-
-- mirror server evaluated state immediately after a local answer change for responsive UX
-- hide/show dependent question containers
-- make derived controls read only
-- update displayed derived values
-- trigger/consume the normal autosave response
-- re render from server state after any HTMX response
-
-The browser implementation is a UX mirror only. Refreshing the page must produce the same state from persisted server data without relying on browser memory.
-
-Do not put executable condition expressions in HTML.
-
-Safe data attributes may carry question IDs and already validated condition metadata where needed.
-
-## Refresh and resume
-
-On every render:
-
-1. load the case pinned `Questions` snapshot
-2. load persisted answers for the current cell
-3. evaluate the branch server side
-4. render only the effective state
-
-This makes conditional state survive:
-
-- autosave
-- full refresh
-- HTMX timepoint swap
-- reconnect/resume inside S11e grace
-- server restart
-
-## Configuration provenance
-
-Changing any of the following changes the questions snapshot and `config_hash`:
-
-- condition target
-- condition comparison value
-- automatic answer rule
-- question wording
-- option list
-- required flag
-
-An already activated case continues using its original conditional logic.
-
-## Events
-
-Reuse existing `answer.upsert` and `answer.clear` events.
-
-Add non sensitive payload metadata where useful:
-
-```
-source: clinician | rule
-reason: user_change | branch_invalidated | auto_value
-```
-
-Do not put raw free text or raw answer values into event payloads.
+The S9c export decodes rule rows like any stored value; the source columns are exported in S11n (the DB already holds them). `divergence-view` accepts v2 questions unchanged.
 
 ## Files expected to change
 
-- `src/ehr_simulator/config/questions.py`
-- `src/ehr_simulator/config/loader.py`
-- `src/ehr_simulator/config/snapshot.py`
-- `src/ehr_simulator/answer_codec.py`
-- `src/ehr_simulator/db/migrations.py`
-- `src/ehr_simulator/db/answers.py`
-- `src/ehr_simulator/web/answer_capture.py`
-- `src/ehr_simulator/web/gating.py`
-- `src/ehr_simulator/web/routes.py`
-- `src/ehr_simulator/web/templates/_questions_pane.html`
-- new pure conditional evaluation module
-- new external conditional question JS
-- first use case Phase 2 questions fixture/config
-- schema fixture, tests, and documentation
+`config/questions.py`, `config/loader.py`, new `question_branching.py`, `answer_codec.py` (if needed), `db/migrations.py`, `db/answers.py`, `web/answer_capture.py`, `web/gating.py`, `web/routes.py`, `web/templates/_questions_pane.html`, new `_question.html`, `static/theme.css`, the new fixture, tests, docs.
 
 ## Required tests
 
-### Schema and validation
+### Schema
 
-1. Historical schema v1 questions snapshot still parses and re renders byte identically.
-2. Valid schema v2 conditional config loads.
-3. Unknown condition source question is rejected.
-4. Self reference is rejected.
-5. Forward reference is rejected.
-6. Condition value not valid for the source question is rejected.
-7. Auto value not valid for the target response type is rejected.
-8. Changing conditional logic changes `config_hash`.
+1. A historical v1 snapshot parses and re-renders byte identically.
+2. A valid v2 conditional config loads.
+3. Unknown condition source rejected.
+4. Self reference rejected.
+5. Forward reference rejected.
+6. Non categorical source rejected.
+7. `equals` outside the source options rejected.
+8. `auto_value.value` invalid for the target rejected; `auto_value` on free-text rejected.
+9. v2 fields under `schema_version: "1"` rejected.
+10. `scale_labels` of the wrong length rejected.
+11. Changing a condition changes `config_hash`.
 
-### Deterioration branch
+### Evaluation (pure)
 
-9. `deterioration_6h=Yes` displays primary cause.
-10. Primary cause is required when deterioration is Yes.
-11. `deterioration_6h=No` hides primary cause.
-12. Hidden primary cause does not block advance.
-13. Yes -> saved cause -> No clears the cause row atomically.
-14. Clearing a stale cause emits an audit event without the raw answer value.
-15. Direct POST to hidden cause is refused.
+12. Deterioration Yes → cause `EDITABLE` and required.
+13. Deterioration No or unanswered → cause `HIDDEN`, not required.
+14. Good outcome Yes → death `DERIVED` = No.
+15. Good outcome No → death `EDITABLE` and required.
+16. A condition on a hidden source is false.
 
-### Good outcome/death branch
+### Service and routes
 
-16. `good_outcome_3mo=Yes` creates `death_3mo=No` as `answer_source=rule`.
-17. Rule generated death satisfies the gate.
-18. Direct POST to the derived death question is refused.
-19. `good_outcome_3mo=No` exposes editable death response.
-20. Yes -> No clears the rule generated death value.
-21. After Yes -> No, death blocks until the clinician explicitly answers it.
-22. An old pre branch clinician death answer is not silently restored.
+17. Yes → cause saved → No deletes the cause row atomically, with an `answer.clear` event carrying `reason: branch_invalidated` and no value.
+18. Hidden cause does not block advance.
+19. Direct POST to the hidden cause → 409, nothing written.
+20. Good outcome Yes writes `death_3mo = No` with `answer_source = rule`, `derived_from_question_id = good_outcome_3mo`.
+21. The rule death satisfies the gate.
+22. Direct POST to the derived death → 409.
+23. Yes → No deletes the rule death; death then blocks until answered.
+24. A clinician death answer overwritten by the rule is not restored after Yes → No.
+25. Clearing the controlling answer re-evaluates dependents.
+26. The answer response carries out of band slot swaps for changed questions only.
+27. The migration triggers refuse inconsistent source rows.
 
 ### Atomicity
 
-23. Failure while clearing a dependent answer rolls back the controlling answer write.
-24. Failure while writing a derived answer rolls back the controlling answer write.
-25. Failure while appending audit events rolls back all branch state writes.
-26. Successful branch update increments the write counter only after the outer commit.
+28. A failing dependent delete rolls back the controlling write.
+29. A failing rule upsert rolls back the controlling write.
+30. A failing event append rolls back all writes.
+31. `write_counter` is bumped once, after the commit.
 
-### Persistence and resume
+### Persistence
 
-27. Conditional state survives refresh.
-28. Conditional state survives HTMX timepoint navigation and return where policy permits.
-29. Conditional state survives S11e reconnect/resume.
-30. Case pinned v1 and v2 question configurations can coexist in one study database.
+32. Branch state survives refresh (GET renders the same states).
+33. Branch state survives HTMX timepoint navigation and back.
+34. Branch state survives S11e pause and resume.
+35. v1 and v2 pinned cases coexist in one database.
 
-### First use case configuration
+### First use case fixture
 
-31. Primary deterioration options are exactly Yes and No.
-32. Confidence is a five point Likert scale.
-33. Primary cause is configured as categorical.
-34. Good outcome is Yes/No.
-35. Death at three months is Yes/No.
-36. Hospital survival is absent.
-37. Six month death is absent.
-38. Contributing factors are absent.
-39. Free notes are absent.
+36. It holds exactly the five questions in order.
+37. Deterioration options are exactly Yes and No.
+38. Confidence is 1..5 with five labels.
+39. Primary cause is categorical with `display_if`.
+40. Good outcome and death are Yes/No; death has the `auto_value` rule.
+41. No hospital survival, six month death, contributing factors or free text.
 
 ### Regression
 
-40. Existing unconditional v1 question gating remains correct for historical/Phase 1 configurations.
-41. All S11a through S11g tests remain green.
-42. Full CI remains green.
+42. v1 unconditional gating unchanged.
+43. All earlier tests green; CI green.
 
 ## Explicit non goals
 
-S11h does not implement:
-
-- arbitrary Boolean expression languages
-- cross timepoint conditions
-- conditions based directly on clinical data
-- scoring or correctness feedback
-- practice mode
-- browser telemetry
-- panel exposure
-- PP classification
-- final Phase 2 exports
+Boolean expression languages, cross timepoint or clinical data conditions, scoring or feedback, practice mode, telemetry, panel exposure, PP classification, Phase 2 exports.
 
 ## Acceptance
 
-S11h is complete when the server can deterministically evaluate configured question branches, stale hidden answers are handled transactionally, automatic answers are explicitly provenance marked, gating follows only the current active branch, refresh/resume reproduce the same state, the first use case contains only its five intended questions, historical v1 question snapshots remain readable, and the complete test suite passes.
+The server evaluates configured branches deterministically; stale hidden answers are removed in the same transaction; rule answers are provenance marked; gating follows the current branch; refresh and resume rebuild the same state; the first use case fixture holds exactly its five questions; v1 snapshots stay byte stable; the full suite passes.
