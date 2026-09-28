@@ -253,12 +253,24 @@ def test_next_timepoint_starts_from_zero() -> None:
     assert summaries[(1, "primary", PANEL)].viewed is False
 
 
-def test_incomplete_above_threshold_is_viewed_below_is_unknown() -> None:
+def test_truncated_tail_above_threshold_is_viewed_below_is_unknown() -> None:
+    # No exit, nothing lost before the last event: the measure is a lower bound.
     above = _summary([_visible_from_zero().activity(3)])[(0, "primary", PANEL)]
     below = _summary([_visible_from_zero().activity(1)])[(0, "primary", PANEL)]
 
     assert above.status is TelemetryStatus.INCOMPLETE and above.viewed is True
     assert below.viewed is None
+
+
+def test_internal_gap_never_proves_viewed() -> None:
+    # Seen at 0 s; the lost event may be the 0.5 s hide; exit at 5 s.
+    stream = _visible_from_zero()
+    stream.gap(0.5)
+    summary = _summary([stream.exit(5)])[(0, "primary", PANEL)]
+
+    assert summary.status is TelemetryStatus.GAPPED
+    assert summary.viewed is None
+    assert summary.qualifying_seconds is None
 
 
 def test_missing_telemetry_is_not_not_viewed() -> None:

@@ -299,6 +299,16 @@ def test_incomplete_below_threshold_is_indeterminate() -> None:
     assert obs.pp_compliant is False and obs.pp_determinate is False
 
 
+def test_gapped_ai_stream_cannot_establish_pp() -> None:
+    stream = PanelStream("r1").enter(0).mount(0, "ai").ratio(0, 0.5, "ai")
+    stream.gap(0.5)
+    obs = _obs(_with_streams([_render("r1")], [stream.exit(5)]))
+
+    assert obs.ai_viewing_status is TelemetryStatus.GAPPED
+    assert obs.ai_viewed is None
+    assert obs.pp_compliant is False and obs.pp_determinate is False
+
+
 def test_multi_tab_is_indeterminate() -> None:
     other = PanelStream("r2", tab_id="tab-b").enter(0).mount(0, "ai").ratio(0, 0.5, "ai").exit(5)
     obs = _obs(_with_streams([_render("r1"), _render("r2")], [_ai_stream("r1", 5), other]))
@@ -382,9 +392,10 @@ def test_incomplete_case_reasons_by_position() -> None:
     variables = derive_case_variables(inputs)
     reasons = {(r.t_index, r.question_id): r.missing_reason for r in variables.responses}
 
+    # Reached beats abandonment (original S11l precedence).
     assert reasons[(0, "confidence")] is MissingReason.REACHED_UNANSWERED
-    assert reasons[(1, "confidence")] is MissingReason.CASE_ABANDONED
-    assert reasons[(2, "confidence")] is MissingReason.TIMEPOINT_NEVER_REACHED
+    assert reasons[(1, "confidence")] is MissingReason.REACHED_UNANSWERED
+    assert reasons[(2, "confidence")] is MissingReason.CASE_ABANDONED
     assert variables.incomplete_reason == "reconnection_timeout"
 
 
@@ -405,7 +416,21 @@ def test_frontier_without_enter_evidence_is_not_reached() -> None:
     )
     responses = _responses(inputs)
 
-    assert responses[(1, "confidence")].missing_reason is MissingReason.TIMEPOINT_NEVER_REACHED
+    assert responses[(1, "confidence")].missing_reason is MissingReason.CASE_ABANDONED
+
+
+def test_completed_case_without_reach_evidence_is_never_reached() -> None:
+    # Impossible through the gate; the precedence still ends somewhere defined.
+    inputs = _inputs(
+        case_state=CaseState.COMPLETED,
+        unlocked_t_index=0,
+        completed=False,
+        enter_t_indices=frozenset(),
+    )
+
+    assert _responses(inputs)[(1, "confidence")].missing_reason is (
+        MissingReason.TIMEPOINT_NEVER_REACHED
+    )
 
 
 def test_derived_question_without_rule_row_is_unknown() -> None:

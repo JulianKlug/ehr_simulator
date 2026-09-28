@@ -19,6 +19,7 @@ import json
 import math
 import re
 import sqlite3
+from datetime import datetime
 from typing import Annotated, Any, Literal
 
 from pydantic import (
@@ -168,9 +169,15 @@ class _Event(BaseModel):
 
     @field_validator("client_ts")
     @classmethod
-    def _ts_short(cls, v: str | None) -> str | None:
-        if v is not None and len(v) > _CLIENT_TS_MAX_CHARS:
+    def _ts_iso(cls, v: str | None) -> str | None:
+        # ``Date.toISOString()``, e.g. ``2026-09-27T10:00:00.000Z``: an
+        # unparseable or zone-less value would leak into first/last view.
+        if v is None:
+            return v
+        if len(v) > _CLIENT_TS_MAX_CHARS:
             raise ValueError("client_ts too long")
+        if datetime.fromisoformat(v).tzinfo is None:
+            raise ValueError("client_ts must carry a UTC offset")
         return v
 
 

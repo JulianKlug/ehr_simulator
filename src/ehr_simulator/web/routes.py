@@ -982,17 +982,19 @@ async def case_heartbeat(request: Request, patient_id: str) -> Response:
 async def telemetry_events(request: Request) -> Response:
     """S11j/S11k: store one browser telemetry batch (204).
 
-    422 malformed, 409 unknown or foreign render; nothing written on either.
+    401 unknown clinician, 422 malformed, 409 unknown or foreign render;
+    nothing written on any. 401 instead of the login redirect: ``fetch()``
+    follows redirects and would read the login page as a successful upload.
     Not case contact: no lifecycle check, no ``last_seen_at`` touch.
     """
-    clinician_id, redirect = _require_clinician(request)
-    if redirect is not None:
-        return redirect
+    clinician_id = cookies.read_clinician_id(request)
+    if clinician_id is None or clinician_id not in request.app.state.known_clinicians:
+        return Response(status_code=status.HTTP_401_UNAUTHORIZED)
 
     try:
         batch = parse_batch(await request.body())
         record_batch(
-            request.app.state.db, request.app.state, clinician_id=clinician_id or "", batch=batch
+            request.app.state.db, request.app.state, clinician_id=clinician_id, batch=batch
         )
     except TelemetryValidationError as exc:
         get_logger().warning(

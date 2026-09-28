@@ -159,11 +159,27 @@ def test_render_without_events_is_missing_not_zero() -> None:
     assert timing.foreground_ms is None and timing.active_ms is None
 
 
-def test_reported_gap_marks_incomplete() -> None:
+def test_reported_gap_is_gapped_not_incomplete() -> None:
+    # A lost event may be the one that ended foreground: no lower bound.
     timing = _timing(Stream().enter(0).exit(10).gap(11))
 
-    assert timing.timeline.status is TelemetryStatus.INCOMPLETE
-    assert timing.foreground_ms == 10 * S  # the gap's own time never extends the interval
+    assert timing.timeline.status is TelemetryStatus.GAPPED
+
+
+def test_gapped_observation_reports_no_seconds() -> None:
+    stream = Stream("r1").enter(0).gap(1).exit(20)
+    result = _observations([_render("r1")], [stream])[(0, "primary")]
+
+    assert result.status is TelemetryStatus.GAPPED
+    assert result.foreground_seconds is None and result.active_seconds is None
+
+
+def test_gap_outranks_tail_truncation_across_renders() -> None:
+    truncated = Stream("r1").enter(0).activity(5)
+    gapped = Stream("r2", seq_start=20).enter(0).gap(1).exit(5)
+    result = _observations([_render("r1"), _render("r2", event_id=2)], [truncated, gapped])
+
+    assert result[(0, "primary")].status is TelemetryStatus.GAPPED
 
 
 def test_backwards_monotonic_time_is_invalid() -> None:

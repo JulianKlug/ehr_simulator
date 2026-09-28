@@ -161,7 +161,9 @@
         })
             .then(function (response) {
                 const status = response.status;
-                if (status >= HTTP_SERVER_ERROR_MIN) {
+                if (response.redirected) {
+                    discard(batch); // never a success: the server answers 204
+                } else if (status >= HTTP_SERVER_ERROR_MIN) {
                     queue = batch.filter(notGap).concat(queue); // retry later
                 } else if (status >= HTTP_CLIENT_ERROR_MIN) {
                     discard(batch); // refused: report the loss, never resend

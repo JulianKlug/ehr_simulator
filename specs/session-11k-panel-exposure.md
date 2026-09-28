@@ -17,7 +17,7 @@ Revised against the code at `7cf9305` and the revised S11j:
 3. **Collapse = the epic chrome tab.** No panel has its own collapse control. In `epic` chrome (the study default) only the selected tabpanel is expanded; a user tab change is `panel.close` of the old panel plus `panel.open` of the new one. `dense` chrome panels are always expanded and never emit open/close. Initial selection, including the sessionStorage restore after a swap, is state, not a user open.
 4. **Panel set fixed** to the five `section[data-panel]` panels: `admission`, `vitals`, `labs`, `imaging`, `ai`. The summary card header and the questions drawer are not information panels. The selector must be `section[data-panel]`: the vitals `<figure>` also carries `data-panel`.
 5. **`panel.mount`** records each panel's presence, initial expansion and render state at attach. It is also the AI DOM delivery evidence S11l needs, so S11l adds no browser "mounted" event.
-6. **Incomplete ≠ not viewed** carried into the summary: a lower bound at or above the viewed threshold is `viewed=true` even when the stream is incomplete; below it, `viewed` is `None`.
+6. **Incomplete ≠ not viewed** carried into the summary: a lower bound at or above the viewed threshold is `viewed=true` even when the tail is truncated; below it, `viewed` is `None`. PR #7 review: a `gapped` stream is no lower bound (the lost event may be the one that ended exposure), so it never proves `viewed` — `viewed` and seconds are `None`.
 
 ## Core invariants
 
@@ -108,11 +108,11 @@ Per render and panel: `qualifying_ms`, `episodes` (start/end mono, start/end `cl
 Per observation (clinician × patient × timepoint × panel × visit_kind), aggregating renders like S11j:
 
 - `qualifying_seconds` (sum over same tab renders; measured lower bound)
-- `viewed`: `True` if `qualifying_ms >= threshold × 1000`; else `False` when status is `complete`, `None` otherwise
+- `viewed`: status `complete|incomplete` and `qualifying_ms >= threshold × 1000` → `True`; `complete` below it → `False`; `None` otherwise (`gapped`, `missing`, `multi_tab`, `invalid`, or truncated below threshold)
 - `episode_count`, `panel_open_count`
 - `time_to_first_view_seconds`: from the first primary render only; `None` if the first view happened in a later render
 - `first_view_client_ts`, `last_view_client_ts` (first episode start, last episode end); `None` when the browser timestamp is missing
-- `status`: `complete|incomplete|missing|multi_tab|invalid` (S11j aggregate); `mounted=False` when no render mounted the panel
+- `status`: `complete|incomplete|gapped|missing|multi_tab|invalid` (S11j aggregate); `mounted=False` when no render mounted the panel
 
 Durations are computed in milliseconds from `client_mono_ms`, never from `server_ts`.
 
@@ -160,7 +160,7 @@ Revisit renders form their own summaries and never extend primary ones. More tha
 20. Episode count, open count, time to first view, first/last client timestamps.
 21. Dense (non collapsible) panels have open count 0.
 22. Revisit exposure separate; multi tab not summed.
-23. Incomplete stream above threshold → viewed `True`; below → `None`.
+23. Truncated stream above threshold → viewed `True`; below → `None`; internal gap above threshold → `None`, no seconds.
 
 ### Browser (Playwright)
 

@@ -17,8 +17,10 @@ browser rows bound to them (``db/telemetry.py``). Durations use only
   (the enter included) that happened while foreground. A later activity
   resumes active time from itself; gaps are never filled backwards.
 
-A render without an exit ends at its last event and is ``incomplete``;
-missing telemetry is ``missing`` (no seconds), never zero. Renders of one
+A render without an exit ends at its last event and is ``incomplete`` (its
+seconds are a lower bound); a reported loss or a lost enter is ``gapped``
+(no seconds: the lost event may have ended foreground); missing telemetry
+is ``missing`` (no seconds), never zero. Renders of one
 observation (clinician × patient × timepoint × visit kind) in one tab are
 sequential and sum; more than one tab is ``multi_tab`` (S11m decides).
 """
@@ -71,7 +73,8 @@ Interval = tuple[float, float]
 
 class TelemetryStatus(StrEnum):
     COMPLETE = "complete"  # enter + exit, nothing lost
-    INCOMPLETE = "incomplete"  # no exit, reported loss, or unobserved renders
+    INCOMPLETE = "incomplete"  # tail truncated (no exit) or unobserved renders: lower bound
+    GAPPED = "gapped"  # events lost inside the stream: no lower bound
     MISSING = "missing"  # rendered, but no browser event ever arrived
     MULTI_TAB = "multi_tab"  # more than one tab reported the observation
     INVALID = "invalid"  # monotonic time runs backwards
@@ -80,9 +83,10 @@ class TelemetryStatus(StrEnum):
 _STATUS_RANK = {
     TelemetryStatus.COMPLETE: 0,
     TelemetryStatus.INCOMPLETE: 1,
-    TelemetryStatus.MISSING: 2,
-    TelemetryStatus.MULTI_TAB: 3,
-    TelemetryStatus.INVALID: 4,
+    TelemetryStatus.GAPPED: 2,
+    TelemetryStatus.MISSING: 3,
+    TelemetryStatus.MULTI_TAB: 4,
+    TelemetryStatus.INVALID: 5,
 }
 
 
@@ -201,8 +205,12 @@ def build_timeline(render: RenderRow, rows: Sequence[TelemetryRow]) -> RenderTim
     start = enter.client_mono_ms if enter is not None else timed[0].client_mono_ms
     exit_row = next((r for r in timed if r.kind == EXIT and r.client_mono_ms >= start), None)
     end = exit_row.client_mono_ms if exit_row is not None else timed[-1].client_mono_ms
-    if enter is None or exit_row is None or len(timed) != len(ordered):
-        status = TelemetryStatus.INCOMPLETE
+    if exit_row is None:
+        status = TelemetryStatus.INCOMPLETE  # closed at the last event: a lower bound
+    if enter is None or len(timed) != len(ordered):
+        # A lost enter or a reported gap: the missing event may be the one
+        # that ended foreground or exposure, so nothing here is a lower bound.
+        status = TelemetryStatus.GAPPED
 
     inside = tuple(r for r in timed if start <= r.client_mono_ms <= end)
     states = [
@@ -268,7 +276,8 @@ def derive_render_timing(
 class ObservationTiming:
     """Foreground/active seconds of one clinician × patient × timepoint ×
     visit kind. Seconds are measured lower bounds; ``None`` when nothing
-    trustworthy exists (missing, invalid, or multi tab — see ``per_tab``)."""
+    trustworthy exists (gapped, missing, invalid, or multi tab — see
+    ``per_tab``)."""
 
     t_index: int
     visit_kind: str
@@ -319,9 +328,10 @@ def aggregate_status(timelines: Sequence[RenderTimeline]) -> TelemetryStatus:
         return TelemetryStatus.MULTI_TAB
     if not reported:
         return TelemetryStatus.MISSING
+    worst = worst_status(t.status for t in reported)
     if len(reported) != len(timelines):
-        return TelemetryStatus.INCOMPLETE
-    return worst_status(t.status for t in reported)
+        return worst_status((worst, TelemetryStatus.INCOMPLETE))
+    return worst
 
 
 def derive_observation_timings(

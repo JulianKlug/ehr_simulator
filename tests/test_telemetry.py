@@ -45,6 +45,7 @@ HTTP_NO_CONTENT = 204
 HTTP_CONFLICT = 409
 HTTP_PRECONDITION_FAILED = 412
 HTTP_UNPROCESSABLE = 422
+HTTP_UNAUTHORIZED = 401
 RENDER_KIND = "timepoint.render"
 OTHER_CLINICIAN = "Dr. Other"
 
@@ -376,6 +377,8 @@ BAD_EVENTS = {
         "payload": {"panel_id": "ai", "intersection_ratio": 1.5},
     },
     "unknown panel": {"kind": "panel.open", "payload": {"panel_id": "questions"}},
+    "unparseable client_ts": {"client_ts": "yesterday"},
+    "naive client_ts": {"client_ts": "2026-09-27T10:00:00"},
     "string bool": {"payload": {"visible": "true", "focused": True, "reason": "blur"}},
 }
 
@@ -488,7 +491,8 @@ def test_late_events_accepted_after_completion(telemetry_harness: Any) -> None:
     assert response.status_code == HTTP_NO_CONTENT
 
 
-def test_logged_out_post_redirects_to_login(telemetry_harness: Any) -> None:
+def test_logged_out_post_is_401_not_a_login_redirect(telemetry_harness: Any) -> None:
+    # fetch() follows redirects: a 303 to /login would read as a 200 success.
     study, config = telemetry_harness
     with study.boot(config) as client:
         client.cookies.clear()
@@ -496,7 +500,9 @@ def test_logged_out_post_redirects_to_login(telemetry_harness: Any) -> None:
             TELEMETRY_URL, json={"tab_id": TAB_ID, "events": []}, follow_redirects=False
         )
 
-    assert response.headers["location"] == "/login"
+    assert response.status_code == HTTP_UNAUTHORIZED
+    assert "location" not in response.headers
+    assert "HX-Redirect" not in response.headers
 
 
 def test_unactivated_patient_has_no_render(telemetry_harness: Any) -> None:

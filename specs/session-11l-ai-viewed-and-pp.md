@@ -15,7 +15,7 @@ Revised against the code at `7cf9305` and the revised S11j/S11k:
 3. **Failure reasons mapped to real causes:** `missing_artifact` ← `missing_row | artifact_mismatch | not_configured`; `render_failure` ← AI panel rendered in `error` state; `display_failure` ← server shown, complete telemetry, no AI `panel.mount` in state `loading|partial`.
 4. **No AI PP needs no telemetry.** A no AI render has no AI markup by construction (S11g); only positive leakage evidence breaks compliance.
 5. **"Reached"** uses the authoritative gate state (`t < unlocked_t_index`, or the case completed) plus S10 `timepoint.enter` evidence for the frontier, instead of telemetry alone.
-6. **Missing reasons made mutually distinct:** `case_abandoned` = the frontier of an incomplete case (reached, unanswered when it ended); `timepoint_never_reached` = timepoints after it; `reached_unanswered` = a reached, non frontier (or completed) timepoint with a visible question left blank; new `pending` for timepoints of an open case. `technical_failure` is reserved: no lifecycle reason is technical today.
+6. **Missing reasons:** the original precedence stands (PR #7 review restored it): reached beats abandonment, so a timepoint seen and left blank is `reached_unanswered` even where the case was abandoned; `case_abandoned` = not reached because the case ended incomplete; new `pending` for timepoints of an open case; `timepoint_never_reached` for anything else without reach evidence. `technical_failure` is reserved: no lifecycle reason is technical today.
 7. **Integrity problems are flagged, not raised**, so one bad row never blocks S11n's export.
 8. **Scope:** measured `phase2_randomized` cases only; practice and Phase 1 are excluded.
 9. **No persistence, no export.** Pure derivation plus a read only loader; S11n renders columns.
@@ -61,7 +61,7 @@ For AI assigned observations, over primary renders:
 
 - `ai_delivered = True` when some render is `shown` **and** that render has an `ai` `panel.mount` with state `loading|partial` (the S2 normal and partial states).
 - `ai_delivered = False` when every render is `unavailable|error`, or a `shown` render has `complete` telemetry and no such mount (`display_failure`).
-- otherwise `None` (shown, but telemetry `missing|incomplete|multi_tab` and no mount seen).
+- otherwise `None` (shown, but telemetry `missing|incomplete|gapped|multi_tab` and no mount seen).
 
 For no AI observations `ai_delivered = True` only on leakage evidence, else `False`.
 
@@ -110,11 +110,10 @@ Precedence (first match wins):
 1. `HIDDEN` → `status=not_applicable`
 2. an answer row exists (clinician or rule) → `status=answered`, `answer_source` kept
 3. a technical failure reason (reserved; none today) → `technical_failure`
-4. reached, the case is `incomplete`, `t_index == unlocked_t_index` → `case_abandoned`
-5. reached → `reached_unanswered`
+4. reached → `reached_unanswered`
+5. the case is `incomplete` → `case_abandoned`
 6. the case is `active|paused` → `pending`
-7. the case is `incomplete` → `timepoint_never_reached`
-8. otherwise (completed but unreached, impossible) → `unknown` + integrity warning
+7. otherwise (no reach evidence) → `timepoint_never_reached`
 
 A `DERIVED` question without its rule row is also `unknown` + warning. The lifecycle incomplete reason is always kept separately on the case.
 
@@ -173,7 +172,8 @@ History is never rewritten.
 20. Clinician answer → answered; rule answer → answered, source rule.
 21. Hidden question → not applicable.
 22. Completed case, optional question blank → `reached_unanswered`.
-23. Incomplete case: frontier → `case_abandoned`, later timepoints → `timepoint_never_reached`, earlier blank optional → `reached_unanswered`.
+23. Incomplete case: reached timepoints (frontier included) → `reached_unanswered`, later timepoints → `case_abandoned`.
+23a. A gapped AI stream above threshold → viewed `None`, PP false, `pp_determinate` false.
 24. Open case, future timepoint → `pending`.
 25. Frontier without S10 enter evidence → not reached.
 26. Lifecycle incomplete reason retrievable on the case.

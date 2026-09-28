@@ -192,8 +192,9 @@ class PanelSummary:
     """One panel of one clinician × patient × timepoint × visit kind.
 
     ``qualifying_seconds`` is a measured lower bound (``None`` when nothing
-    trustworthy exists). ``viewed``: ``True`` once the bound reaches the
-    threshold, ``False`` only on complete telemetry, else ``None``.
+    trustworthy exists: a gapped stream is not a lower bound). ``viewed``:
+    ``True`` once the bound reaches the threshold, ``False`` only on
+    complete telemetry, else ``None``.
     """
 
     t_index: int

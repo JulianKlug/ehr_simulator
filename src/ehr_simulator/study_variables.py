@@ -76,7 +76,7 @@ class ResponseStatus(StrEnum):
 
 class MissingReason(StrEnum):
     TECHNICAL_FAILURE = "technical_failure"  # reserved: no producer yet
-    CASE_ABANDONED = "case_abandoned"
+    CASE_ABANDONED = "case_abandoned"  # the case ended incomplete before it
     REACHED_UNANSWERED = "reached_unanswered"
     PENDING = "pending"
     TIMEPOINT_NEVER_REACHED = "timepoint_never_reached"
@@ -366,18 +366,20 @@ def _integrity_warnings(
     return tuple(warnings)
 
 
-def _missing_reason(inputs: CaseInputs, t_index: int, reached: bool) -> MissingReason:
-    """Precedence 3–8 of the spec (hidden and answered are handled first)."""
+def _missing_reason(inputs: CaseInputs, reached: bool) -> MissingReason:
+    """Precedence 4–7 of the spec (hidden, answered and technical first).
+
+    Reached beats abandonment: a timepoint seen and left blank stays
+    ``reached_unanswered`` even when the case was abandoned there.
+    """
     state = inputs.case_state
-    if reached and state is CaseState.INCOMPLETE and t_index == inputs.unlocked_t_index:
-        return MissingReason.CASE_ABANDONED
     if reached:
         return MissingReason.REACHED_UNANSWERED
+    if state is CaseState.INCOMPLETE:
+        return MissingReason.CASE_ABANDONED
     if state in (CaseState.ACTIVE, CaseState.PAUSED):
         return MissingReason.PENDING
-    if state is CaseState.INCOMPLETE:
-        return MissingReason.TIMEPOINT_NEVER_REACHED
-    return MissingReason.UNKNOWN
+    return MissingReason.TIMEPOINT_NEVER_REACHED
 
 
 def _responses(inputs: CaseInputs) -> tuple[ResponseProvenance, ...]:
@@ -404,7 +406,7 @@ def _responses(inputs: CaseInputs) -> tuple[ResponseProvenance, ...]:
             elif item.state is QuestionState.DERIVED:
                 reason = MissingReason.UNKNOWN  # a rule row should exist
             else:
-                reason = _missing_reason(inputs, t_index, reached)
+                reason = _missing_reason(inputs, reached)
             out.append(
                 ResponseProvenance(
                     t_index=t_index,

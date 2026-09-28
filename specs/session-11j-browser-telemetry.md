@@ -21,6 +21,7 @@ Revised against the code at `7cf9305`:
 7. **Loss is explicit.** The client reports dropped events (`browser.gap`); retries are idempotent on `(render_id, tab_id, client_seq)`.
 8. **Telemetry is not case contact.** The endpoint never touches `last_seen_at`, never runs the S11e lazy timeout, and accepts late events for completed or incomplete cases.
 9. **Exports unchanged.** S11j delivers the pure derivation and its DB reader; CSV columns are S11n's.
+11. **PR #7 review (2026-09-28):** a reported loss (`browser.gap`) or a lost enter is `gapped`, not `incomplete`: the lost event may be the hide/blur that ended foreground, so the measure is no lower bound and yields no seconds. Only tail truncation (no exit, nothing lost before the last event) stays a lower bound. The endpoint answers an unknown clinician with 401, not the login redirect (`fetch()` would follow it and read the login page as success), and `client_ts` must be an ISO timestamp with a UTC offset.
 10. **Dropped** client exit reasons the browser cannot know (`advance`, `finish`, `redirect`, `interruption`): exits are `swap` or `pagehide`.
 
 ## Core invariants
@@ -32,7 +33,7 @@ Revised against the code at `7cf9305`:
 5. Passive mouse movement is not activity.
 6. Every telemetry event is attributable through its `render_id` to study, clinician, session, patient, timepoint, configuration version and visit kind, plus `tab_id`.
 7. Telemetry is append only raw data; every derived value is rebuilt from it.
-8. Missing telemetry is `missing`/`incomplete`, never zero seconds.
+8. Missing telemetry is `missing`/`incomplete`/`gapped`, never zero seconds; a `gapped` stream yields no seconds at all.
 9. Multiple tabs are observable; conflict policy is S11m's.
 10. Primary and revisit telemetry are separate derivation groups.
 11. Telemetry failure never blocks the clinical workflow.
@@ -105,14 +106,14 @@ Historical rows keep NULLs. `events.append()` gains optional `tab_id`, `render_i
 ```json
 {"tab_id": "<uuid>", "events": [
   {"kind": "browser.state", "render_id": "<hex>", "client_seq": 12,
-   "client_mono_ms": 1532.4, "client_ts": "2026-09-27T10:00:00.000Z",
+   "client_mono_ms": 1532.4, "client_ts": "2026-09-27T10:00:00.000Z",   // ISO, with UTC offset
    "payload": {"visible": true, "focused": false, "reason": "blur"}}
 ]}
 ```
 
 Server:
 
-- clinician from the cookie (`_require_clinician`); unknown → the usual login redirect.
+- clinician from the cookie; unknown → **401** (never the login redirect: `fetch()` follows it and would read the login page as success; the client also treats `response.redirected` as a refusal).
 - body `<= 64 KiB`, `1..100` events, closed kinds and per kind payload models (`extra="forbid"`); any violation → **422**, nothing written.
 - each `render_id` must exist as a `timepoint.render` of **this** clinician; otherwise → **409**, nothing written.
 - each event inherits `session_id`, `patient_id`, `timepoint` from its render row.
@@ -156,13 +157,13 @@ Sort by `(client_mono_ms, client_seq)`.
 - **Interval**: `[enter, end]`, `end` = `timepoint_exit` or, when missing, the last event of the render (status `incomplete`).
 - **Foreground**: intervals where the latest state has `visible and focused`, clipped to the interval.
 - **Active**: foreground ∩ ⋃ `[a, a + threshold]` over activities `a` (enter included) that happened while foreground ∩ interval. Inactive gaps are never filled retroactively.
-- **Status** per render: `complete` (enter + exit, no gap), `incomplete` (no exit, gap, or events before enter), `missing` (render without any browser event), `invalid` (non monotonic, e.g. `client_mono_ms` decreasing along `client_seq` — flagged, not raised).
+- **Status** per render: `complete` (enter + exit, no gap), `incomplete` (no exit: closed at the last event, a lower bound), `gapped` (`browser.gap` or no enter: an internal loss may have removed a stop transition, so no lower bound and no seconds), `missing` (render without any browser event), `invalid` (non monotonic, e.g. `client_mono_ms` decreasing along `client_seq` — flagged, not raised).
 
 Observation (clinician × patient × timepoint × visit_kind) aggregate:
 
 - renders of one tab are sequential: seconds sum, status = worst render status;
 - more than one `tab_id`, or a duplicated `(tab_id, client_seq)` across renders → `multi_tab`, per tab values kept, no authoritative total;
-- durations are reported as measured lower bounds alongside the status.
+- durations are reported as measured lower bounds alongside the status, only for `complete` and `incomplete`; a missing render among reported ones makes the observation at least `incomplete`.
 
 Primary values come from `visit_kind=primary` renders only; revisits never extend them.
 
@@ -223,7 +224,8 @@ A failed POST keeps events queued (bounded), retries on the next flush, and repo
 26. Revisit renders never extend primary values.
 27. Two tab ids → `multi_tab`, not summed; duplicated `(tab_id, client_seq)` → `multi_tab`.
 28. Same tab reload: two renders sum.
-29. `browser.gap` → `incomplete`; render without events → `missing`.
+29. `browser.gap` or a lost enter → `gapped` without seconds; render without events → `missing`.
+29a. Unknown clinician → 401; `client_ts` without a UTC offset or unparseable → 422.
 30. Decreasing monotonic time → `invalid`.
 
 ### Browser (Playwright)
