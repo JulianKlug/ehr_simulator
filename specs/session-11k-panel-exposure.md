@@ -2,462 +2,179 @@
 
 ## Goal
 
-Measure actual viewport based exposure to each major information panel independently from clicks or other active interaction.
+Measure viewport based exposure to each major information panel independently from clicks or other interaction.
 
-The raw event stream must be sufficient to reconstruct cumulative viewing duration, viewing episodes, viewed classification, latency to first view, first/last view timestamps, and panel open counts for each clinician, patient, timepoint, tab, and visit kind.
+The raw events must reconstruct cumulative qualifying duration, episodes, viewed classification, latency to first view, first/last view timestamps and open counts per clinician, patient, timepoint, panel, tab and visit kind.
 
 S11a through S11j are assumed complete.
 
+## Review changes (2026-09-27)
+
+Revised against the code at `7cf9305` and the revised S11j:
+
+1. **Episodes are derived, not reported.** The draft had the browser emit `panel.exposure_start/end` and the server re-derive them. Two sources of the same fact can disagree. The browser now reports primitives only (mount, viewport ratio, open/close); the pure derivation reconstructs episodes and their end reasons from them plus S11j state and render boundaries. "Raw events are the source of truth" becomes literal, and every threshold test is a Python test.
+2. **The server applies the threshold.** Viewport events carry the browser's floating `intersection_ratio`; qualification is `ratio >= panel_viewport_threshold` from the case pinned config. The client uses the same threshold only to choose `IntersectionObserver` callback points.
+3. **Collapse = the epic chrome tab.** No panel has its own collapse control. In `epic` chrome (the study default) only the selected tabpanel is expanded; a user tab change is `panel.close` of the old panel plus `panel.open` of the new one. `dense` chrome panels are always expanded and never emit open/close. Initial selection, including the sessionStorage restore after a swap, is state, not a user open.
+4. **Panel set fixed** to the five `section[data-panel]` panels: `admission`, `vitals`, `labs`, `imaging`, `ai`. The summary card header and the questions drawer are not information panels. The selector must be `section[data-panel]`: the vitals `<figure>` also carries `data-panel`.
+5. **`panel.mount`** records each panel's presence, initial expansion and render state at attach. It is also the AI DOM delivery evidence S11l needs, so S11l adds no browser "mounted" event.
+6. **Incomplete ≠ not viewed** carried into the summary: a lower bound at or above the viewed threshold is `viewed=true` even when the stream is incomplete; below it, `viewed` is `None`.
+
 ## Core invariants
 
-1. A panel counts as exposed only while all configured qualifying conditions are true.
-2. Qualifying exposure does not require recent active interaction.
-3. A collapsed panel accumulates zero exposure.
-4. A collapsed header does not count as panel content exposure.
-5. The configured viewport threshold applies to expanded panel content, not to the surrounding layout box or header alone.
-6. Exposure is cumulative within one timepoint and resets at the next timepoint.
-7. Separate episodes sum within the same timepoint.
-8. Durations use browser monotonic timestamps from S11j.
-9. Raw events remain the source of truth; summaries are reproducible derivations.
-10. Multiple panels may be viewed simultaneously. Their durations may overlap and must not be summed as total attention time.
-11. Primary and revisit panel exposure remain distinguishable.
-12. Panel open state alone never implies viewed status.
+1. A panel is exposed only while all qualifying conditions hold.
+2. Exposure does not require recent activity.
+3. A collapsed panel accumulates zero exposure; its header never counts.
+4. The threshold applies to the panel's content element, not its header or section box.
+5. Exposure is cumulative within one timepoint; separate episodes sum; the next timepoint starts from zero.
+6. Durations use S11j per render monotonic time.
+7. Raw events are the source of truth; summaries are reproducible pure derivations.
+8. Simultaneous panel durations overlap and are never summed into attention time.
+9. Primary and revisit exposure stay separate.
+10. Open state alone never implies viewed.
 
 ## Configuration
 
-Use the telemetry fields introduced in S11j:
+S11j `telemetry.panel_viewport_threshold` (first use case 0.05) and `telemetry.panel_viewed_threshold_seconds` (2.0), same for every panel. No per panel thresholds.
 
-```
-telemetry:
-  panel_viewport_threshold: 0.05
-  panel_viewed_threshold_seconds: 2.0
-```
+## DOM contract
 
-For the first use case:
+Each panel template wraps everything after its `<header>` in one content element:
 
-- viewport threshold = 5 percent
-- cumulative viewed threshold = 2 seconds per timepoint
-
-The same thresholds apply to all instrumented major panels.
-
-Do not create per panel thresholds in S11k unless a later locked study requirement explicitly needs them.
-
-## Instrumented panels
-
-Instrument all major clinician facing information panels present in the patient view, including at least:
-
-- admission/summary clinical information where represented as a panel
-- vitals
-- labs
-- imaging
-- AI, only when the AI panel actually exists in the AI assigned DOM
-
-Every instrumented panel has a stable logical panel ID.
-
-Recommended DOM contract:
-
-```
-<section data-panel-id="vitals" ...>
-  <header ...>...</header>
-  <div data-panel-content ...>
-     ...expanded content...
-  </div>
+```html
+<section class="panel ..." data-panel="vitals" data-state="loading">
+  <header>Vitals</header>
+  <div class="panel-content" data-panel-content>…</div>
 </section>
 ```
 
-The `IntersectionObserver` observes `data-panel-content`, not the header.
+The observer targets `[data-panel-content]`. `#patient-view` carries `data-viewport-threshold` when telemetry is enabled.
 
-If a current panel is always expanded and has no collapse UI, its expanded state is treated as true for the lifetime of that render. It has zero user initiated open/close events unless a user toggle exists.
+Expanded: in `epic`, the enclosing `[role=tabpanel]` has no `hidden` attribute; in `dense`, always.
 
-## Expanded/collapsed state
+`keyboard.js` `activateTab` dispatches `ehrsim:tabchange` (`detail: {from, to, user}`); only `user: true` (a click) becomes open/close events.
 
-For collapsible panels:
-
-- expose an explicit DOM expanded state, for example `aria-expanded`
-- content must be hidden/non qualifying when collapsed
-- open/close interaction is recorded
-- panel toggle also counts as qualifying activity for S11j active time
-
-For non collapsible panels:
-
-- expanded is always true
-- do not fabricate open/close events merely because the panel rendered
-
-## Viewport measurement
-
-Use `IntersectionObserver` or an equivalent standards based browser API.
-
-The configured threshold is interpreted as the fraction of expanded content area intersecting the viewport.
-
-At the first use case threshold:
-
-```
-intersection_ratio >= 0.05
-```
-
-qualifies the viewport condition.
-
-A measured ratio below 0.05 does not qualify.
-
-Use the actual floating ratio reported by the browser. Do not round 4.9 percent up to 5 percent.
-
-## Qualifying exposure state
-
-For a panel, qualifying exposure is true only when all are true:
-
-```
-viewport_threshold_met
-AND document_visible
-AND window_focused
-AND panel_expanded
-AND current_timepoint_render_active
-```
-
-Recent activity is deliberately not part of this expression.
-
-A clinician may read without moving/clicking and continue accumulating panel exposure even after S11j `active_seconds` has stopped due to inactivity.
+A no AI render contains no AI section (S11g), so it instruments nothing for AI.
 
 ## Raw event taxonomy
 
-Extend the closed event kinds with at least:
+Added to `EventKind`, posted through the S11j endpoint (render bound, server stamped context).
 
-- `panel.viewport_enter`
-- `panel.viewport_exit`
-- `panel.open`
-- `panel.close`
-- `panel.exposure_start`
-- `panel.exposure_end`
+| kind | payload |
+|---|---|
+| `panel.mount` | `panel_id`, `expanded: bool`, `collapsible: bool`, `state` (the panel `data-state`) |
+| `panel.viewport` | `panel_id`, `intersection_ratio: 0..1` |
+| `panel.open` / `panel.close` | `panel_id` |
 
-All browser emitted events use S11j:
+- `panel_id` ∈ `admission|vitals|labs|imaging|ai`; `state` ∈ the S2 panel states plus S11g `unavailable`.
+- `panel.mount` once per panel right after `browser.timepoint_enter`.
+- `panel.viewport` on every observer callback; thresholds `[0, threshold]` plus `1.0`, so events fire only on crossings (no per frame samples). The first callback after `observe()` gives the initial ratio.
+- A hidden tabpanel reports ratio 0 through the observer; the preceding `panel.close` lets the derivation attribute the end to collapse.
+- An AI panel event on a no AI render is accepted and stored: it is S11l leakage evidence.
 
-- tab ID
-- client sequence
-- client monotonic milliseconds
-- client wall timestamp where available
-- session/patient/timepoint association validated by the server
-- visit kind
+## Qualifying predicate (derivation)
 
-### Viewport events
-
-Payload includes:
-
-- `panel_id`
-- `t_index`
-- `intersection_ratio`
-- configured threshold
-- `visit_kind`
-
-`viewport_enter` means the configured threshold transitioned false -> true.
-
-`viewport_exit` means true -> false.
-
-Do not emit high frequency ratio samples for every scroll frame. Transition events are sufficient, with current ratio retained for audit.
-
-### Open/close events
-
-Payload includes:
-
-- `panel_id`
-- `t_index`
-- `visit_kind`
-
-The event itself plus the event columns provide timestamps/identity.
-
-Do not treat initial always expanded rendering as a user open.
-
-### Exposure start/end events
-
-The browser telemetry controller maintains the combined qualifying state and emits a transition when it changes.
-
-Start payload includes:
-
-- `panel_id`
-- `t_index`
-- `visit_kind`
-- optional ratio at start
-
-End payload includes:
-
-- `panel_id`
-- `t_index`
-- `visit_kind`
-- `end_reason`
-- optional ratio at end
-
-Supported end reasons include:
-
-- `scroll_out`
-- `tab_hidden`
-- `focus_lost`
-- `panel_collapsed`
-- `timepoint_exit`
-- `case_interruption`
-- `pagehide`
-
-The raw underlying S11j browser state and panel viewport/open transitions remain available, so exposure episodes can be independently audited.
-
-## Episode state machine
-
-Each panel starts non qualifying until the initial conditions are known.
-
-When the combined qualifying predicate changes false -> true:
-
-- emit `panel.exposure_start`
-- remember the monotonic start locally
-
-When it changes true -> false:
-
-- emit `panel.exposure_end` with the appropriate reason
-
-Never emit overlapping episodes for the same panel/tab/timepoint.
-
-Scrolling out then back in produces two episodes.
-
-Hiding and returning produces two episodes.
-
-Blurring and refocusing produces two episodes.
-
-Collapsing and reopening produces two episodes.
-
-Advancing to a new timepoint ends every open episode before the old view is discarded.
-
-## HTMX and full navigation lifecycle
-
-The current app swaps `#patient-view` with HTMX on forward navigation.
-
-Panel telemetry must attach/detach correctly for both:
-
-- full document load
-- HTMX replacement
-
-On detach of an active timepoint:
-
-1. end every open panel exposure episode at the current monotonic time
-2. use end reason `timepoint_exit` or the more specific available reason
-3. disconnect old `IntersectionObserver` instances
-4. attach fresh state to the newly rendered timepoint
-
-Counters are not carried across timepoints in JavaScript.
-
-Raw events from the previous timepoint remain in SQLite and summaries add only events matching that timepoint.
-
-## Pure summary derivation
-
-Create a pure derivation module, for example:
-
-`panel_exposure.py`
-
-Input:
-
-raw events grouped by:
-
-`clinician × patient × timepoint × panel × tab × visit_kind`
-
-Output at minimum:
-
-- `qualifying_seconds`
-- `viewed`
-- `episode_count`
-- `time_to_first_view_seconds`
-- `first_view_client_ts`
-- `last_view_client_ts`
-- server receipt timestamps for audit where useful
-- `panel_open_count`
-- completeness/integrity flag if event pairing is broken
-
-### Duration
-
-Pair exposure start/end transitions using client monotonic timestamps.
+For a panel within one render, at every point of the render interval:
 
 ```
-qualifying_seconds = sum(end_mono - start_mono) / 1000
+qualifying = mounted
+         AND expanded
+         AND last_ratio >= panel_viewport_threshold
+         AND visible AND focused          (S11j state)
+         AND inside [enter, exit]
 ```
 
-Do not use `server_ts` deltas for duration.
+The ratio is unknown (non qualifying) until the first `panel.viewport` of that panel. Floating ratios are compared as received; `0.049 < 0.05`.
 
-If an episode has no trustworthy end, do not extend it to a later server receipt time.
+## Episodes and end reasons
 
-### Viewed classification
+An episode starts when `qualifying` turns true and ends when it turns false. The end reason is the condition that turned false:
 
-```
-viewed = qualifying_seconds >= configured panel_viewed_threshold_seconds
-```
+| cause | reason |
+|---|---|
+| ratio below threshold | `scroll_out` |
+| visible false | `tab_hidden` |
+| focused false | `focus_lost` |
+| `panel.close` | `panel_collapsed` |
+| exit `swap` | `timepoint_exit` |
+| exit `pagehide` | `pagehide` |
+| stream ends without exit | `truncated` (render `incomplete`) |
 
-For the first use case:
+A state change that hides and blurs at once ends with `tab_hidden`. Zero length episodes are dropped. By construction one panel never has overlapping episodes within a render.
 
-```
-viewed = qualifying_seconds >= 2.0
-```
+## Summary derivation (`panel_exposure.py`, pure)
 
-Keep continuous duration even after viewed becomes true.
+Per render and panel: `qualifying_ms`, `episodes` (start/end mono, start/end `client_ts`, end reason), `open_count` (user `panel.open` events), `time_to_first_view_seconds` (first episode start − render enter), render status (S11j).
 
-### Episode count
+Per observation (clinician × patient × timepoint × panel × visit_kind), aggregating renders like S11j:
 
-Count valid exposure start/end episodes. A zero length malformed pair does not count as positive exposure.
+- `qualifying_seconds` (sum over same tab renders; measured lower bound)
+- `viewed`: `True` if `qualifying_ms >= threshold × 1000`; else `False` when status is `complete`, `None` otherwise
+- `episode_count`, `panel_open_count`
+- `time_to_first_view_seconds`: from the first primary render only; `None` if the first view happened in a later render
+- `first_view_client_ts`, `last_view_client_ts` (first episode start, last episode end); `None` when the browser timestamp is missing
+- `status`: `complete|incomplete|missing|multi_tab|invalid` (S11j aggregate); `mounted=False` when no render mounted the panel
 
-### Time to first view
+Durations are computed in milliseconds from `client_mono_ms`, never from `server_ts`.
 
-Use client monotonic time:
+## Revisits, multiple tabs, failures
 
-```
-first_exposure_start_mono - browser.timepoint_enter_mono
-```
-
-Do not use network receipt latency.
-
-### First/last view timestamps
-
-Where valid client wall timestamps exist, retain them as the clinician browser timestamp and retain server timestamps separately for audit.
-
-If client wall timestamp is missing/unusable, timestamp summary may be null while monotonic duration remains valid.
-
-### Open count
-
-Count explicit user `panel.open` events.
-
-Do not infer opens from viewport visibility.
-
-## AI panel behaviour
-
-S11g guarantees that no AI panel exists in no AI cases.
-
-Therefore:
-
-- AI assigned observation may produce normal AI panel events
-- no AI observation should produce no AI panel events at all
-
-Any AI panel/exposure event associated with a no AI observation is evidence of intervention leakage for S11l.
-
-S11k records the raw fact and does not mutate the arm.
-
-## Revisit exposure
-
-Events carry `visit_kind` from S11i.
-
-Primary summaries use `visit_kind=primary`.
-
-Revisit summaries may be retained separately for exploratory analysis.
-
-Do not add revisit panel duration to the original primary panel duration.
-
-## Multiple tabs
-
-Derive per tab panel exposure first.
-
-Do not sum simultaneous tab exposure into one authoritative duration before S11m resolves the conflict.
-
-If multiple tabs contribute to one observation, retain:
-
-- per tab raw events
-- per tab summaries
-- a multi tab/conflict marker
-
-## Telemetry write failures
-
-If panel telemetry cannot be sent:
-
-- clinical interaction continues
-- no fake zero exposure is produced
-- summary integrity/completeness indicates missing telemetry
-
-Do not infer "not viewed" merely because no events arrived if the telemetry stream itself failed.
-
-S11l must distinguish true measured non viewing from indeterminate telemetry where possible.
+Revisit renders form their own summaries and never extend primary ones. More than one tab → `multi_tab`, per tab summaries kept, nothing summed. Failed posts never become zero exposure: the S11j status carries into the summary.
 
 ## Files expected to change
 
-- panel templates to expose stable panel/content IDs
-- collapse controls where applicable
-- `src/ehr_simulator/db/events.py`
-- new `src/ehr_simulator/panel_exposure.py`
-- `src/ehr_simulator/web/static/telemetry.js` or a dedicated panel telemetry module
-- `src/ehr_simulator/web/templates/base.html`
-- `src/ehr_simulator/web/templates/_patient_view.html`
-- panel/chrome templates
-- browser/e2e tests
-- derivation unit tests
-- documentation
-
-No new database table is required if the S11j `events` extension is sufficient.
+- `_panel_*.html` (content wrapper), `_patient_view.html` (threshold attribute)
+- `static/keyboard.js` (`ehrsim:tabchange`), `static/telemetry.js` (panel observers)
+- `db/events.py` (kinds), `web/telemetry.py` (payload models)
+- new `panel_exposure.py`
+- tests, `CLAUDE.md`
 
 ## Required tests
 
-### DOM instrumentation
+### DOM
 
-1. Every major panel has a stable panel ID.
-2. Observer targets expanded content rather than the header.
-3. No AI panel instrumentation exists in no AI HTML.
-4. AI panel instrumentation exists in AI assigned HTML.
+1. Every panel section has a stable `data-panel` id and one `[data-panel-content]` excluding the header.
+2. No AI render has no AI section; AI render has one.
+3. Telemetry disabled → no threshold attribute.
 
-### Viewport threshold
+### Endpoint
 
-5. 0.049 intersection does not qualify at 0.05 threshold.
-6. 0.050 qualifies.
-7. Threshold crossing upward emits viewport enter.
-8. Threshold crossing downward emits viewport exit.
-9. Floating ratios are not rounded into qualification.
+4. Panel payloads validated (unknown panel id, ratio outside `0..1`, extra field → 422).
+5. AI panel event on a no AI render is stored.
 
-### Exposure episodes
+### Derivation
 
-10. Visible + focused + expanded + threshold met starts an episode.
-11. Scroll out ends the episode with `scroll_out`.
-12. Scroll back starts a new episode.
-13. Tab hide ends the episode with `tab_hidden`.
-14. Returning visible may start a new episode when other conditions remain true.
-15. Focus loss ends with `focus_lost`.
-16. Refocus may start a new episode.
-17. Collapse ends with `panel_collapsed`.
-18. Reopen may start a new episode.
-19. Timepoint advance ends all open episodes.
-20. Pagehide ends an episode when the event is deliverable.
-21. Same panel never has overlapping episodes in one tab/timepoint.
+6. Ratio 0.049 does not qualify at 0.05; 0.050 does; ratios are not rounded.
+7. Visible + focused + expanded + threshold starts an episode.
+8. Scroll out ends with `scroll_out`; scroll back starts a new episode.
+9. Hide → `tab_hidden`; return starts a new episode.
+10. Blur → `focus_lost`; refocus starts a new episode.
+11. Close → `panel_collapsed`; reopen starts a new episode.
+12. Exit swap → `timepoint_exit`; pagehide → `pagehide`; no exit → `truncated` and incomplete.
+13. Two 1 s episodes sum to 2 s → viewed.
+14. 1.99 s not viewed; 2.00 s viewed; 2.01 s viewed with duration kept.
+15. Next timepoint starts from zero.
+16. Open without viewport qualification → zero exposure.
+17. Passive reading keeps accumulating after active time stopped.
+18. Hidden or unfocused periods contribute nothing.
+19. Server receipt times never change durations.
+20. Episode count, open count, time to first view, first/last client timestamps.
+21. Dense (non collapsible) panels have open count 0.
+22. Revisit exposure separate; multi tab not summed.
+23. Incomplete stream above threshold → viewed `True`; below → `None`.
 
-### Cumulative derivation
+### Browser (Playwright)
 
-22. Two one second episodes sum to two seconds.
-23. 1.99 seconds is not viewed at a two second threshold.
-24. 2.00 seconds is viewed.
-25. 2.01 seconds remains viewed and continuous duration is retained.
-26. Timepoint change resets the cumulative grouping.
-27. Same panel at next timepoint starts from zero.
-28. Panel open alone produces zero qualifying exposure.
-29. Passive reading continues accumulating exposure even after active time becomes inactive.
-30. Hidden/unfocused periods contribute zero panel duration.
-31. Network latency does not affect exposure duration.
-32. Unpaired/missing end does not invent duration.
-
-### Summary measures
-
-33. Episode count matches valid exposure episodes.
-34. Time to first view is measured from client monotonic timepoint enter.
-35. First/last client timestamps remain separate from server receipt timestamps.
-36. Explicit open events produce the correct open count.
-37. Always expanded static panel does not receive a fabricated user open count.
-
-### Revisits and multiple tabs
-
-38. Revisit panel events are labelled revisit.
-39. Revisit duration does not extend primary duration.
-40. Multiple tab summaries remain separate and are not blindly summed.
+24. Epic: switching to Labs posts `panel.close admission` + `panel.open labs`; scrolling a dense panel out posts a viewport event with ratio below threshold.
+25. Workflow continues when telemetry posts fail.
 
 ### Regression
 
-41. Clinical workflow continues when panel telemetry POST fails.
-42. Raw telemetry contains no answer/free text/clinical values.
-43. All S11a through S11j tests remain green.
-44. Full CI including Playwright coverage remains green.
+26. All earlier tests green.
 
 ## Explicit non goals
 
-S11k does not implement:
-
-- gaze tracking or eye tracking
-- total attention estimation by summing panel durations
-- AI PP classification
-- intervention failure/leakage classification beyond recording raw facts
-- final multi tab conflict resolution
-- final Phase 2 exports
+Eye tracking, attention estimation by summing panels, occlusion detection (a panel covered by the questions drawer still counts as intersecting — the observer does not see overlays), PP classification (S11l), multi tab conflict resolution (S11m), exports (S11n).
 
 ## Acceptance
 
-S11k is complete when every major panel produces reconstructable viewport/open/exposure transitions, qualifying duration is based on monotonic browser time and the configured visibility/focus/expanded predicate, separate episodes accumulate correctly within a timepoint, passive reading counts, the first use case 5 percent and two second thresholds derive correctly, no AI cases generate no normal AI panel telemetry, and the complete test suite passes.
+S11k is complete when every panel emits reconstructable mount, viewport and open/close primitives, the pure derivation yields episodes, end reasons and summaries on per render monotonic time under the pinned thresholds, passive reading counts, no AI renders produce no AI panel events, and the full suite passes.
