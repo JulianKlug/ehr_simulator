@@ -121,6 +121,14 @@
     // re-applying it after each swap.
     const TAB_STORAGE_KEY = "ehrsim:active-tab";
 
+    // S11k: every tab change is announced as ehrsim:tabchange
+    // ({from, to, source}); telemetry.js turns only "user" changes into
+    // panel.close/panel.open. Restoring the remembered tab is state, not a
+    // user action.
+    const TABCHANGE_EVENT = "ehrsim:tabchange";
+    const SOURCE_USER = "user";
+    const SOURCE_RESTORE = "restore";
+
     function getChromeKey() {
         const view = document.getElementById("patient-view");
         const chrome = view && view.dataset.chrome ? view.dataset.chrome : "default";
@@ -143,9 +151,11 @@
         }
     }
 
-    function activateTab(tab) {
+    function activateTab(tab, source) {
         const tabs = tab.parentElement.querySelectorAll('[role="tab"]');
         const targetId = tab.getAttribute("aria-controls");
+        const previous = tab.parentElement.querySelector('[role="tab"][aria-selected="true"]');
+        const from = previous ? previous.dataset.tab : null;
         tabs.forEach(function (t) {
             const isActive = t === tab;
             t.setAttribute("aria-selected", isActive ? "true" : "false");
@@ -162,6 +172,13 @@
         if (tabName) {
             rememberActiveTab(tabName);
         }
+        if (from !== tabName) {
+            document.dispatchEvent(
+                new CustomEvent(TABCHANGE_EVENT, {
+                    detail: { from: from, to: tabName, source: source },
+                })
+            );
+        }
     }
 
     function restoreActiveTab() {
@@ -170,14 +187,14 @@
         const tab = document.querySelector(
             '[role="tab"][data-tab="' + remembered + '"]'
         );
-        if (tab) activateTab(tab);
+        if (tab) activateTab(tab, SOURCE_RESTORE);
     }
 
     function onClick(e) {
         const tab = e.target.closest('[role="tab"]');
         if (tab) {
             e.preventDefault();
-            activateTab(tab);
+            activateTab(tab, SOURCE_USER);
         }
     }
 

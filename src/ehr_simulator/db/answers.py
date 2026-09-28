@@ -224,6 +224,41 @@ def fetch_all(conn: sqlite3.Connection) -> tuple[AnswerRow, ...]:
     )
 
 
+#: S11l: the ``AnswerRow`` columns, in field order.
+_ROW_COLUMNS = (
+    "clinician_id, patient_id, timepoint, question_id, value, arm, config_hash, "
+    "config_version, answer_source, derived_from_question_id, observation_mode"
+)
+
+
+def _answer_row(row: tuple) -> AnswerRow:
+    return AnswerRow(
+        clinician_id=row[0],
+        patient_id=row[1],
+        timepoint=float(row[2]),
+        question_id=row[3],
+        value=row[4],
+        arm=row[5],
+        config_hash=row[6],
+        config_version=row[7],
+        answer_source=row[8],
+        derived_from_question_id=row[9],
+        observation_mode=row[10],
+    )
+
+
+def fetch_for_pair(
+    conn: sqlite3.Connection, clinician_id: str, patient_id: str
+) -> tuple[AnswerRow, ...]:
+    """S11l: every ``answers`` row of one clinician × patient."""
+    rows = conn.execute(
+        f"SELECT {_ROW_COLUMNS} FROM answers WHERE clinician_id = ? AND patient_id = ? "
+        "ORDER BY timepoint, question_id",
+        (clinician_id, patient_id),
+    ).fetchall()
+    return tuple(_answer_row(row) for row in rows)
+
+
 def fetch_for_cell(
     conn: sqlite3.Connection,
     *,

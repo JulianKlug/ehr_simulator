@@ -31,10 +31,15 @@ S11i: optional ``study_behaviour`` (:class:`StudyBehaviourConfig`) — backward
 navigation, feedback, practice cases and free text, pinned per case like
 every other block. Omitted from serialization when absent (legacy
 behaviour: read-only revisits, no practice, free text allowed).
+
+S11j: optional ``telemetry`` (:class:`TelemetryConfig`) — inactivity and
+panel viewing thresholds. A case records browser telemetry only when its
+pinned snapshot has the block. Omitted from serialization when absent.
 """
 
 from __future__ import annotations
 
+import math
 import re
 from enum import StrEnum
 from pathlib import Path
@@ -72,6 +77,7 @@ __all__ = [
     "StudyBehaviourConfig",
     "RandomisationConfig",
     "StudyConfig",
+    "TelemetryConfig",
 ]
 
 #: S11: a stable, filesystem-safe study identifier. Lowercase alphanumerics,
@@ -306,6 +312,45 @@ class ClinicianFacingConfig(BaseModel):
         return v
 
 
+class TelemetryConfig(BaseModel):
+    """S11j/S11k behavioural telemetry thresholds.
+
+    ``inactivity_threshold_seconds``: active time ends this long after the
+    last qualifying activity. ``panel_viewport_threshold``: fraction of a
+    panel's expanded content that must intersect the viewport.
+    ``panel_viewed_threshold_seconds``: cumulative qualifying exposure per
+    timepoint that makes a panel "viewed". All finite and positive.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    inactivity_threshold_seconds: float
+    panel_viewport_threshold: float
+    panel_viewed_threshold_seconds: float
+
+    @field_validator("*", mode="before")
+    @classmethod
+    def _numeric_not_bool(cls, v: Any) -> Any:
+        # YAML ``true`` would otherwise coerce to 1.0.
+        if isinstance(v, bool):
+            raise ValueError("must be a number, not a boolean")
+        return v
+
+    @field_validator("*")
+    @classmethod
+    def _finite_positive(cls, v: float) -> float:
+        if not math.isfinite(v) or v <= 0:
+            raise ValueError(f"must be finite and > 0; got {v}")
+        return v
+
+    @field_validator("panel_viewport_threshold")
+    @classmethod
+    def _fraction(cls, v: float) -> float:
+        if v > 1:
+            raise ValueError(f"panel_viewport_threshold must be <= 1; got {v}")
+        return v
+
+
 class BackwardNavigation(StrEnum):
     ALLOW_READONLY = "allow_readonly"
     PROHIBIT = "prohibit"
@@ -393,6 +438,7 @@ class StudyConfig(BaseModel):
     ai_intervention: AIInterventionConfig | None = None
     clinician_facing: ClinicianFacingConfig | None = None
     study_behaviour: StudyBehaviourConfig | None = None
+    telemetry: TelemetryConfig | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_randomisation(self, handler: SerializerFunctionWrapHandler) -> Any:
@@ -412,6 +458,8 @@ class StudyConfig(BaseModel):
             data.pop("clinician_facing", None)
         if self.study_behaviour is None:
             data.pop("study_behaviour", None)
+        if self.telemetry is None:
+            data.pop("telemetry", None)
         return data
 
     @model_validator(mode="before")

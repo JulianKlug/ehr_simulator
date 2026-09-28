@@ -19,12 +19,20 @@ path bypasses the FK check entirely.
 its kind to the ``Literal``; ``append`` raises :class:`ValueError` on
 anything else *before* touching the DB, so a typo fails the producer's
 first test instead of silently forking the taxonomy.
+
+S11j: browser telemetry rows carry ``tab_id``, ``render_id`` and
+``client_mono_ms`` and go through :func:`append_browser_batch`, which skips
+a re-delivered ``(render_id, tab_id, client_seq)``. Server events that name
+a rendered view (``timepoint.render``) pass ``render_id`` to :func:`append`.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
+from collections.abc import Sequence
+from dataclasses import dataclass
 from typing import Any, Literal, get_args
 
 from ehr_simulator.db.exceptions import DbError
@@ -69,8 +77,64 @@ EventKind = Literal[
     # a fixed training presentation, not a randomised assignment).
     "practice.started",
     "practice.completed",
+    # S11j: one per telemetry-pinned study render (payload: t_index,
+    # visit_kind, S11l ai delivery); names the view by ``render_id``.
+    "timepoint.render",
+    # S11j browser telemetry (render bound; durations on client_mono_ms).
+    "browser.timepoint_enter",
+    "browser.state",
+    "browser.activity",
+    "browser.timepoint_exit",
+    "browser.gap",
+    # S11k panel exposure primitives.
+    "panel.mount",
+    "panel.viewport",
+    "panel.open",
+    "panel.close",
 ]
 EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
+
+_INSERT_SQL = (
+    "INSERT INTO events "
+    "(session_id, clinician_id, patient_id, timepoint, kind, payload_json, "
+    " client_ts, client_seq, tab_id, render_id, client_mono_ms) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+# The only unique index on events is S11j's browser delivery key.
+_INSERT_SKIP_DUPLICATE_SQL = _INSERT_SQL + " ON CONFLICT DO NOTHING"
+
+
+@dataclass(frozen=True)
+class BrowserEvent:
+    """One validated browser telemetry row; context copied from its render."""
+
+    session_id: str | None
+    clinician_id: str
+    patient_id: str | None
+    timepoint: float | None
+    kind: EventKind
+    payload: dict[str, Any]
+    client_ts: str | None
+    client_seq: int
+    tab_id: str
+    render_id: str
+    client_mono_ms: float
+
+
+def _canonical(payload: dict[str, Any] | None) -> str:
+    return json.dumps(payload or {}, sort_keys=True, separators=(",", ":"))
+
+
+def _check_kind(kind: str) -> None:
+    if kind not in EVENT_KINDS:
+        raise ValueError(f"unknown event kind {kind!r}")
+
+
+def _check_mono(client_mono_ms: float | None) -> None:
+    if client_mono_ms is None:
+        return
+    if not math.isfinite(client_mono_ms) or client_mono_ms < 0:
+        raise ValueError(f"client_mono_ms must be finite and >= 0; got {client_mono_ms!r}")
 
 
 def append(
@@ -84,6 +148,7 @@ def append(
     payload: dict[str, Any] | None = None,
     client_ts: str | None = None,
     client_seq: int | None = None,
+    render_id: str | None = None,
     app_state: Any = None,
     commit: bool = True,
 ) -> int:
@@ -96,25 +161,23 @@ def append(
     ``conn.commit()`` (see ``web/gating.py``); a failed batch is discarded
     whole by ``conn.rollback()``.
     """
-    if kind not in EVENT_KINDS:
-        raise ValueError(f"unknown event kind {kind!r}")
+    _check_kind(kind)
 
-    payload_json = json.dumps(payload or {}, sort_keys=True, separators=(",", ":"))
     try:
         cursor = conn.execute(
-            "INSERT INTO events "
-            "(session_id, clinician_id, patient_id, timepoint, kind, "
-            " payload_json, client_ts, client_seq) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            _INSERT_SQL,
             (
                 session_id,
                 clinician_id,
                 patient_id,
                 timepoint,
                 kind,
-                payload_json,
+                _canonical(payload),
                 client_ts,
                 client_seq,
+                None,
+                render_id,
+                None,
             ),
         )
     except sqlite3.IntegrityError as exc:
@@ -126,3 +189,50 @@ def append(
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
     assert event_id is not None
     return event_id
+
+
+def append_browser_batch(
+    conn: sqlite3.Connection,
+    rows: Sequence[BrowserEvent],
+    *,
+    app_state: Any = None,
+) -> int:
+    """S11j: insert one browser batch in one transaction; return rows written.
+
+    Every row is validated before the first insert. A row whose
+    ``(render_id, tab_id, client_seq)`` is already stored is skipped (a
+    retried delivery), so a batch is idempotent. Any other failure rolls
+    the whole batch back.
+    """
+    for row in rows:
+        _check_kind(row.kind)
+        _check_mono(row.client_mono_ms)
+
+    written = 0
+    try:
+        for row in rows:
+            cursor = conn.execute(
+                _INSERT_SKIP_DUPLICATE_SQL,
+                (
+                    row.session_id,
+                    row.clinician_id,
+                    row.patient_id,
+                    row.timepoint,
+                    row.kind,
+                    _canonical(row.payload),
+                    row.client_ts,
+                    row.client_seq,
+                    row.tab_id,
+                    row.render_id,
+                    row.client_mono_ms,
+                ),
+            )
+            written += cursor.rowcount
+        conn.commit()
+    except sqlite3.Error as exc:
+        conn.rollback()
+        raise DbError(str(exc)) from exc
+
+    if written and app_state is not None:
+        app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
+    return written

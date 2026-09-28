@@ -3,5 +3,7 @@
          data-panel="{{ panel }}"
          data-state="error">
     <header>{{ panel|capitalize }}</header>
+    <div class="panel-content" data-panel-content>
     <p class="error">Render failed: {{ error }}</p>
+    </div>
 </section>

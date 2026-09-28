@@ -2,7 +2,8 @@
 -- "sessions_open_unique", 003 "progress", 004 "study_identity", 005
 -- "s11b_config_version_history", 006 "s11c_randomisation_schedules", 007
 -- "s11d_case_activation", 008 "s11e_case_lifecycle", 009
--- "s11f_case_replacements", 010 "s11h_answer_source", 011 "s11i_practice"); the
+-- "s11f_case_replacements", 010 "s11h_answer_source", 011 "s11i_practice", 012
+-- "s11j_browser_telemetry"); the
 -- filename predates 002. The
 -- drift-check test in tests/test_db.py reads sqlite_master.sql (the exact
 -- DDL text SQLite stored) sorted by name, joins with ";\n\n", and asserts
@@ -106,7 +107,7 @@ CREATE TABLE events (
     client_ts      TIMESTAMP,
     server_ts      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     client_seq     INTEGER
-);
+, tab_id TEXT, render_id TEXT, client_mono_ms REAL);
 
 CREATE TABLE ingestion_issues (
     boot_id      TEXT NOT NULL,
@@ -123,6 +124,8 @@ CREATE INDEX ix_arm_clinician_patient
     ON arm_assignments (clinician_id, patient_id);
 
 CREATE INDEX ix_events_patient_timepoint ON events (patient_id, timepoint);
+
+CREATE INDEX ix_events_render ON events (render_id, client_mono_ms);
 
 CREATE INDEX ix_events_session_id        ON events (session_id);
 
@@ -294,6 +297,9 @@ END;
 
 CREATE UNIQUE INDEX ux_arm_schedule_position
     ON arm_assignments (schedule_id, case_position) WHERE schedule_id IS NOT NULL;
+
+CREATE UNIQUE INDEX ux_events_browser_delivery
+    ON events (render_id, tab_id, client_seq) WHERE tab_id IS NOT NULL;
 
 CREATE UNIQUE INDEX ux_sessions_open
     ON sessions (clinician_id, patient_id) WHERE ended_at IS NULL;

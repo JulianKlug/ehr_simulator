@@ -4,440 +4,247 @@
 
 Create the browser telemetry foundation required to distinguish wall clock time, foreground time, and active time for each measured clinician, patient, and timepoint.
 
-Durations must be based on a browser monotonic clock so network latency and server clock skew do not inflate exposure measurements.
+Durations use a browser monotonic clock so network latency and server clock skew do not inflate measurements.
 
 S11a through S11i are assumed complete.
 
+## Review changes (2026-09-27)
+
+Revised against the code at `7cf9305`:
+
+1. **Monotonic clocks are per document.** `performance.now()` restarts on every full page load (Start case, resume, reload, the lock pane's resume link), so values from two documents are not comparable. Every rendered `#patient-view` now carries a server issued **`render_id`**; one render lives in exactly one document, so monotonic arithmetic is only ever done within one render.
+2. **The server owns the context.** A browser event names its `render_id` only. The server resolves session, patient, timepoint, `t_index` and `visit_kind` from its own `timepoint.render` row and refuses unknown or foreign renders. The browser never supplies patient, timepoint, visit kind, clinician or arm.
+3. **New server event `timepoint.render`** (one per successful study render whose pinned config has `telemetry`: GET and the 200 advance). S10 `timepoint.enter`/`exit` and S11i `timepoint.revisit` are untouched. The 412 stale view stays write free (S9b contract), so it carries no `render_id` and no telemetry.
+4. **Telemetry off unless pinned.** The block is optional; a case whose pinned snapshot lacks it renders no telemetry attributes and posts nothing. Preflight FAILs a Phase 2 study without `telemetry` (same precedent as `clinician_facing`); YAML loading does not.
+5. **Exact activity throttling.** Leading plus trailing edge throttling of activity samples keeps the eligibility union exact (see Qualifying activity), instead of an unspecified "sensible rate limit".
+6. **Only foreground activity counts**, and a periodic `browser.state` bounds tail loss after a crash to one period.
+7. **Loss is explicit.** The client reports dropped events (`browser.gap`); retries are idempotent on `(render_id, tab_id, client_seq)`.
+8. **Telemetry is not case contact.** The endpoint never touches `last_seen_at`, never runs the S11e lazy timeout, and accepts late events for completed or incomplete cases.
+9. **Exports unchanged.** S11j delivers the pure derivation and its DB reader; CSV columns are S11n's.
+11. **PR #7 review (2026-09-28):** a reported loss (`browser.gap`) or a lost enter is `gapped`, not `incomplete`: the lost event may be the hide/blur that ended foreground, so the measure is no lower bound and yields no seconds. Only tail truncation (no exit, nothing lost before the last event) stays a lower bound. The endpoint answers an unknown clinician with 401, not the login redirect (`fetch()` would follow it and read the login page as success), and `client_ts` must be an ISO timestamp with a UTC offset.
+10. **Dropped** client exit reasons the browser cannot know (`advance`, `finish`, `redirect`, `interruption`): exits are `swap` or `pagehide`.
+
 ## Core invariants
 
-1. Existing S10 `elapsed_seconds` remains wall clock time and is not redefined.
-2. `foreground_seconds` accumulates only while the study document is visible and its window is focused.
-3. `active_seconds` is foreground time limited by a configured inactivity threshold.
-4. Duration arithmetic uses a monotonic browser clock such as `performance.now()`.
-5. Server timestamps remain retained for ordering, audit, and receipt evidence, but not as the primary duration clock.
-6. Passive mouse movement does not count as qualifying activity.
-7. Reading may be foreground but inactive after the inactivity threshold.
-8. Every telemetry event is attributable to study, clinician, case/session, patient, timepoint, configuration version, and browser tab through existing joins plus the new tab identity.
-9. Telemetry is append only source data. Derived timing can be rebuilt from raw events.
-10. Missing browser telemetry is represented as missing/indeterminate, not as zero seconds.
-11. Simultaneous/multiple tab identity is observable; final conflict policy remains S11m.
-12. Primary and revisit telemetry remain distinguishable using the S11i `visit_kind` marker.
+1. S10 `elapsed_seconds` stays the server wall clock measure.
+2. `foreground_seconds` accumulates only while the document is visible **and** focused.
+3. `active_seconds` is foreground time inside the eligibility window (`inactivity_threshold_seconds`) of a qualifying activity that happened while foreground.
+4. Duration arithmetic uses `client_mono_ms` within one render; `server_ts` is audit only.
+5. Passive mouse movement is not activity.
+6. Every telemetry event is attributable through its `render_id` to study, clinician, session, patient, timepoint, configuration version and visit kind, plus `tab_id`.
+7. Telemetry is append only raw data; every derived value is rebuilt from it.
+8. Missing telemetry is `missing`/`incomplete`/`gapped`, never zero seconds; a `gapped` stream yields no seconds at all.
+9. Multiple tabs are observable; conflict policy is S11m's.
+10. Primary and revisit telemetry are separate derivation groups.
+11. Telemetry failure never blocks the clinical workflow.
 
 ## Telemetry configuration
 
-Add one optional `telemetry` block to `StudyConfig` in S11j and define all thresholds needed by S11j and S11k now, so S11k does not later change the canonical config shape merely by adding default fields.
+Optional `StudyConfig.telemetry`, omitted from canonical serialization when absent (pre S11j snapshots and hashes unchanged). All S11j/S11k thresholds are defined now so S11k does not reshape the config.
 
-Recommended shape:
-
-```
+```yaml
 telemetry:
   inactivity_threshold_seconds: 60
   panel_viewport_threshold: 0.05
   panel_viewed_threshold_seconds: 2.0
 ```
 
-Validation:
+Validation (all required, `extra="forbid"`):
 
-- inactivity threshold is finite and greater than zero
-- viewport threshold is finite and `0 < threshold <= 1`
-- viewed threshold is finite and greater than zero
+- `inactivity_threshold_seconds`: finite, `> 0`
+- `panel_viewport_threshold`: finite, `0 < x <= 1`
+- `panel_viewed_threshold_seconds`: finite, `> 0`
 
-For the first use case:
+First use case: 60 s, 0.05, 2.0 s (`configs/example_phase2_config.yaml`). The panel values are consumed from S11k.
 
-- inactivity threshold = 60 seconds
-- panel viewport threshold = 0.05
-- panel viewed threshold = 2.0 seconds
-
-The panel values are stored in S11j configuration but are consumed beginning in S11k.
-
-The entire telemetry block participates in `config_hash` when present.
-
-Historical configurations without the block remain parseable and retain their bytes.
+Telemetry for a render is enabled iff study mode and the **case pinned** snapshot has the block.
 
 ## Browser tab identifier
 
-Add a browser tab identifier generated client side.
+- `crypto.randomUUID()`; fallback: 16 bytes from `crypto.getRandomValues` formatted as UUID v4.
+- Stored in `sessionStorage` under `ehrsim:tab-id`; in memory when storage is blocked.
+- Reused across HTMX swaps and full loads within the tab.
+- Never derived from the clinician, patient, IP, user agent or fingerprinting.
+- A "duplicate tab" copies `sessionStorage`, so two tabs can share an id. That collision stays detectable: both tabs continue the shared `client_seq`, producing the same `(tab_id, client_seq)` under different `render_id`s.
 
-Requirements:
+The `client_seq.js` counter is shared (one per tab sequence across answers, advance and telemetry).
 
-- high entropy random identifier, preferably UUID v4 through `crypto.randomUUID()` with a safe fallback
-- persisted for the lifetime of the tab using `sessionStorage`
-- reused across full page and HTMX navigation within that tab
-- never derived from clinician name, patient data, IP address, user agent, or fingerprinting
-- not a cross browser/device identifier
+## Render identity
 
-Recommended storage key:
+`timepoint.render` (server event, `web/timing_events.record_render`):
 
-```
-ehrsim:tab-id
-```
+- written after a successful study render when the pinned config has `telemetry`, on the GET path and on the 200 advance path (which renders the next pane);
+- columns: `session_id`, `clinician_id`, `patient_id`, `timepoint` (minutes), `render_id`;
+- payload: `{"t_index": int, "visit_kind": "primary"|"revisit"}` (`primary` ⇔ the pane is the editable frontier, S11i);
+- `render_id` = `uuid4().hex`, rendered into `#patient-view` as `data-render-id` with `data-telemetry-url`.
 
-The existing `client_seq.js` counter remains per tab and should be shared by telemetry events rather than creating a second independent sequence counter.
-
-S11m will handle conflicting simultaneous views. S11j must at least make those views detectable through distinct or detectably colliding tab identities.
+The row is committed before the response body leaves the handler, so any event the page can post already has its render.
 
 ## Event storage migration
 
-Add the next schema migration, expected migration 12 after S11i.
-
-Extend the existing `events` table with:
+Migration 12 (`s11j_browser_telemetry`) adds nullable columns to `events` via `add_columns`:
 
 ```
 tab_id          TEXT
-client_mono_ms   REAL
+render_id       TEXT
+client_mono_ms  REAL
 ```
 
-Keep existing:
-
-- `client_ts`
-- `server_ts`
-- `client_seq`
-
-Add indexes useful for derivation, for example:
+and indexes:
 
 ```
-(session_id, tab_id, client_seq)
-(session_id, patient_id, timepoint, kind)
+ix_events_render            (render_id, client_mono_ms)
+ux_events_browser_delivery  UNIQUE (render_id, tab_id, client_seq) WHERE tab_id IS NOT NULL
 ```
 
-Do not make historical events invalid because the new columns are NULL.
-
-Update `events.append()` so server emitted legacy events can omit the fields and browser telemetry can supply them.
-
-Validate `client_mono_ms` as finite and non negative before insert.
+Historical rows keep NULLs. `events.append()` gains optional `tab_id`, `render_id`, `client_mono_ms`; `client_mono_ms` must be finite and `>= 0` (`ValueError` before touching the DB).
 
 ## Telemetry endpoint
 
-Add an authenticated study route such as:
+`POST /telemetry/events`, JSON body:
 
-`POST /telemetry/events`
+```json
+{"tab_id": "<uuid>", "events": [
+  {"kind": "browser.state", "render_id": "<hex>", "client_seq": 12,
+   "client_mono_ms": 1532.4, "client_ts": "2026-09-27T10:00:00.000Z",   // ISO, with UTC offset
+   "payload": {"visible": true, "focused": false, "reason": "blur"}}
+]}
+```
 
-The endpoint accepts a small ordered batch of validated browser events.
+Server:
 
-Each event includes:
+- clinician from the cookie; unknown → **401** (never the login redirect: `fetch()` follows it and would read the login page as success; the client also treats `response.redirected` as a refusal).
+- body `<= 64 KiB`, `1..100` events, closed kinds and per kind payload models (`extra="forbid"`); any violation → **422**, nothing written.
+- each `render_id` must exist as a `timepoint.render` of **this** clinician; otherwise → **409**, nothing written.
+- each event inherits `session_id`, `patient_id`, `timepoint` from its render row.
+- one transaction per batch; a duplicate `(render_id, tab_id, client_seq)` is skipped (idempotent retry); **204** on success.
+- never touches lifecycle contact or `last_seen_at`; accepted whatever the case's lifecycle state.
 
-- event kind
-- tab ID
-- client sequence
-- client monotonic milliseconds
-- optional client wall timestamp for human audit/timestamp reconstruction
-- current patient/timepoint context already present in the rendered page
-- visit kind: primary or revisit
-
-The server derives/validates:
-
-- clinician ID from the signed/known clinician cookie
-- active session/case association from server state
-- case pinned configuration through the existing context
-- patient/timepoint legitimacy
-
-Do not accept clinician ID or arm as trusted browser supplied authority.
-
-Reject telemetry for an unactivated Phase 2 patient or a session/case that does not match the supplied context.
+sendBeacon on pagehide posts the same body (`Blob`, `application/json`; same origin, cookie sent).
 
 ## Browser event taxonomy
 
-Add closed event kinds sufficient for reconstruction.
+Closed kinds (added to `EventKind`); payloads carry no values beyond these.
 
-Recommended minimum:
+| kind | payload |
+|---|---|
+| `browser.timepoint_enter` | `visible: bool`, `focused: bool` |
+| `browser.state` | `visible`, `focused`, `reason: visibilitychange\|focus\|blur\|periodic` |
+| `browser.activity` | `activity_kind: click\|touch\|scroll\|keyboard\|answer_change` |
+| `browser.timepoint_exit` | `reason: swap\|pagehide` |
+| `browser.gap` | `dropped: int >= 1` |
 
-- `browser.state`
-- `browser.activity`
-- `browser.timepoint_enter`
-- `browser.timepoint_exit`
+- `timepoint_enter` fires when telemetry attaches to a rendered `#patient-view` (DOMContentLoaded or its HTMX swap in). It is the full initial state snapshot and counts as the `timepoint_navigation` activity.
+- `state` fires on every change of `(visible, focused)` and every `PERIODIC_STATE_MS` (15 000) while foreground.
+- `timepoint_exit` fires before `#patient-view` is swapped out (`swap`) or on `pagehide`; the queue is flushed with `sendBeacon`/`keepalive`.
+- `pageshow` with `persisted=true` reloads the page: the old render already exited, a restored page needs a new render.
+- `gap` reports events the client discarded (queue overflow past `MAX_QUEUE`, or a send refused with 4xx).
 
-### `browser.state`
-
-Payload:
-
-```
-{
-  "visible": true|false,
-  "focused": true|false,
-  "reason": "initial|visibilitychange|focus|blur|pageshow|pagehide",
-  "t_index": <int>,
-  "visit_kind": "primary|revisit"
-}
-```
-
-Do not rely only on delta events. Emit an initial full state snapshot when telemetry attaches to a rendered timepoint.
-
-### `browser.activity`
-
-Payload:
-
-```
-{
-  "activity_kind": "click|touch|scroll|keyboard|answer_change|panel_toggle|timepoint_navigation",
-  "t_index": <int>,
-  "visit_kind": "primary|revisit"
-}
-```
-
-Do not include key values, typed text, answer values, element text, clinical values, or coordinates unless separately justified later.
-
-### `browser.timepoint_enter` / `browser.timepoint_exit`
-
-These are client monotonic boundaries for duration derivation. They do not replace the S10 server `timepoint.enter`/`timepoint.exit` events.
-
-They identify the monotonic interval in which the browser actually held that rendered timepoint.
-
-Exit reason may include:
-
-- advance
-- finish
-- htmx_swap
-- pagehide
-- redirect
-- interruption
-
-Best effort pagehide delivery may use `navigator.sendBeacon()` or `fetch(..., {keepalive:true})`.
-
-Loss of the final event must not fabricate a duration beyond the last trustworthy monotonic transition.
+Never recorded: key values, text, answer values, element text, coordinates, pointer trails.
 
 ## Qualifying activity
 
-The following reset the inactivity deadline:
+Click, touch (`pointerdown` of type touch/pen), scroll (`scroll` / `wheel`), keyboard (`keydown`), answer modification (`change`/`input` inside `#questions-pane`). Panel toggles are clicks. `mousemove` is not listened to.
 
-- click
-- touch interaction
-- scroll
-- keyboard input
-- answer modification
-- panel open/close
-- timepoint navigation
+Throttling: per render, the first activity in a `ACTIVITY_THROTTLE_MS` (1000) window is sent immediately (leading edge) and the last suppressed one at the window's end, stamped with its **own** monotonic time (trailing edge). Because the window is shorter than the inactivity threshold, the union of `[a, a + threshold]` over the sent samples equals the union over all activities.
 
-Passive mouse movement does not.
+## Derivation (`behavioral_timing.py`, pure)
 
-Do not record every keystroke as an event if that would create unnecessary volume. It is sufficient to record a generic qualifying activity transition/heartbeat with no key contents and sensible rate limiting.
+Input: the raw events of one render (`timepoint.render` + its browser events), one threshold.
 
-Likewise scroll activity may be throttled/debounced while still accurately marking activity resumption.
+Sort by `(client_mono_ms, client_seq)`.
 
-## Foreground derivation
+- **Interval**: `[enter, end]`, `end` = `timepoint_exit` or, when missing, the last event of the render (status `incomplete`).
+- **Foreground**: intervals where the latest state has `visible and focused`, clipped to the interval.
+- **Active**: foreground ∩ ⋃ `[a, a + threshold]` over activities `a` (enter included) that happened while foreground ∩ interval. Inactive gaps are never filled retroactively.
+- **Status** per render: `complete` (enter + exit, no gap), `incomplete` (no exit: closed at the last event, a lower bound), `gapped` (`browser.gap` or no enter: an internal loss may have removed a stop transition, so no lower bound and no seconds), `missing` (render without any browser event), `invalid` (non monotonic, e.g. `client_mono_ms` decreasing along `client_seq` — flagged, not raised).
 
-Create a pure derivation module, for example:
+Observation (clinician × patient × timepoint × visit_kind) aggregate:
 
-`behavioral_timing.py`
+- renders of one tab are sequential: seconds sum, status = worst render status;
+- more than one `tab_id`, or a duplicated `(tab_id, client_seq)` across renders → `multi_tab`, per tab values kept, no authoritative total;
+- a `gapped`, `invalid` or `missing` render measures nothing, and a tab holding a `gapped` or `invalid` render has per tab value `None` (diagnostics never show a partial sum);
+- durations are reported as measured lower bounds alongside the status, only for `complete` and `incomplete`; a missing render among reported ones makes the observation at least `incomplete`.
 
-Input is raw events for one:
+Primary values come from `visit_kind=primary` renders only; revisits never extend them.
 
-`clinician × patient × timepoint × tab × visit_kind`
-
-Sort primarily by client monotonic time and use client sequence to break ties within the same tab.
-
-Server timestamp remains an audit field, not the duration axis.
-
-### State model
-
-Foreground is true only when:
-
-```
-visible == true AND focused == true
-```
-
-The initial `browser.state` event establishes the starting state.
-
-A foreground interval ends when:
-
-- document becomes hidden
-- window blurs
-- timepoint exits
-- telemetry terminates/interruption closes the trustworthy interval
-
-`foreground_seconds` is the sum of these monotonic intervals.
-
-## Active time derivation
-
-At client timepoint entry, treat `timepoint_navigation` as qualifying activity.
-
-Each qualifying activity at monotonic time `a` creates active eligibility through:
-
-```
-a + inactivity_threshold
-```
-
-Active time is the intersection of:
-
-- foreground intervals
-- the union of activity eligibility intervals
-- the timepoint monotonic interval
-
-Equivalent interpretation:
-
-- active starts immediately on qualifying activity while foreground
-- it continues until the threshold expires with no further qualifying activity
-- a later qualifying activity resumes active time from that later activity forward
-- inactive gaps are not retroactively filled
-
-This definition avoids sampling based approximations.
-
-## Existing elapsed time
-
-Keep S10 derivation unchanged:
-
-`elapsed_seconds = server wall clock exit - server wall clock enter`
-
-S11j adds:
-
-- `foreground_seconds`
-- `active_seconds`
-
-Do not rename `elapsed_seconds` to "active" or replace it in the existing export/divergence path.
-
-## Multiple tabs
-
-Derive per tab metrics first.
-
-If one observation has events from more than one tab, retain all raw events and mark the observation as multi tab for S11m.
-
-Do not simply sum per tab foreground/active durations because simultaneous tabs would double count.
-
-Until S11m defines the final conflict rule:
-
-- single tab observation -> authoritative derived duration
-- multi tab observation -> per tab durations available, aggregate marked indeterminate/conflicted rather than silently summed
-
-## Revisit handling
-
-Primary and revisit intervals are separate derivation groups.
-
-The original measured timepoint's foreground/active values are based on `visit_kind=primary`.
-
-A later revisit may have its own exploratory telemetry, but must not overwrite or extend the original primary duration.
-
-## Event volume and batching
-
-Use batching for rapid activity/state events where safe.
-
-Constraints:
-
-- preserve client sequence for deterministic reconstruction
-- flush on pagehide/timepoint exit where possible
-- cap maximum batch size and payload size server side
-- reject unknown event kinds/fields
-- do not store raw pointer trails or raw keyboard content
+`db/telemetry.py` holds the read only loaders (`fetch_renders`, `load_render_rows`, `load_telemetry_rows`); no module under `web/` is imported by the derivation.
 
 ## Privacy
 
-New behavioural payloads contain only pseudonymous identifiers through existing columns/joins.
-
-Do not include `name_normalized`.
-
-Do not include:
-
-- answer values
-- free text
-- raw clinical values
-- browser fingerprint attributes
-
-S11m performs the broader privacy clean up, but S11j events must already comply.
+No `name_normalized`, answer values, free text, clinical values or fingerprint attributes in any new payload.
 
 ## Failure semantics
 
-Telemetry failure must not block the clinician from completing a case unless the study explicitly chooses such a policy in a future session.
-
-On client/server telemetry write failure:
-
-- continue the clinical workflow
-- log/record the telemetry failure where possible
-- derived foreground/active values become incomplete/indeterminate
-- never substitute elapsed time as foreground/active
+A failed POST keeps events queued (bounded), retries on the next flush, and reports drops as `browser.gap`. The workflow never waits on telemetry. Derivation never substitutes elapsed time.
 
 ## Files expected to change
 
-- `src/ehr_simulator/config/study.py`
-- `src/ehr_simulator/db/migrations.py`
-- `src/ehr_simulator/db/events.py`
-- new pure behavioural timing derivation module
-- `src/ehr_simulator/web/routes.py`
-- `_patient_view.html` telemetry context attributes
-- `base.html` script includes
-- new `static/telemetry.js`
-- `static/client_seq.js` integration
-- `static/answers.js`, `advance.js`, `pane.js` hooks for qualifying activity where needed
-- test fixtures, schema snapshot, documentation
+- `config/study.py` (`TelemetryConfig`), `cli_support.py` (preflight FAIL)
+- `db/migrations.py` (migration 12), `db/events.py`, new `db/telemetry.py`
+- new `behavioral_timing.py`
+- `web/timing_events.py` (`record_render`), new `web/telemetry.py` (endpoint service), `web/routes.py`
+- `_patient_view.html`, `base.html`, new `static/telemetry.js`
+- `configs/example_phase2_config.yaml`, tests, `CLAUDE.md`
 
 ## Required tests
 
 ### Configuration
 
-1. First use case inactivity threshold 60 seconds loads.
-2. Zero/negative inactivity threshold is rejected.
-3. Viewport threshold outside `(0,1]` is rejected.
-4. Zero/negative viewed threshold is rejected.
-5. Telemetry block changes `config_hash`.
-6. Historical config without telemetry block round trips unchanged.
+1. First use case block loads; absent block keeps the snapshot bytes and hash.
+2. Zero/negative/non finite inactivity threshold refused.
+3. Viewport threshold `0`, `> 1`, NaN refused; `1.0` accepted.
+4. Zero/negative viewed threshold refused.
+5. Present block changes `config_hash`.
+6. Preflight FAILs Phase 2 without `telemetry`.
 
-### Tab identity
+### Render identity and endpoint
 
-7. New tab context gets a valid random tab ID.
-8. Same tab retains its ID across timepoint navigation.
-9. Same tab retains its ID across full reload.
-10. Telemetry payload cannot override clinician identity.
-11. Telemetry for an unactivated Phase 2 patient is refused.
+7. A telemetry pinned GET writes one `timepoint.render` with `render_id`, `t_index`, `visit_kind`; the page carries the same `data-render-id`.
+8. A pinned config without `telemetry` renders no attributes and writes no render row.
+9. The 200 advance writes a render row for the next pane; 409/412 write none.
+10. Revisit render has `visit_kind=revisit`.
+11. Events inherit session/patient/timepoint from the render; payload cannot override them (unknown fields → 422).
+12. Foreign clinician's `render_id` → 409, nothing written.
+13. Unknown kind, bad payload, oversized batch, non finite / negative `client_mono_ms` → 422, nothing written.
+14. Duplicate delivery is idempotent.
+15. Telemetry does not touch `last_seen_at` and is accepted for a completed case.
+16. Unactivated Phase 2 patient has no render and therefore no telemetry.
 
-### Browser state
+### Derivation
 
-12. Initial state snapshot records visibility and focus.
-13. `visibilitychange` emits the new full state.
-14. blur emits focused false.
-15. focus emits focused true.
-16. pagehide closes the trustworthy interval when delivered.
+17. Visible + focused accumulates foreground; hidden or unfocused does not.
+18. Hidden → visible yields two intervals that sum.
+19. Network delay (server_ts) never changes durations.
+20. Missing exit ends at the last event and marks `incomplete`.
+21. Enter starts eligibility; activity before the threshold extends it.
+22. After 60 s without activity, further foreground is inactive; a later click resumes from the click.
+23. Scroll, keyboard, answer change resume active time.
+24. Activity while hidden never creates active time, even after returning.
+25. Throttled samples yield the same active seconds as the full stream.
+26. Revisit renders never extend primary values.
+27. Two tab ids → `multi_tab`, not summed; duplicated `(tab_id, client_seq)` → `multi_tab`.
+28. Same tab reload: two renders sum.
+29. `browser.gap` or a lost enter → `gapped` without seconds; render without events → `missing`.
+29a. Unknown clinician → 401; `client_ts` without a UTC offset or unparseable → 422.
+30. Decreasing monotonic time → `invalid`.
 
-### Foreground duration
+### Browser (Playwright)
 
-17. Visible+focused interval accumulates foreground time.
-18. Hidden tab does not accumulate foreground time.
-19. Unfocused browser does not accumulate foreground time.
-20. Refocus resumes foreground accumulation.
-21. Hidden then visible creates two intervals whose durations sum correctly.
-22. Network delay between browser event and server insert does not affect duration.
-23. Invalid/non finite monotonic timestamp is rejected.
-24. Missing final exit does not invent time after the last trustworthy event.
-
-### Active duration
-
-25. Timepoint entry starts an activity eligibility interval.
-26. Activity before the threshold extends active time.
-27. After 60 seconds with no qualifying activity, further foreground time is inactive for the first use case.
-28. A later click resumes active time only from the click forward.
-29. Scroll resumes active time.
-30. Keyboard activity resumes active time without recording the key value.
-31. Answer modification resumes active time without recording the answer value.
-32. Panel toggle resumes active time.
-33. Mouse movement alone does not resume active time.
-34. Hidden time never becomes active even if an activity event is malformed/injected there.
-
-### Existing timing compatibility
-
-35. S10 `elapsed_seconds` remains unchanged.
-36. Foreground and active time do not overwrite S10 enter/exit events.
-37. Revisit telemetry is labelled separately and does not extend primary timing.
-
-### Multiple tabs
-
-38. Two tab IDs for the same observation remain separately derivable.
-39. Multi tab observation is marked conflicted/indeterminate rather than summed.
+31. Tab id valid and stable across swap and reload.
+32. Initial enter snapshot, blur/focus and visibility transitions are posted.
+33. Swap posts `timepoint_exit` for the old render before the new enter.
+34. The workflow advances while `/telemetry/events` fails.
+35. No payload contains answer values or `name_normalized`.
 
 ### Regression
 
-40. Clinical workflow continues if telemetry endpoint is unavailable.
-41. New telemetry events contain no `name_normalized` or raw answer values.
-42. All S11a through S11i tests remain green.
-43. Full CI including browser tests remains green.
+36. S10 `elapsed_seconds` and enter/exit events unchanged; all earlier tests green.
 
 ## Explicit non goals
 
-S11j does not implement:
-
-- panel viewport exposure
-- AI viewed classification
-- PP classification
-- final simultaneous tab conflict resolution
-- browser fingerprinting
-- statistical attention modelling
-- final Phase 2 export files
+Panel exposure (S11k), AI viewed / PP (S11l), multi tab conflict resolution (S11m), export columns (S11n), fingerprinting, attention modelling.
 
 ## Acceptance
 
-S11j is complete when browser events provide a reconstructable monotonic record of visibility, focus, qualifying activity, tab identity, and client timepoint boundaries; single tab observations yield correct foreground and active durations without network latency; elapsed time remains the existing S10 wall clock measure; revisits and multiple tabs remain identifiable; and the complete test suite passes.
+S11j is complete when every telemetry pinned render has a server issued identity, browser events reconstruct visibility, focus, activity and render boundaries on a per render monotonic clock, the derivation yields correct foreground and active seconds with explicit completeness status, elapsed time is unchanged, revisits and multiple tabs stay identifiable, and the full suite passes.

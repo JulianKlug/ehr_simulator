@@ -48,6 +48,11 @@ bounces any non-frontier GET like the forward gate; ``allow_readonly``
 renders it read-only, marked ``data-visit-kind="revisit"``, and records one
 ``timepoint.revisit``. ``POST /practice/start`` is the separate practice
 entry point; a practice pair is a case for every case route.
+
+S11j: a render whose case pins ``telemetry`` carries a ``render_id``,
+recorded as ``timepoint.render`` after the response is built;
+``POST /telemetry/events`` binds browser batches to those renders
+(``web/telemetry.py``).
 """
 
 from __future__ import annotations
@@ -55,6 +60,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+from enum import StrEnum
 from functools import partial
 from typing import Literal
 
@@ -108,6 +114,7 @@ from ehr_simulator.web.panels import (
     InterventionContext,
     InterventionMode,
     PatientSlice,
+    ai_delivery,
     measured_ai_state,
     patient_timepoints,
     select_measured_ai,
@@ -129,7 +136,19 @@ from ehr_simulator.web.study_session import (
     resolve_case_configuration,
     resolve_intervention,
 )
-from ehr_simulator.web.timing_events import record_enter, record_revisit
+from ehr_simulator.web.telemetry import (
+    TelemetryValidationError,
+    UnknownRenderError,
+    parse_batch,
+    record_batch,
+)
+from ehr_simulator.web.timing_events import (
+    VisitKind,
+    new_render_id,
+    record_enter,
+    record_render,
+    record_revisit,
+)
 
 router = APIRouter()
 
@@ -146,8 +165,30 @@ _PAUSE_DISABLED_MSG = "Pausing is not enabled for this study"
 _HX_REQUEST_HEADER = "hx-request"
 _HX_HISTORY_RESTORE_HEADER = "hx-history-restore-request"
 _INDEX_URL = "/"
+_TELEMETRY_URL = "/telemetry/events"
 
 Chrome = Literal["dense", "epic"]
+
+
+class RenderTracking(StrEnum):
+    """S11j: whether a rendered view may carry a telemetry ``render_id``."""
+
+    TRACKED = "tracked"
+    WRITE_FREE = "write_free"  # the S9b 412 stale view: nothing is written
+
+
+@dataclass(frozen=True)
+class RenderedView:
+    """A rendered ``#patient-view``. ``render_id`` is set only when the case's
+    pinned config enables telemetry (S11j); ``ai_delivery`` is the S11l
+    evidence recorded with it."""
+
+    html: str
+    t_index: int
+    t_minutes: float
+    visit_kind: VisitKind
+    render_id: str | None
+    ai_delivery: dict[str, str]
 
 
 def _is_htmx(request: Request) -> bool:
@@ -565,11 +606,14 @@ def _render_patient_view(
     ctx: SessionContext | None,
     case: CaseConfiguration | None = None,
     contact: ContactResult | None = None,
-) -> str:
+    render_tracking: RenderTracking = RenderTracking.TRACKED,
+) -> RenderedView:
     """Slice → panels → summary → chrome → pane → ``_patient_view.html``.
 
     Shared by the GET route and ``/advance``. ``ctx is None`` outside study
-    mode: no gate, no pane, S2 navigation.
+    mode: no gate, no pane, S2 navigation. S11j: a case pinned to a
+    ``telemetry`` block gets a ``render_id`` (the caller records it after the
+    response is built); ``RenderTracking.WRITE_FREE`` keeps a view without one.
     """
     state = request.app.state
     templates = state.templates
@@ -628,6 +672,10 @@ def _render_patient_view(
         backward=_backward_policy(case),
     )
     is_revisit = ctx is not None and pane_mode(ctx.frontier, t_index) != "open"
+    visit_kind = VisitKind.REVISIT if is_revisit else VisitKind.PRIMARY
+    telemetry = case.study.telemetry if case is not None and ctx is not None else None
+    tracked = telemetry is not None and render_tracking is RenderTracking.TRACKED
+    render_id = new_render_id() if tracked else None
     logged_in_name = _logged_in_name(request)
     template_name = "_chrome_dense.html" if chrome == "dense" else "_chrome_epic.html"
     chrome_html = templates.get_template(template_name).render(
@@ -638,7 +686,7 @@ def _render_patient_view(
         chrome=chrome,
         logged_in_name=logged_in_name,
     )
-    return templates.get_template("_patient_view.html").render(
+    html = templates.get_template("_patient_view.html").render(
         request=request,
         patient_slice=patient_slice,
         chrome=chrome,
@@ -647,8 +695,40 @@ def _render_patient_view(
         questions_html=questions_html,
         timepoint_count=timepoint_count,
         logged_in_name=logged_in_name,
-        visit_kind="revisit" if is_revisit else "primary",
+        visit_kind=visit_kind,
         observation_mode=case.observation_mode if case is not None else ObservationMode.MEASURED,
+        render_id=render_id,
+        telemetry_url=_TELEMETRY_URL,
+        viewport_threshold=telemetry.panel_viewport_threshold if telemetry else None,
+    )
+    return RenderedView(
+        html=html,
+        t_index=t_index,
+        t_minutes=t_minutes,
+        visit_kind=visit_kind,
+        render_id=render_id,
+        ai_delivery=ai_delivery(patient_slice, intervention),
+    )
+
+
+def _record_render(
+    request: Request, *, view: RenderedView, ctx: SessionContext, clinician_id: str, patient_id: str
+) -> None:
+    """S11j: record a telemetry view after its response is built."""
+    if view.render_id is None:
+        return
+
+    record_render(
+        request.app.state.db,
+        request.app.state,
+        ctx=ctx,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        t_index=view.t_index,
+        t_minutes=view.t_minutes,
+        render_id=view.render_id,
+        visit_kind=view.visit_kind,
+        ai_delivery=view.ai_delivery,
     )
 
 
@@ -898,6 +978,37 @@ async def case_heartbeat(request: Request, patient_id: str) -> Response:
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
+@router.post(_TELEMETRY_URL)
+async def telemetry_events(request: Request) -> Response:
+    """S11j/S11k: store one browser telemetry batch (204).
+
+    401 unknown clinician, 422 malformed, 409 unknown or foreign render;
+    nothing written on any. 401 instead of the login redirect: ``fetch()``
+    follows redirects and would read the login page as a successful upload.
+    Not case contact: no lifecycle check, no ``last_seen_at`` touch.
+    """
+    clinician_id = cookies.read_clinician_id(request)
+    if clinician_id is None or clinician_id not in request.app.state.known_clinicians:
+        return Response(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    try:
+        batch = parse_batch(await request.body())
+        record_batch(
+            request.app.state.db, request.app.state, clinician_id=clinician_id, batch=batch
+        )
+    except TelemetryValidationError as exc:
+        get_logger().warning(
+            "telemetry batch refused", event_kind="telemetry.refused", error=str(exc)
+        )
+        return Response(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
+    except UnknownRenderError as exc:
+        get_logger().warning(
+            "telemetry batch refused", event_kind="telemetry.unknown_render", error=str(exc)
+        )
+        return Response(status_code=status.HTTP_409_CONFLICT)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/case/{patient_id}/pause")
 async def case_pause(request: Request, patient_id: str, chrome: Chrome = "epic") -> Response:
     """Voluntary pause, when the case's pinned policy allows it."""
@@ -1028,7 +1139,7 @@ async def patient_timepoint(
             case=case,
         )
 
-    inner = _render_patient_view(
+    view = _render_patient_view(
         request,
         clinician_id=clinician_id or "",
         patient_id=patient_id,
@@ -1039,6 +1150,7 @@ async def patient_timepoint(
         case=case,
         contact=contact,
     )
+    inner = view.html
     # Build/render the complete response before recording timepoint.enter.
     if _is_history_restore(request) or not _is_htmx(request):
         response = _full_document(
@@ -1067,6 +1179,9 @@ async def patient_timepoint(
             patient_id=patient_id,
             t_index=t_index,
             t_minutes=float(resolved.t_minutes),
+        )
+        _record_render(
+            request, view=view, ctx=ctx, clinician_id=clinician_id or "", patient_id=patient_id
         )
 
     _touch_contact(request, contact)
@@ -1458,7 +1573,9 @@ def _advance_response(
             content=_error_flash(message or ""),
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
         )
-    inner = _render_patient_view(
+    advanced = result.outcome == "advanced"
+    # S9b: the 412 stale view is write free, so it carries no render id.
+    view = _render_patient_view(
         request,
         clinician_id=clinician_id,
         patient_id=patient_id,
@@ -1468,11 +1585,10 @@ def _advance_response(
         ctx=target_ctx,
         case=case,
         contact=contact,
+        render_tracking=RenderTracking.TRACKED if advanced else RenderTracking.WRITE_FREE,
     )
-    status_code = (
-        status.HTTP_200_OK if result.outcome == "advanced" else status.HTTP_412_PRECONDITION_FAILED
-    )
-    if result.outcome == "advanced":
+    status_code = status.HTTP_200_OK if advanced else status.HTTP_412_PRECONDITION_FAILED
+    if advanced:
         # S10: the htmx swap shows the next frontier pane without a new GET,
         # so its enter rides on this response. The 412 "stale" reply keeps
         # the frontier the clinician is actually on — no enter there (and
@@ -1486,7 +1602,12 @@ def _advance_response(
             t_index=target_t_index,
             t_minutes=float(target_resolved.t_minutes),
         )
-    return HTMLResponse(content=inner, status_code=status_code, headers={"HX-Push-Url": target_url})
+        _record_render(
+            request, view=view, ctx=target_ctx, clinician_id=clinician_id, patient_id=patient_id
+        )
+    return HTMLResponse(
+        content=view.html, status_code=status_code, headers={"HX-Push-Url": target_url}
+    )
 
 
 def _form_str(value: object) -> str | None:

@@ -78,6 +78,9 @@ def _boot_server(
     if activation is not None:
         _run_cli([*activation, "--db-path", str(db_path)], env=env, cwd=work_dir)
 
+    # A file, not a pipe: nobody drains a pipe, and a full one (the per
+    # request log lines of S11j telemetry fill it fast) blocks the server.
+    server_log = (log_dir / "server.out").open("wb")
     proc = subprocess.Popen(
         [
             sys.executable,
@@ -96,7 +99,7 @@ def _boot_server(
         ],
         env=env,
         cwd=str(work_dir),
-        stdout=subprocess.PIPE,
+        stdout=server_log,
         stderr=subprocess.STDOUT,
     )
     base_url = f"http://127.0.0.1:{port}"
@@ -104,7 +107,8 @@ def _boot_server(
     last_err: Exception | None = None
     while time.monotonic() < deadline:
         if proc.poll() is not None:
-            output = proc.stdout.read().decode() if proc.stdout else ""
+            server_log.close()
+            output = (log_dir / "server.out").read_text()
             raise RuntimeError(f"uvicorn exited early:\n{output}")
         try:
             # /login is the unauthenticated landing page; it returns 200
@@ -117,6 +121,7 @@ def _boot_server(
         time.sleep(0.2)
     else:
         proc.kill()
+        server_log.close()
         raise RuntimeError(f"uvicorn did not become ready in 30s: {last_err}")
 
     try:
@@ -127,6 +132,7 @@ def _boot_server(
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
+        server_log.close()
 
 
 @pytest.fixture(scope="session")
@@ -191,6 +197,45 @@ def live_lifecycle_server(
         ],
         work_dir=lifecycle_work_dir,
     )
+
+
+_TELEMETRY_STUDY = _FIXTURES_DIR / "study_telemetry.yaml"
+
+
+@pytest.fixture(scope="session")
+def telemetry_work_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Work dir (and so DB) of ``live_telemetry_server``."""
+    return tmp_path_factory.mktemp("e2e-telemetry-work")
+
+
+@pytest.fixture(scope="session")
+def live_telemetry_server(
+    tmp_path_factory: pytest.TempPathFactory, telemetry_work_dir: Path
+) -> Iterator[str]:
+    """S11j/S11k: Phase 2 study with a ``telemetry`` block."""
+    study_yaml = str(_TELEMETRY_STUDY)
+    questions_yaml = str(_FIXTURES_DIR / "questions.yaml")
+    yield from _boot_server(
+        tmp_path_factory,
+        label="e2e-telemetry",
+        extra_args=["--config", study_yaml, "--questions", questions_yaml],
+        activation=[
+            "activate-config",
+            study_yaml,
+            questions_yaml,
+            "--version",
+            "e2e",
+            "--description",
+            "e2e telemetry",
+        ],
+        work_dir=telemetry_work_dir,
+    )
+
+
+@pytest.fixture
+def telemetry_db(telemetry_work_dir: Path) -> Path:
+    """Path of ``live_telemetry_server``'s live DB (read it, never write)."""
+    return telemetry_work_dir / _DB_FILENAME
 
 
 @pytest.fixture

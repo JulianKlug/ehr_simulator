@@ -2,487 +2,197 @@
 
 ## Goal
 
-Turn the intervention configuration, immutable randomised arm, successful/failed delivery evidence, and S11j/S11k telemetry into observation level research variables without changing intention to treat assignment.
-
-Also derive structured missing response provenance without manufacturing clinician answers.
+Turn the immutable randomised arm, server delivery evidence and S11j/S11k telemetry into observation level research variables without touching intention to treat assignment, and give every missing response a structured reason without manufacturing answers.
 
 S11a through S11k are assumed complete.
 
+## Review changes (2026-09-27)
+
+Revised against the code at `7cf9305` and the revised S11j/S11k:
+
+1. **Delivery evidence named concretely.** S11g dropped `render_prepared`. The server already decides per render whether the AI row is shown or why not (`AIUnavailableReason`). S11l records that decision in the S11j `timepoint.render` payload (`ai`, `ai_unavailable_reason`). Browser evidence is the S11k `panel.mount` of the `ai` panel. No `intervention.ai.mounted` event.
+2. **Event kinds without a producer dropped** (`intervention.ai.leakage`, `intervention.integrity_failure`, `display_failure` event). Leakage and display failure are **derived** from raw facts; nothing asserts them.
+3. **Failure reasons mapped to real causes:** `missing_artifact` ← `missing_row | artifact_mismatch | not_configured`; `render_failure` ← AI panel rendered in `error` state; `display_failure` ← server shown, complete telemetry, no AI `panel.mount` in state `loading|partial`.
+4. **No AI PP needs no telemetry.** A no AI render has no AI markup by construction (S11g); only positive leakage evidence breaks compliance.
+5. **"Reached"** uses the authoritative gate state (`t < unlocked_t_index`, or the case completed) plus S10 `timepoint.enter` evidence for the frontier, instead of telemetry alone.
+6. **Missing reasons:** the original precedence stands (PR #7 review restored it): reached beats abandonment, so a timepoint seen and left blank is `reached_unanswered` even where the case was abandoned; `case_abandoned` = not reached because the case ended incomplete; new `pending` for timepoints of an open case; `timepoint_never_reached` for anything else without reach evidence. `technical_failure` is reserved: no lifecycle reason is technical today.
+7. **Integrity problems are flagged, not raised**, so one bad row never blocks S11n's export.
+8. **Scope:** measured `phase2_randomized` cases only; practice and Phase 1 are excluded.
+9. **No persistence, no export.** Pure derivation plus a read only loader; S11n renders columns.
+
 ## Core invariants
 
-1. ITT arm is always the immutable activated assignment from S11d/S11f.
-2. No runtime failure, non viewing, leakage, or PP rule may rewrite that arm.
-3. AI viewed is defined at `clinician × patient × timepoint` level.
-4. AI viewed is based on cumulative qualifying AI panel exposure, not clicks.
-5. The first use case threshold is exactly two cumulative seconds under the S11k qualifying exposure definition.
-6. PP compliance is observation specific, not only case specific.
-7. One case may contain both PP compliant and PP non compliant timepoints.
-8. AI delivery failure remains an AI ITT observation.
-9. Accidental AI exposure remains a no AI ITT observation.
-10. Missing answers remain missing. S11l never imputes a response.
-11. Raw events remain authoritative; derived classifications are reproducible pure outputs.
-12. Telemetry integrity/missingness must be distinguishable from a confidently measured zero exposure where possible.
+1. The ITT arm is the activated `arm_assignments.arm`; nothing here writes it.
+2. AI viewed is defined per `clinician × patient × timepoint` from cumulative primary AI panel exposure (S11k), not from clicks.
+3. First use case: viewed ⇔ `>= 2.0` s under the S11k predicate.
+4. PP is per observation; one case may mix compliant and non compliant timepoints.
+5. Delivery failure stays AI ITT; accidental exposure stays no AI ITT.
+6. Missing answers stay missing; no path inserts an answer row.
+7. Indeterminate telemetry is never a measured zero.
+
+## Server delivery evidence
+
+`timepoint.render` payload (S11j) gains, for every render:
+
+```
+"ai": "legacy" | "none" | "shown" | "unavailable" | "error"
+"ai_unavailable_reason": "not_configured" | "artifact_mismatch" | "missing_row"   (only with "unavailable")
+```
+
+- `legacy`: Phase 1 / practice free legacy panels (not an S11l observation).
+- `none`: measured no AI render, no AI markup.
+- `shown`: measured AI render with the pinned row for exactly `t`.
+- `unavailable`: measured AI render showing the S11g unavailable state.
+- `error`: the AI panel rendered in the `error` state.
+
+Practice renders carry their fixed arm's value; S11l ignores them.
 
 ## Observation identity
 
-All S11l derivation functions operate at:
+`study_id × clinician_id × patient_id × t_index`, carrying `session_ids`, `config_version`, `config_hash`, the assigned arm and `case_outcome` (`active|paused|completed|incomplete`, plus the incomplete reason).
 
-`study_id × clinician_id × patient_id × timepoint`
+Only primary renders feed AI delivery, exposure and PP.
 
-and retain:
+## Derivations (`study_variables.py`, pure)
 
-- case/session identity
-- `config_version`
-- `config_hash`
-- immutable assigned arm
-- visit kind for telemetry inputs
+### Delivery
 
-The authoritative PP measure uses the primary visit only.
+For AI assigned observations, over primary renders:
 
-## Intervention event taxonomy
+- `ai_delivered = True` when some render is `shown` **and** that render has an `ai` `panel.mount` with state `loading|partial` (the S2 normal and partial states).
+- `ai_delivered = False` when every render is `unavailable|error`, or a `shown` render has `complete` telemetry and no such mount (`display_failure`).
+- otherwise `None` (shown, but telemetry `missing|incomplete|gapped|multi_tab` and no mount seen).
 
-Add structured event kinds for intervention integrity.
+For no AI observations `ai_delivered = True` only on leakage evidence, else `False`.
 
-Minimum set:
+### Failure
 
-- `intervention.ai.mounted`
-- `intervention.ai.render_failure`
-- `intervention.ai.missing_artifact`
-- `intervention.ai.display_failure`
-- `intervention.ai.leakage`
-- `intervention.integrity_failure`
-
-Use existing `events` columns for clinician/session/patient/timepoint plus S11j tab/monotonic fields where browser originated.
-
-Payloads contain categorical reason/identifier metadata only.
-
-Do not include:
-
-- clinician name
-- prediction probability values
-- raw AI explanation text
-- raw clinical values
-- answer values
-
-## Successful AI delivery evidence
-
-S11g may record `intervention.ai.render_prepared` when the server successfully prepares the AI HTML.
-
-S11l adds browser acknowledgement:
-
-`intervention.ai.mounted`
-
-Emit it when the AI panel is present and successfully initialised in the browser DOM for an AI assigned observation.
-
-The server validates the observation assignment before persisting it.
-
-A browser cannot turn a no AI assignment into AI by posting this event. If a mounted event arrives for a no AI assignment, persist an integrity/leakage fact and retain the no AI arm.
-
-## AI actually delivered
-
-Derive `ai_delivered` per observation.
-
-For AI assigned observations:
-
-`ai_delivered = true` only when there is trustworthy evidence that the configured AI intervention reached the browser for that observation, normally:
-
-- correct case pinned intervention/configuration
-- successful server preparation where recorded
-- browser `intervention.ai.mounted`
-- no delivery preventing missing artifact/render/display failure for that observation
-
-For no AI observations:
-
-`ai_delivered` should normally be false by design.
-
-If AI is accidentally mounted/exposed in a no AI observation, retain `ai_delivered=true` as a factual exposure signal plus `intervention_leakage=true`; ITT arm remains no AI.
-
-Do not infer successful delivery solely from assignment.
-
-## Structured intervention failure
-
-Derive:
-
-```
-intervention_failure: bool
-intervention_failure_reason: categorical/list
-```
-
-Reasons include at least:
-
-- `render_failure`
-- `missing_artifact`
-- `display_failure`
-- `other_integrity_failure`
-
-If a failure prevents the AI intervention from reaching an AI assigned observation:
-
-- assignment stays AI
-- `ai_delivered=false`
-- observation cannot be AI PP compliant
-
-A technical failure that also prevents meaningful case completion may interact with S11e incomplete/replacement policy, but it still does not change the original arm.
-
-## Intervention leakage
-
-Derive:
-
-```
-intervention_leakage: bool
-```
-
-A no AI observation has leakage if any trustworthy evidence shows AI information became clinician facing, including:
-
-- `intervention.ai.mounted`
-- AI panel viewport/exposure events
-- explicit `intervention.ai.leakage`
-- other integrity event proving AI content was exposed
-
-Do not label an AI assigned observation "leakage" merely because AI was shown as intended.
-
-A leakage event preserves the no AI ITT arm and makes that observation non compliant for PP.
-
-## AI viewed derivation
-
-Use S11k primary visit AI panel summary.
-
-For every AI assigned observation:
-
-```
-ai_qualifying_seconds = cumulative primary AI panel qualifying exposure
-ai_viewed = ai_qualifying_seconds >= panel_viewed_threshold_seconds
-```
-
-For the first use case:
-
-```
-ai_viewed = ai_qualifying_seconds >= 2.0
-```
-
-Examples:
-
-- 1.99 -> false
-- 2.00 -> true
-- 5.5 -> true
-
-Viewing does not require recent qualifying activity.
-
-Reset is naturally enforced by grouping on timepoint.
-
-Retain continuous duration even when the binary threshold is reached.
-
-### No AI observations
-
-`ai_viewed` should normally be false/not applicable.
-
-Do not encode accidental AI exposure as ordinary compliant `ai_viewed` for a no AI observation. Preserve leakage and any actual AI exposure duration separately.
-
-Recommended export semantics later:
-
-- `ai_viewed` nullable/not applicable for no AI arm
-- `ai_exposure_seconds` may still expose accidental duration when leakage occurred
-
-S11n decides final column representation.
-
-## Telemetry completeness
-
-Do not equate missing telemetry with `ai_viewed=false` when the event stream is known incomplete.
-
-Derive a telemetry status such as:
-
-- `complete`
-- `incomplete`
-- `multi_tab_conflict`
-- `not_applicable`
-
-For an AI assigned observation with indeterminate AI panel telemetry:
-
-- preserve ITT AI
-- `ai_viewed` may be null/indeterminate rather than false
-- PP compliance becomes indeterminate/non compliant according to the locked export/analysis rule
-
-For this implementation, use conservative PP derivation:
-
-```
-indeterminate telemetry -> pp_compliant = false
-```
-
-while retaining the separate telemetry status so downstream analysis can distinguish "measured not viewed" from "could not establish viewing".
-
-Do not manufacture zero seconds.
-
-## Per protocol classification
-
-Derive:
-
-```
-pp_compliant: bool
-```
-
-per observation.
-
-### AI assigned
-
-PP compliant only when:
-
-- `ai_delivered == true`
-- `ai_viewed == true`
-
-A delivery preventing intervention failure therefore makes PP false through `ai_delivered=false`.
-
-### No AI assigned
-
-PP compliant only when:
-
-- AI remained unavailable as intended
-- `intervention_leakage == false`
-
-Equivalent operational rule:
-
-```
-not ai_delivered AND not intervention_leakage
-```
-
-where accidental AI delivery makes no AI PP false.
-
-### ITT independence
-
-Never update:
-
-- `arm_assignments.arm`
-- schedule item planned arm
-- activation provenance
-
-based on PP outcome.
-
-PP is a derived analysis variable only.
-
-## Case level summaries
-
-Support derived convenience summaries without replacing the timepoint level authoritative variables.
-
-Examples:
-
-- AI viewed at least once during case
-- number of AI assigned timepoints viewed
-- total primary AI qualifying seconds
-- number of AI viewing episodes
-- all observations PP compliant yes/no
-- count of intervention failures/leakages
-
-These are secondary derived summaries.
-
-The timepoint observation remains the source for PP classification.
-
-## Missing response provenance
-
-S11l does not write substitute answers.
-
-For every expected question cell in the case pinned question configuration, derive:
-
-- `response_present`
-- `timepoint_reached`
-- `missing_response_reason` when absent
-
-Recommended missing reasons:
-
-- `technical_failure`
-- `case_abandoned`
-- `reached_unanswered`
-- `timepoint_never_reached`
-- `unknown`
-
-### Timepoint reached
-
-A timepoint is reached when trustworthy primary presentation evidence exists, using the server S10 `timepoint.enter` and/or validated S11j primary `browser.timepoint_enter`.
-
-Do not infer "reached" from the mere existence of a configured timepoint.
-
-### Technical failure
-
-If a structured technical/intervention integrity failure is explicitly associated with the observation and plausibly prevented response capture, classify missing reason `technical_failure`.
-
-Do not use this label for every AI render warning that did not prevent answering.
-
-### Case abandoned
-
-If the case ends S11e `incomplete` without a more specific technical failure explaining the missing response, missing later/unfinished responses may be classified `case_abandoned`.
-
-Retain the original structured lifecycle incomplete reason separately:
-
-- reconnection timeout
-- pause timeout
-- operator abandoned
-- any later technical incomplete reason
-
-### Reached but unanswered
-
-If the primary timepoint was reached, the question was required/visible in the effective S11h branch, and no answer exists at termination/export snapshot:
-
-```
-missing_response_reason = reached_unanswered
-```
-
-### Timepoint never reached
-
-If the timepoint has no primary presentation evidence and the case ended before it:
-
-```
-missing_response_reason = timepoint_never_reached
-```
-
-### Hidden/non applicable conditional question
-
-A question hidden by the S11h branch is not a missing response.
-
-Represent it as not applicable/branch hidden in later exports, not as unanswered.
-
-A rule generated answer is present, with `answer_source=rule`, not missing.
-
-## Missing response precedence
-
-Use one documented deterministic precedence. Recommended:
-
-1. branch hidden/not applicable -> not missing
-2. answer present -> answered
-3. explicit response preventing technical failure -> `technical_failure`
-4. primary timepoint reached -> `reached_unanswered`
-5. case terminal incomplete before the timepoint -> `case_abandoned`
-6. otherwise no reach evidence -> `timepoint_never_reached`
-7. inconsistent/unclassifiable data -> `unknown` plus integrity warning
-
-This keeps "reached but unanswered" more informative than the generic case abandonment label when both are true.
-
-## Pure derivation module
-
-Create a module such as:
-
-`study_variables.py`
-
-It must not import FastAPI/web rendering code.
-
-Inputs are persisted rows/events/config snapshots.
-
-Outputs are immutable dataclasses for:
-
-- intervention delivery/integrity
-- AI viewing
-- PP status
-- missing response provenance
-
-S11n consumes these pure derivations when building linked exports.
-
-No derived PP/AI viewed value needs to be persisted as a mutable database column in S11l unless caching is later proven necessary.
-
-Recomputability from raw events is preferred.
-
-## Integrity checks
-
-Derivation must refuse or flag impossible combinations, including:
-
-- AI panel normal telemetry in no AI arm without marking leakage
-- intervention mounted event for unknown/unactivated case
-- event configuration/session provenance inconsistent with the case
-- negative exposure duration
-- panel event referring to unknown timepoint
-- answer row arm different from immutable assignment
-
-Do not silently "fix" such records by rewriting history.
-
-## Files expected to change
-
-- `src/ehr_simulator/db/events.py`
-- server/browser intervention acknowledgement hooks
-- new pure `study_variables.py` or equivalent
-- `src/ehr_simulator/panel_exposure.py` integration
-- S11e lifecycle reading helpers where needed
-- answer/question evaluation readers from S11h
-- tests and documentation
-- Session 11 checklist updates
-
-No schema migration is required if the S11j event columns are sufficient. Add one only if a concrete persistence requirement cannot be represented by append only events/config history.
-
-## Required tests
-
-### AI delivered and failures
-
-1. AI assigned + successful mounted evidence derives `ai_delivered=true`.
-2. AI assigned with missing artifact derives `ai_delivered=false` and preserves AI arm.
-3. AI render failure preserves AI arm.
-4. AI display failure preserves AI arm.
-5. Other integrity failure is structured and does not rewrite assignment.
-6. Browser cannot forge a different arm through a mounted event.
+`intervention_failure_reasons` (sorted tuple, empty = none): `missing_artifact`, `render_failure`, `display_failure`, `other_integrity_failure` (render `ai` inconsistent with the arm, e.g. `shown` on a no AI case — also leakage). `intervention_failure = bool(reasons)`.
 
 ### Leakage
 
-7. No AI observation with no AI events derives no leakage.
-8. AI mounted event in no AI observation derives leakage.
-9. AI panel exposure event in no AI observation derives leakage.
-10. Leakage preserves no AI ITT assignment.
-11. Leakage makes no AI PP non compliant.
+A no AI observation leaks when any primary or revisit render of it has `ai` ∉ {`none`}, or any `panel.*` event with `panel_id="ai"` exists for one of its renders. AI assigned observations never leak.
 
 ### AI viewed
 
-12. 1.99 seconds is not viewed at the first use case threshold.
-13. 2.00 seconds is viewed.
-14. Separate episodes summing to 2.00 seconds are viewed.
-15. Exposure at one timepoint does not carry to the next.
-16. Passive reading exposure can make `ai_viewed=true` even when active time has expired.
-17. Revisit AI exposure does not satisfy primary visit AI viewed.
-18. Continuous qualifying duration is retained in addition to the binary flag.
+AI assigned only; from the S11k primary `ai` summary:
 
-### Telemetry completeness
+- `ai_exposure_seconds` = measured lower bound
+- `ai_viewed` = the S11k `viewed` (`True|False|None`)
+- `ai_viewing_status` = the S11k status
 
-19. Complete zero exposure is distinguishable from missing telemetry.
-20. Missing telemetry does not become a fabricated 0.0 seconds.
-21. Multi tab conflict remains marked and does not silently sum durations.
-22. Indeterminate AI viewing conservatively produces PP non compliance while retaining telemetry status.
+No AI: `ai_viewed = None` (not applicable); `ai_exposure_seconds` reports accidental exposure when leakage produced panel events, else `None`.
 
-### PP classification
+### PP
 
-23. AI assigned + delivered + viewed -> PP true.
-24. AI assigned + delivered + not viewed -> PP false.
-25. AI assigned + not delivered -> PP false.
-26. No AI + unavailable + no leakage -> PP true.
-27. No AI + leakage -> PP false.
-28. PP classification does not update arm assignment.
-29. One case can contain one PP compliant and one non compliant observation.
-30. Case level convenience summary does not replace the timepoint rows.
+- AI: `pp_compliant = ai_delivered is True and ai_viewed is True`.
+- No AI: `pp_compliant = not intervention_leakage`.
+- `pp_determinate = False` when an AI observation's `ai_delivered` or `ai_viewed` is `None` (conservative `pp_compliant=False` is kept, the flag lets analysis separate "not viewed" from "could not establish").
+- Observations whose timepoint was not reached: `pp_compliant = None`.
 
-### Missing response provenance
+### Case summaries
 
-31. Existing clinician answer -> response present, no missing reason.
-32. Rule generated S11h answer -> response present, source remains rule.
-33. Hidden conditional question -> not applicable, not missing.
-34. Reached required question with no answer -> `reached_unanswered`.
-35. Explicit response preventing technical failure -> `technical_failure`.
-36. Incomplete case before later timepoint -> `case_abandoned` or the documented precedence result.
-37. Never reached timepoint without stronger reason -> `timepoint_never_reached`.
-38. No missing path inserts an answer row.
-39. Lifecycle incomplete reason remains separately retrievable.
+`CaseSummary`: AI viewed at least once, AI viewed timepoint count, total primary AI exposure seconds, AI episode count, all reached observations PP compliant, failure and leakage counts. Secondary only; the timepoint rows stay authoritative.
 
-### Integrity/regression
+## Missing response provenance
 
-40. Answer arm mismatch with assignment is refused/flagged.
-41. Unknown intervention event case is refused/flagged.
-42. Negative panel duration is refused/flagged.
-43. All outputs retain `config_version`/`config_hash` attribution through their source context.
-44. All S11a through S11k tests remain green.
-45. Full CI remains green.
+For every question of the case pinned questions at every configured timepoint:
+
+`timepoint_reached`:
+
+- `t_index < unlocked_t_index` (no progress row yet = frontier 0), or the case is completed, or
+- `t_index == unlocked_t_index` and an S10 `timepoint.enter` for it exists.
+
+Branch state from the S11h evaluator over that timepoint's stored answers.
+
+Precedence (first match wins):
+
+1. `HIDDEN` → `status=not_applicable`
+2. an answer row exists (clinician or rule) → `status=answered`, `answer_source` kept
+3. a technical failure reason (reserved; none today) → `technical_failure`
+4. reached → `reached_unanswered`
+5. the case is `incomplete` → `case_abandoned`
+6. the case is `active|paused` → `pending`
+7. otherwise (no reach evidence) → `timepoint_never_reached`
+
+A `DERIVED` question without its rule row is also `unknown` + warning. The lifecycle incomplete reason is always kept separately on the case.
+
+## Integrity checks (flagged on the observation, never raised)
+
+- an answer row whose `arm` differs from the assignment
+- render `ai` inconsistent with the arm
+- S11j/S11k `invalid` telemetry (non monotonic time)
+- render rows whose provenance (`config_hash`) differs from the case
+
+History is never rewritten.
+
+## Loader
+
+`study_variables_reader.py` (service layer, read only, no `web/` import): `load_case_variables(conn, clinician_id, patient_id) -> CaseVariables` reads the assignment, lifecycle, progress, pinned snapshot, answers, S10 enters and render bound telemetry (through `db/telemetry.py`) and calls the pure derivations. Read inside one `BEGIN … ROLLBACK` snapshot.
+
+## Files expected to change
+
+- `web/routes.py` / `web/timing_events.py` (render payload `ai`)
+- new `study_variables.py`, `study_variables_reader.py`
+- `db/telemetry.py` (loaders)
+- tests, checklist, `CLAUDE.md`
+
+## Required tests
+
+### Delivery and failure
+
+1. AI + `shown` + AI mount `loading` → delivered.
+2. `missing_row`, `artifact_mismatch`, `not_configured` → `missing_artifact`, not delivered, arm AI.
+3. AI panel `error` → `render_failure`.
+4. `shown`, complete telemetry, no mount → `display_failure`; incomplete telemetry → delivered `None`.
+5. A browser mount cannot make a no AI case AI (arm unchanged, leakage set).
+
+### Leakage
+
+6. No AI without AI evidence → no leakage, PP true.
+7. AI panel event on a no AI render → leakage, PP false, arm no AI.
+8. Render `ai=shown` on a no AI case → leakage + `other_integrity_failure`.
+
+### AI viewed and PP
+
+9. 1.99 s not viewed; 2.00 s viewed; two episodes summing to 2.00 viewed.
+10. Exposure does not carry to the next timepoint.
+11. Passive exposure after active time expired still counts.
+12. Revisit exposure never satisfies primary viewing.
+13. Duration kept with the flag.
+14. Incomplete below threshold → viewed `None`, PP false, `pp_determinate` false.
+15. Multi tab → indeterminate, not summed.
+16. AI delivered + viewed → PP true; delivered + not viewed → false; not delivered → false.
+17. One case with one compliant and one non compliant timepoint.
+18. Derivation writes nothing (row counts unchanged).
+19. Case summary counts.
+
+### Missing responses
+
+20. Clinician answer → answered; rule answer → answered, source rule.
+21. Hidden question → not applicable.
+22. Completed case, optional question blank → `reached_unanswered`.
+23. Incomplete case: reached timepoints (frontier included) → `reached_unanswered`, later timepoints → `case_abandoned`.
+23a. A gapped AI stream above threshold → viewed `None`, PP false, `pp_determinate` false.
+24. Open case, future timepoint → `pending`.
+25. Frontier without S10 enter evidence → not reached.
+26. Lifecycle incomplete reason retrievable on the case.
+
+### Integrity
+
+27. Answer arm mismatch flagged.
+28. Invalid telemetry flagged.
+29. Outputs carry `config_version`/`config_hash`.
+30. Practice and Phase 1 cases are not observations.
+
+### Regression
+
+31. All earlier tests green.
 
 ## Explicit non goals
 
-S11l does not implement:
-
-- changing ITT populations
-- statistical imputation
-- mixed effects models
-- primary/secondary endpoint analysis
-- final research CSV/file layout
-- privacy/keyfile changes planned for S11m
-- final multi tab protection planned for S11m
-- backup identity changes planned for S11m
+Changing ITT, imputation, statistical models, export layout (S11n), privacy/keyfile and multi tab protection (S11m), persisted PP columns.
 
 ## Acceptance
 
-S11l is complete when every measured observation can be reproducibly classified by immutable assigned arm, actual AI delivery, cumulative qualifying AI exposure, AI viewed threshold, intervention failure/leakage, and PP compliance; failures/leakage never rewrite ITT; missing responses remain absent while carrying structured provenance; branch hidden questions are not misclassified as missing; and the complete test suite passes.
+S11l is complete when every measured observation is reproducibly classified by immutable arm, delivery, cumulative primary AI exposure, viewed, failure, leakage and PP (with determinacy), failures and leakage never touch ITT, missing responses carry a distinct structured reason without any written answer, hidden questions are never missing, and the full suite passes.

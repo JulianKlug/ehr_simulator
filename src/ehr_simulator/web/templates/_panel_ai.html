@@ -4,6 +4,7 @@
          {%- if measured %} data-intervention="ai"{% endif %}
          data-state="{{ state }}">
     <header>AI output</header>
+    <div class="panel-content" data-panel-content>
     {#- S11g: a measured AI case shows only the frozen row for exactly t. -#}
     {% if state == "unavailable" %}
         <p class="error">AI output unavailable for this timepoint.</p>
@@ -31,4 +32,5 @@
             {% endfor %}
         </ul>
     {% endif %}
+    </div>
 </section>

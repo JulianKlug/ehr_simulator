@@ -26,6 +26,10 @@ best-effort: :func:`record_enter` runs only after a successful render, so
 a failed render leaves no enter without a matching exit, and a later
 advance failure has no enter to orphan.
 
+S11j adds :func:`record_render`: one ``timepoint.render`` per successful
+study render whose pinned config has ``telemetry``, naming the view by its
+``render_id`` so browser telemetry can bind to it.
+
 These are server-side behavioural facts: the payload carries the ``t_index``
 (``timepoint`` already holds the minutes; ``client_ts`` / ``client_seq`` do
 not apply to server-emitted events). The authoritative timestamp is
@@ -35,13 +39,32 @@ not apply to server-emitted events). The authoritative timestamp is
 from __future__ import annotations
 
 import sqlite3
+import uuid
+from enum import StrEnum
 from typing import Any
 
 from ehr_simulator.db import events
+from ehr_simulator.db.telemetry import RENDER_KIND
 from ehr_simulator.timing import ENTER_KIND, EXIT_KIND
 from ehr_simulator.web.study_session import SessionContext
 
-__all__ = ["REVISIT_KIND", "record_enter", "record_exit", "record_revisit"]
+__all__ = [
+    "REVISIT_KIND",
+    "VisitKind",
+    "new_render_id",
+    "record_enter",
+    "record_exit",
+    "record_render",
+    "record_revisit",
+]
+
+
+class VisitKind(StrEnum):
+    """S11i: ``primary`` ⇔ the editable frontier; anything else is a revisit."""
+
+    PRIMARY = "primary"
+    REVISIT = "revisit"
+
 
 #: S11i: a render behind the editable frontier (an occurrence marker, never
 #: a timing interval — S10 enter/exit stay untouched).
@@ -130,4 +153,41 @@ def record_revisit(
         timepoint=float(t_minutes),
         kind=REVISIT_KIND,
         payload={"t_index": t_index},
+    )
+
+
+def new_render_id() -> str:
+    """S11j: a fresh, unguessable id for one rendered view."""
+    return uuid.uuid4().hex
+
+
+def record_render(
+    conn: sqlite3.Connection,
+    app_state: Any,
+    *,
+    ctx: SessionContext,
+    clinician_id: str,
+    patient_id: str,
+    t_index: int,
+    t_minutes: float,
+    render_id: str,
+    visit_kind: VisitKind,
+    ai_delivery: dict[str, str],
+) -> None:
+    """S11j: one ``timepoint.render`` after a successful telemetry render.
+
+    ``ai_delivery`` is the S11l evidence of what the AI surface showed
+    (``{"ai": "shown"}``, ``{"ai": "unavailable", "ai_unavailable_reason":
+    "missing_row"}``, …).
+    """
+    events.append(
+        conn,
+        app_state=app_state,
+        session_id=ctx.session_id,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        timepoint=float(t_minutes),
+        kind=RENDER_KIND,  # type: ignore[arg-type]
+        payload={"t_index": t_index, "visit_kind": str(visit_kind), **ai_delivery},
+        render_id=render_id,
     )

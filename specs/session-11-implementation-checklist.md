@@ -236,16 +236,16 @@ Update example or study specific question configuration accordingly.
 
 Add client side telemetry sufficient to identify:
 
-- [ ] `document.visibilityState`
-- [ ] window focus
-- [ ] window blur
-- [ ] browser/tab identifier
+- [x] `document.visibilityState`
+- [x] window focus
+- [x] window blur
+- [x] browser/tab identifier
 
 Use a monotonic browser clock for duration measurement.
 
-- [ ] Use `performance.now()` or equivalent for local durations.
-- [ ] Retain server timestamps for ordering and audit.
-- [ ] Do not include network latency in viewport exposure duration.
+- [x] Use `performance.now()` or equivalent for local durations.
+- [x] Retain server timestamps for ordering and audit.
+- [x] Do not include network latency in viewport exposure duration.
 
 ---
 
@@ -257,8 +257,8 @@ Derive per clinician, patient, and timepoint:
 
 Accumulate only while:
 
-- [ ] document visible
-- [ ] browser focused
+- [x] document visible
+- [x] browser focused
 
 Retain existing:
 
@@ -276,20 +276,20 @@ Derive:
 
 Requirements:
 
-- [ ] configurable inactivity threshold
-- [ ] first use case default of 60 seconds
-- [ ] activity resumes after qualifying interaction
-- [ ] passive mouse movement does not reset inactivity
+- [x] configurable inactivity threshold
+- [x] first use case default of 60 seconds
+- [x] activity resumes after qualifying interaction
+- [x] passive mouse movement does not reset inactivity
 
 Qualifying activity should include:
 
-- [ ] click
-- [ ] touch interaction
-- [ ] scroll
-- [ ] keyboard input
-- [ ] answer modification
-- [ ] panel open or close
-- [ ] timepoint navigation
+- [x] click
+- [x] touch interaction
+- [x] scroll
+- [x] keyboard input
+- [x] answer modification
+- [x] panel open or close
+- [x] timepoint navigation
 
 ---
 
@@ -299,20 +299,20 @@ Instrument all major information panels.
 
 For each panel capture sufficient raw information to derive:
 
-- [ ] cumulative viewing duration
-- [ ] viewed yes or no
-- [ ] viewing episode count
-- [ ] time to first view
-- [ ] first view timestamp
-- [ ] last view timestamp
-- [ ] panel open count
+- [x] cumulative viewing duration
+- [x] viewed yes or no
+- [x] viewing episode count
+- [x] time to first view
+- [x] first view timestamp
+- [x] last view timestamp
+- [x] panel open count
 
 Qualifying panel exposure requires:
 
-- [ ] viewport threshold met
-- [ ] document visible
-- [ ] browser focused
-- [ ] expanded content visible
+- [x] viewport threshold met
+- [x] document visible
+- [x] browser focused
+- [x] expanded content visible
 
 Collapsed header visibility must not count.
 
@@ -324,8 +324,8 @@ Support a study wide panel viewport threshold.
 
 For the first use case:
 
-- [ ] viewport threshold = 5 percent
-- [ ] cumulative viewed threshold = 2 seconds
+- [x] viewport threshold = 5 percent
+- [x] cumulative viewed threshold = 2 seconds
 
 Apply the same threshold to all instrumented panels.
 
@@ -341,21 +341,21 @@ Record raw transitions sufficient to reconstruct episodes.
 
 Episode start:
 
-- [ ] viewport threshold becomes satisfied
-- [ ] document visible
-- [ ] browser focused
-- [ ] content expanded
+- [x] viewport threshold becomes satisfied
+- [x] document visible
+- [x] browser focused
+- [x] content expanded
 
 Episode end when any qualifying condition becomes false.
 
 Where useful, retain end reason:
 
-- [ ] scroll out
-- [ ] tab hidden
-- [ ] focus lost
-- [ ] panel collapsed
-- [ ] timepoint exit
-- [ ] case interruption
+- [x] scroll out
+- [x] tab hidden
+- [x] focus lost
+- [x] panel collapsed
+- [x] timepoint exit
+- [x] case interruption (pause/abandon navigate away: `pagehide`; a lost exit: `truncated`)
 
 Raw events remain the source of truth.
 
@@ -365,15 +365,15 @@ Raw events remain the source of truth.
 
 For every collapsible panel record:
 
-- [ ] panel opened
-- [ ] panel closed
-- [ ] panel ID
-- [ ] timestamp
-- [ ] clinician
-- [ ] patient
-- [ ] timepoint
-- [ ] case/session identifier
-- [ ] tab identifier
+- [x] panel opened
+- [x] panel closed
+- [x] panel ID
+- [x] timestamp
+- [x] clinician
+- [x] patient
+- [x] timepoint
+- [x] case/session identifier
+- [x] tab identifier
 
 Do not infer panel viewed status merely from open state.
 
@@ -383,9 +383,9 @@ Do not infer panel viewed status merely from open state.
 
 For every AI assigned clinician, patient, and timepoint:
 
-- [ ] calculate cumulative qualifying AI exposure
-- [ ] derive `ai_viewed`
-- [ ] reset exposure on each new timepoint
+- [x] calculate cumulative qualifying AI exposure
+- [x] derive `ai_viewed`
+- [x] reset exposure on each new timepoint
 
 For the first use case:
 
@@ -401,12 +401,12 @@ Support derived case level summaries without replacing the timepoint level sourc
 
 For each observation export enough information to derive:
 
-- [ ] assigned arm
-- [ ] AI actually delivered
-- [ ] AI viewed threshold reached
-- [ ] intervention leakage
-- [ ] intervention failure
-- [ ] PP compliant yes or no
+- [x] assigned arm
+- [x] AI actually delivered
+- [x] AI viewed threshold reached
+- [x] intervention leakage
+- [x] intervention failure
+- [x] PP compliant yes or no
 
 AI assigned PP compliant:
 
@@ -426,11 +426,11 @@ Do not alter ITT assignment based on PP compliance.
 
 Add structured events for:
 
-- [ ] AI render failure
-- [ ] missing AI artifact
-- [ ] AI display failure
-- [ ] accidental AI exposure in no AI condition
-- [ ] other intervention integrity failure
+- [x] AI render failure
+- [x] missing AI artifact
+- [x] AI display failure
+- [x] accidental AI exposure in no AI condition
+- [x] other intervention integrity failure
 
 Never silently change the randomised arm because of a technical failure.
 
@@ -444,10 +444,10 @@ Do not impute missing answers.
 
 Where possible preserve structured states for:
 
-- [ ] case abandoned
-- [ ] technical failure
-- [ ] reached timepoint but unanswered
-- [ ] timepoint never reached
+- [x] case abandoned
+- [ ] technical failure (reserved reason; no lifecycle cause is technical yet)
+- [x] reached timepoint but unanswered
+- [x] timepoint never reached
 
 Ensure these states are exportable.
 
