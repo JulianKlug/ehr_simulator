@@ -22,7 +22,6 @@ never summed into attention time.
 
 from __future__ import annotations
 
-from collections import defaultdict
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -31,6 +30,7 @@ from ehr_simulator.behavioral_timing import (
     ENTER,
     MS_PER_SECOND,
     STATE,
+    UNMEASURABLE,
     RenderTimeline,
     TelemetryStatus,
     aggregate_status,
@@ -210,7 +210,7 @@ class PanelSummary:
     first_view_client_ts: str | None
     last_view_client_ts: str | None
     render_ids: tuple[str, ...]
-    per_tab_seconds: Mapping[str, float]
+    per_tab_seconds: Mapping[str, float | None]  # None: a gapped/invalid render
 
 
 def _viewed(status: TelemetryStatus, qualifying_ms: float, threshold_seconds: float) -> bool | None:
@@ -261,10 +261,14 @@ def _summarise(
     exposures: list[RenderPanelExposure],
     viewed_threshold_seconds: float,
 ) -> PanelSummary:
-    per_tab: dict[str, float] = defaultdict(float)
+    per_tab: dict[str, float | None] = {}
     for timeline, exposure in zip(timelines, exposures, strict=True):
         for tab in timeline.tab_ids:
-            per_tab[tab] += exposure.qualifying_ms / MS_PER_SECOND
+            so_far = per_tab.get(tab, 0.0)
+            if so_far is None or timeline.status in UNMEASURABLE:
+                per_tab[tab] = None  # no partial sum from an unmeasurable render
+                continue
+            per_tab[tab] = so_far + exposure.qualifying_ms / MS_PER_SECOND
 
     episodes = [e for x in exposures for e in x.episodes]
     total_ms = sum(x.qualifying_ms for x in exposures)

@@ -42,6 +42,7 @@ __all__ = [
     "RenderTimeline",
     "RenderTiming",
     "StateChange",
+    "UNMEASURABLE",
     "TelemetryStatus",
     "aggregate_status",
     "build_timeline",
@@ -88,6 +89,10 @@ _STATUS_RANK = {
     TelemetryStatus.MULTI_TAB: 4,
     TelemetryStatus.INVALID: 5,
 }
+
+
+#: Render statuses whose measured milliseconds are no lower bound (or none exist).
+UNMEASURABLE = frozenset({TelemetryStatus.MISSING, TelemetryStatus.GAPPED, TelemetryStatus.INVALID})
 
 
 def worst_status(statuses: Iterable[TelemetryStatus]) -> TelemetryStatus:
@@ -245,8 +250,9 @@ class RenderTiming:
 def derive_render_timing(
     timeline: RenderTimeline, *, inactivity_threshold_seconds: float
 ) -> RenderTiming:
-    """Foreground and active milliseconds of one render (``None`` if missing)."""
-    if timeline.status is TelemetryStatus.MISSING:
+    """Foreground and active milliseconds of one render; ``None`` when the
+    render is missing, gapped or invalid (nothing there is a lower bound)."""
+    if timeline.status in UNMEASURABLE:
         return RenderTiming(timeline, None, None)
 
     foreground = timeline.foreground
@@ -286,7 +292,7 @@ class ObservationTiming:
     active_seconds: float | None
     render_ids: tuple[str, ...]
     tab_ids: frozenset[str]
-    per_tab: Mapping[str, tuple[float, float]]
+    per_tab: Mapping[str, tuple[float, float] | None]  # None: a gapped/invalid render
 
 
 def rows_by_render(rows: Iterable[TelemetryRow]) -> dict[str, list[TelemetryRow]]:
@@ -355,20 +361,24 @@ def derive_observation_timings(
         timelines = [t.timeline for t in timings]
         status = aggregate_status(timelines)
 
-        per_tab: dict[str, tuple[float, float]] = defaultdict(lambda: (0.0, 0.0))
+        # Per tab diagnostics follow the observation rule: one unmeasurable
+        # render makes its tab's value None, never a partial sum.
+        per_tab: dict[str, tuple[float, float] | None] = {}
         for timing in timings:
-            if timing.foreground_ms is None or timing.active_ms is None:
-                continue
             for tab in timing.timeline.tab_ids:
-                fg, active = per_tab[tab]
+                so_far = per_tab.get(tab, (0.0, 0.0))
+                if so_far is None or timing.foreground_ms is None or timing.active_ms is None:
+                    per_tab[tab] = None
+                    continue
                 per_tab[tab] = (
-                    fg + timing.foreground_ms / MS_PER_SECOND,
-                    active + timing.active_ms / MS_PER_SECOND,
+                    so_far[0] + timing.foreground_ms / MS_PER_SECOND,
+                    so_far[1] + timing.active_ms / MS_PER_SECOND,
                 )
 
+        measured = [v for v in per_tab.values() if v is not None]
         trustworthy = status in (TelemetryStatus.COMPLETE, TelemetryStatus.INCOMPLETE)
-        foreground = sum(fg for fg, _ in per_tab.values()) if trustworthy else None
-        active = sum(a for _, a in per_tab.values()) if trustworthy else None
+        foreground = sum(fg for fg, _ in measured) if trustworthy else None
+        active = sum(a for _, a in measured) if trustworthy else None
         out[(t_index, visit_kind)] = ObservationTiming(
             t_index=t_index,
             visit_kind=visit_kind,

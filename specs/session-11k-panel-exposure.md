@@ -118,7 +118,7 @@ Durations are computed in milliseconds from `client_mono_ms`, never from `server
 
 ## Revisits, multiple tabs, failures
 
-Revisit renders form their own summaries and never extend primary ones. More than one tab → `multi_tab`, per tab summaries kept, nothing summed. Failed posts never become zero exposure: the S11j status carries into the summary.
+Revisit renders form their own summaries and never extend primary ones. More than one tab → `multi_tab`, per tab summaries kept, nothing summed. A tab holding a `gapped` or `invalid` render has per tab seconds `None`. Failed posts never become zero exposure: the S11j status carries into the summary.
 
 ## Files expected to change
 

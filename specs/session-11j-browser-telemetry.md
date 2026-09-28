@@ -163,6 +163,7 @@ Observation (clinician × patient × timepoint × visit_kind) aggregate:
 
 - renders of one tab are sequential: seconds sum, status = worst render status;
 - more than one `tab_id`, or a duplicated `(tab_id, client_seq)` across renders → `multi_tab`, per tab values kept, no authoritative total;
+- a `gapped`, `invalid` or `missing` render measures nothing, and a tab holding a `gapped` or `invalid` render has per tab value `None` (diagnostics never show a partial sum);
 - durations are reported as measured lower bounds alongside the status, only for `complete` and `incomplete`; a missing render among reported ones makes the observation at least `incomplete`.
 
 Primary values come from `visit_kind=primary` renders only; revisits never extend them.

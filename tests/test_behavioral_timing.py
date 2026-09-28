@@ -359,3 +359,26 @@ def test_timepoints_are_separate_observations() -> None:
 
     assert result[(0, "primary")].foreground_seconds == 10
     assert result[(1, "primary")].foreground_seconds == 40
+
+
+def test_gapped_render_measures_nothing() -> None:
+    timing = _timing(Stream().enter(0).gap(1).exit(20))
+
+    assert timing.foreground_ms is None and timing.active_ms is None
+
+
+def test_invalid_render_measures_nothing() -> None:
+    timing = _timing(Stream().enter(10).state(5, visible=True, focused=False).exit(20))
+
+    assert timing.foreground_ms is None and timing.active_ms is None
+
+
+def test_gapped_tab_has_no_per_tab_seconds() -> None:
+    # Diagnostics follow the observation rule: a gapped tab is no lower bound.
+    gapped = Stream("r1").enter(0).gap(1).exit(20)
+    clean = Stream("r2", tab_id=OTHER_TAB).enter(0).exit(10)
+    result = _observations([_render("r1"), _render("r2", event_id=2)], [gapped, clean])[
+        (0, "primary")
+    ]
+
+    assert result.per_tab == {TAB: None, OTHER_TAB: (10, 10)}

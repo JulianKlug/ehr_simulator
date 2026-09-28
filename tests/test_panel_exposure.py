@@ -390,3 +390,12 @@ def test_no_threshold_attribute_without_telemetry(harness: Harness) -> None:  # 
         soup = BeautifulSoup(client.get(f"/patient/{patient_id}/timepoint/0").text, "html.parser")
 
     assert not soup.select_one("#patient-view").has_attr("data-viewport-threshold")
+
+
+def test_gapped_tab_has_no_per_tab_seconds() -> None:
+    gapped = _visible_from_zero()
+    gapped.gap(0.5)
+    clean = PanelStream("r2", tab_id="tab-b").enter(0).mount(0).ratio(0, 0.5).exit(3)
+    summary = _summary([gapped.exit(5), clean])[(0, "primary", PANEL)]
+
+    assert summary.per_tab_seconds == {"tab-a": None, "tab-b": 3.0}
