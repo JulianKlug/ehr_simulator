@@ -167,7 +167,7 @@ def walk_preflight(
     S11g adds FAIL rows for a loaded AI artifact that is not the frozen one,
     a missing ``(patient, t, model_id)`` AI row, a slice row after ``t``,
     a prohibited field on screen, and a Phase 2 study that declares no
-    ``clinician_facing`` block.
+    ``clinician_facing`` block. S11j adds a Phase 2 study without ``telemetry``.
     """
     rows: list[PreflightRow] = _study_level_rows(study, questions, dataset)
     known_pids = set(dataset.admission["patient_id"].astype(str).unique().tolist())
@@ -224,7 +224,7 @@ def _study_level_rows(
     """S11g: artifact identity and the Phase 2 leakage declaration.
 
     S11i: the study/questions cross-model rules and practice patients that
-    the dataset does not hold.
+    the dataset does not hold. S11j: a Phase 2 study must declare telemetry.
     """
     messages: list[str] = []
     try:
@@ -247,6 +247,8 @@ def _study_level_rows(
             "Phase 2 study declares no clinician_facing.prohibited_fields "
             "(use [] to declare that none exist)"
         )
+    if study.randomisation is not None and study.telemetry is None:
+        messages.append("Phase 2 study declares no telemetry block (AI viewing cannot be measured)")
     return [
         PreflightRow(
             patient_id=_STUDY_LEVEL_PATIENT, t_minutes=_STUDY_LEVEL_T, status="FAIL", message=m

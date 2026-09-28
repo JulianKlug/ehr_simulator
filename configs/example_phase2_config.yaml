@@ -101,3 +101,14 @@ study_behaviour:
   free_text:
     enabled: false
     routine_export: exclude
+
+# S11j/S11k behavioural telemetry, pinned per case (preflight requires it
+# with `randomisation`). Active time stops inactivity_threshold_seconds
+# after the last click/touch/scroll/key/answer; a panel is exposed while
+# >= panel_viewport_threshold of its expanded content is on screen in a
+# visible, focused tab, and "viewed" after panel_viewed_threshold_seconds
+# of cumulative exposure per timepoint. First use case: 60 s, 5 %, 2 s.
+telemetry:
+  inactivity_threshold_seconds: 60
+  panel_viewport_threshold: 0.05
+  panel_viewed_threshold_seconds: 2.0

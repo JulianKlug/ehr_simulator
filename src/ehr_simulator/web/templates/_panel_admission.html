@@ -3,6 +3,8 @@
          data-panel="admission"
          data-state="{{ state }}">
     <header>Admission</header>
+    {#- S11k: the viewport observer targets only this content, never the header. -#}
+    <div class="panel-content" data-panel-content>
     {% if state == "empty-expected" %}
         <p class="empty">No admission record for this patient.</p>
     {% elif state == "error" %}
@@ -15,4 +17,5 @@
             {% endfor %}
         </dl>
     {% endif %}
+    </div>
 </section>

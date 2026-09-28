@@ -447,6 +447,24 @@ BEGIN
 END;
 """
 
+# S11j: browser telemetry on ``events``. ``tab_id`` names the browser tab,
+# ``render_id`` the server-issued rendered view (one document, so its
+# ``client_mono_ms`` values share one ``performance.now()`` origin). The
+# partial unique index makes a re-delivered browser batch a no-op; server
+# events (``tab_id`` NULL) are unaffected. Historical rows keep NULLs.
+_S11J_TELEMETRY_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("events", "tab_id", "TEXT"),
+    ("events", "render_id", "TEXT"),
+    ("events", "client_mono_ms", "REAL"),
+)
+
+_S11J_TELEMETRY_DDL = """
+CREATE INDEX IF NOT EXISTS ix_events_render ON events (render_id, client_mono_ms);
+
+CREATE UNIQUE INDEX IF NOT EXISTS ux_events_browser_delivery
+    ON events (render_id, tab_id, client_seq) WHERE tab_id IS NOT NULL;
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
@@ -480,6 +498,13 @@ MIGRATIONS: tuple[Migration, ...] = (
         name="s11i_practice",
         up_sql=_S11I_PRACTICE_DDL,
         add_columns=_S11I_OBSERVATION_MODE_COLUMNS,
+    ),
+    Migration(
+        version=12,
+        name="s11j_browser_telemetry",
+        up_sql="",
+        add_columns=_S11J_TELEMETRY_COLUMNS,
+        post_sql=_S11J_TELEMETRY_DDL,
     ),
 )
 

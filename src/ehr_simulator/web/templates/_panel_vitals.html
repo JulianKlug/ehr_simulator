@@ -3,6 +3,7 @@
          data-panel="vitals"
          data-state="{{ state }}">
     <header>Vitals</header>
+    <div class="panel-content" data-panel-content>
     {% if state == "empty-expected" %}
         <p class="empty">No vitals recorded for this patient.</p>
     {% elif state == "empty-unexpected" %}
@@ -108,4 +109,5 @@
             </table>
         </figure>
     {% endif %}
+    </div>
 </section>

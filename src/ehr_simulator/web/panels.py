@@ -330,6 +330,40 @@ def measured_ai_state(measured: MeasuredAI) -> tuple[PanelState, dict[str, Any]]
     return "loading", payload
 
 
+class AIDelivery(StrEnum):
+    """S11l: what a study render's AI surface showed (``timepoint.render``)."""
+
+    LEGACY = "legacy"  # Phase 1 / non study panels, not an S11l observation
+    NONE = "none"  # measured no AI: no AI markup at all
+    SHOWN = "shown"  # the pinned row for exactly t
+    UNAVAILABLE = "unavailable"  # the S11g unavailable state (reason kept)
+    ERROR = "error"  # the AI panel rendered in the error state
+
+
+def ai_delivery(patient_slice: PatientSlice, ctx: InterventionContext) -> dict[str, str]:
+    """The render payload fields recording AI delivery.
+
+    A set ``panel_errors["ai"]`` means the AI renderer raised and the error
+    panel was shown instead.
+    Examples: ``{"ai": "none"}``, ``{"ai": "unavailable",
+    "ai_unavailable_reason": "missing_row"}``.
+    """
+    if ctx.mode is InterventionMode.LEGACY:
+        return {"ai": AIDelivery.LEGACY}
+    if ctx.mode is InterventionMode.NO_AI:
+        return {"ai": AIDelivery.NONE}
+    if patient_slice.panel_errors.get("ai") is not None:
+        return {"ai": AIDelivery.ERROR}
+
+    measured = select_measured_ai(patient_slice, ctx)
+    if measured.unavailable is not None:
+        return {"ai": AIDelivery.UNAVAILABLE, "ai_unavailable_reason": str(measured.unavailable)}
+    state, _payload = measured_ai_state(measured)
+    if state == "error":
+        return {"ai": AIDelivery.ERROR}
+    return {"ai": AIDelivery.SHOWN}
+
+
 def exposed_field_ids(
     patient_slice: PatientSlice, ai_payload_keys: Iterable[str] = ()
 ) -> frozenset[str]:

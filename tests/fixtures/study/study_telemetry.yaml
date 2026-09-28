@@ -1,0 +1,22 @@
+schema_version: "2"
+study_id: fixture_telemetry
+dataset: synthetic
+patient_ids: [synth_001, synth_002, synth_003]
+time_unit: minutes
+timepoints: [0, 60, 180]
+randomisation:
+  master_seed: 123456
+  block_length: 1
+  block_sequence: [start, other]
+ai_intervention:
+  model_id: demo_v0
+  model_system_version: synthetic_demo_v0
+  prediction_artifact_sha256: 90c5448853d63e90b68310a26ba5bab110070a6334e94e0e07c64d6f2d245ca9
+  presentation_version: ai_panel_v1
+  intervention_build_id: fixture_build
+clinician_facing:
+  prohibited_fields: []
+telemetry:
+  inactivity_threshold_seconds: 60
+  panel_viewport_threshold: 0.05
+  panel_viewed_threshold_seconds: 2.0

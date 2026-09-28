@@ -60,10 +60,18 @@ T_MINUTES = (0.0, 60.0, 180.0)
 FIRST_T = 0
 SECOND_T = 1
 CHROMES = ("epic", "dense")
+# S11j: preflight FAILs a Phase 2 study without telemetry.
+TELEMETRY = {
+    "inactivity_threshold_seconds": 60,
+    "panel_viewport_threshold": 0.05,
+    "panel_viewed_threshold_seconds": 2.0,
+}
 
 
 def _study_dict(study_fixture_dir: Path) -> dict[str, Any]:
-    return yaml.safe_load((study_fixture_dir / "study_randomised.yaml").read_text())
+    data = yaml.safe_load((study_fixture_dir / "study_randomised.yaml").read_text())
+    data["telemetry"] = TELEMETRY
+    return data
 
 
 def _study(study_fixture_dir: Path, **changes: Any) -> StudyConfig:

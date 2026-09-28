@@ -5,7 +5,14 @@
      data-t-minutes="{{ patient_slice.t_minutes }}"
      data-chrome="{{ chrome }}"
      data-visit-kind="{{ visit_kind }}"
-     data-observation-mode="{{ observation_mode }}">
+     data-observation-mode="{{ observation_mode }}"
+     {#- S11j/S11k: only a telemetry pinned render carries its identity;
+         static/telemetry.js stays silent without it. -#}
+     {%- if render_id %}
+     data-render-id="{{ render_id }}"
+     data-telemetry-url="{{ telemetry_url }}"
+     data-viewport-threshold="{{ viewport_threshold }}"
+     {%- endif %}>
     {{ summary_html | safe }}
     {#- S11i: practice is always labelled; it never counts toward the study. -#}
     {% if observation_mode == "practice" %}
