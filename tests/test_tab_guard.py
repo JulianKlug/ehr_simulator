@@ -769,3 +769,32 @@ def test_lifecycle_row_untouched_by_guard(th: LifecycleHarness) -> None:
     assert after["arm_assignments"] == before["arm_assignments"]
     with th.conn() as conn:
         assert lifecycle_dao.fetch(conn, th.clinician_id, patient_id).state is CaseState.ACTIVE
+
+
+def test_revisit_conflict_does_not_flag_the_primary_row(th: LifecycleHarness) -> None:
+    """Review fix: the flag belongs to the conflict's own (t_index, visit_kind)."""
+    with _tab(th) as client:
+        patient_id, render_a = _open(client)
+        headers = {**HX, **_owner(TAB_A, render_a)}
+        _answer_all(client, patient_id, 0, headers)
+        client.post(f"/patient/{patient_id}/timepoint/0/advance", headers=headers)
+        revisit = _page(client, patient_id, 0)
+        assert _claim(client, patient_id, TAB_B, revisit).status_code == HTTP_CONFLICT
+
+    with th.conn() as conn:
+        variables = load_case_variables(conn, th.clinician_id, patient_id)
+    assert variables is not None
+    assert [o.tab_conflict_detected for o in variables.observations] == [False, False, False]
+
+
+def test_unmigrated_db_backup_refuses(tmp_path: Path) -> None:
+    """Review fix: no schema version → no backup, bound or not."""
+    db = tmp_path / "plain.db"
+    conn = connect(db)
+    conn.execute("CREATE TABLE t (x INTEGER)")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(BackupIdentityError, match="schema version"):
+        create_backup(db, tmp_path / "backups")
+    assert not (tmp_path / "backups").exists() or not any((tmp_path / "backups").iterdir())

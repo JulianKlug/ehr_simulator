@@ -7,7 +7,8 @@
 //                                                     └──► 409 refused
 //   granted: every htmx request carries X-Ehrsim-Tab-Id / X-Ehrsim-Render-Id,
 //            heartbeat.js asks tabHeaders(), the pause form gets hidden fields
-//   refused: blocking notice, answer/advance/pause cancelled; Retry, focus
+//   pending/refused: answer fieldsets, advance and pause are disabled (and any
+//            write is cancelled); refused adds a blocking notice; Retry, focus
 //            and becoming visible claim again
 //   pagehide ──► sendBeacon release (the server ignores a stale render's)
 //
@@ -20,6 +21,8 @@
 
     const VIEW_ID = "patient-view";
     const PAUSE_FORM_SELECTOR = "form.case-pause";
+    // Every control that can write; the guard only re-enables what it disabled.
+    const CONTROL_SELECTOR = "#questions-pane fieldset, #advance-btn, .case-pause-btn";
     const NOTICE_CLASS = "tab-conflict";
     const RETRY_ACTION = "tab-retry";
     const TAB_HEADER = "X-Ehrsim-Tab-Id";
@@ -80,9 +83,22 @@
         return el;
     }
 
+    function lockControls(view, locked) {
+        view.querySelectorAll(CONTROL_SELECTOR).forEach(function (el) {
+            if (locked && !el.disabled) {
+                el.disabled = true;
+                el.dataset.tabLocked = "true";
+            } else if (!locked && el.dataset.tabLocked) {
+                el.disabled = false; // a server-locked control is never ours to enable
+                delete el.dataset.tabLocked;
+            }
+        });
+    }
+
     function apply(view) {
         const state = tabState(view.dataset.renderId);
         view.dataset.tabState = state;
+        lockControls(view, state !== GRANTED);
         const existing = view.querySelector("." + NOTICE_CLASS);
         if (state === REFUSED) {
             notice(view).hidden = false;

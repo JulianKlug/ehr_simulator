@@ -106,7 +106,7 @@ def create_backup(
     mode callers) must equal the stored identity, else nothing is created.
 
     Raises:
-        BackupIdentityError: identity mismatch, a bound DB without schema
+        BackupIdentityError: identity mismatch, a DB without schema
             version, no free destination name, or a copy that does not
             reopen with the source's identity (the copy is then removed).
     """
@@ -118,7 +118,7 @@ def create_backup(
                 f"database {db_path} belongs to study {identity.study_id!r}, "
                 f"not {expected_study_id!r}; no backup written"
             )
-        if identity.study_id is not None and identity.schema_version is None:
+        if identity.schema_version is None:
             raise BackupIdentityError(f"database {db_path} has no schema version; no backup")
 
         stamp = datetime.now(UTC).strftime(_STAMP_FORMAT)

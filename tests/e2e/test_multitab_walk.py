@@ -49,6 +49,9 @@ def test_second_tab_is_blocked_and_audited(
     second.goto(page.url)
     second.wait_for_selector(REFUSED)
     assert second.is_visible(NOTICE)
+    assert second.is_disabled(_first_radio(second))
+    assert second.is_disabled("#advance-btn")
+    assert not page.is_disabled(_first_radio(page))
 
     answers_before = _count(telemetry_db, "SELECT COUNT(*) FROM answers")
     second.click(_first_radio(second), force=True)
@@ -64,3 +67,4 @@ def test_second_tab_is_blocked_and_audited(
     second.click(f"{NOTICE} button")
     second.wait_for_selector(GRANTED)
     assert not second.is_visible(NOTICE)
+    assert not second.is_disabled(_first_radio(second))

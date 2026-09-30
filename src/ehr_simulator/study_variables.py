@@ -151,7 +151,7 @@ class ObservationVariables:
     pp_compliant: bool | None
     pp_determinate: bool
     integrity_warnings: tuple[str, ...]
-    tab_conflict_detected: bool = False  # S11m: a second tab was refused here
+    tab_conflict_detected: bool = False  # S11m: a second tab was refused on a primary view
 
     @property
     def intervention_failure(self) -> bool:
@@ -340,7 +340,9 @@ def _observation(
         pp_compliant=pp_compliant,
         pp_determinate=determinate,
         integrity_warnings=warnings,
-        tab_conflict_detected=any(r.t_index == t_index for r in inputs.conflict_renders),
+        tab_conflict_detected=any(
+            r.t_index == t_index and r.visit_kind == PRIMARY for r in inputs.conflict_renders
+        ),
     )
 
 
