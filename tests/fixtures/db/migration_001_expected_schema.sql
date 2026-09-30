@@ -3,7 +3,7 @@
 -- "s11b_config_version_history", 006 "s11c_randomisation_schedules", 007
 -- "s11d_case_activation", 008 "s11e_case_lifecycle", 009
 -- "s11f_case_replacements", 010 "s11h_answer_source", 011 "s11i_practice", 012
--- "s11j_browser_telemetry"); the
+-- "s11j_browser_telemetry", 013 "s11m_case_tab_leases"); the
 -- filename predates 002. The
 -- drift-check test in tests/test_db.py reads sqlite_master.sql (the exact
 -- DDL text SQLite stored) sorted by name, joins with ";\n\n", and asserts
@@ -77,6 +77,19 @@ CREATE TABLE case_replacements (
         REFERENCES arm_assignments(clinician_id, patient_id),
     FOREIGN KEY (replacement_schedule_id, replacement_case_position)
         REFERENCES randomisation_schedule_items(schedule_id, case_position)
+);
+
+CREATE TABLE case_tab_leases (
+    clinician_id  TEXT NOT NULL,
+    patient_id    TEXT NOT NULL,
+    session_id    TEXT NOT NULL REFERENCES sessions(session_id),
+    tab_id        TEXT NOT NULL,
+    render_id     TEXT NOT NULL,
+    claimed_at    TIMESTAMP NOT NULL,
+    last_seen_at  TIMESTAMP NOT NULL,
+    PRIMARY KEY (clinician_id, patient_id),
+    FOREIGN KEY (clinician_id, patient_id)
+        REFERENCES arm_assignments(clinician_id, patient_id)
 );
 
 CREATE TABLE clinicians (

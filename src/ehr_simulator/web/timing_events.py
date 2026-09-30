@@ -173,13 +173,16 @@ def record_render(
     render_id: str,
     visit_kind: VisitKind,
     ai_delivery: dict[str, str],
+    tab_guard: bool = False,
 ) -> None:
     """S11j: one ``timepoint.render`` after a successful telemetry render.
 
     ``ai_delivery`` is the S11l evidence of what the AI surface showed
     (``{"ai": "shown"}``, ``{"ai": "unavailable", "ai_unavailable_reason":
-    "missing_row"}``, …).
+    "missing_row"}``, …). S11m: a guarded render adds ``tab_guard: true``
+    (its tab must claim the case before it may write or report).
     """
+    guard = {"tab_guard": True} if tab_guard else {}
     events.append(
         conn,
         app_state=app_state,
@@ -188,6 +191,6 @@ def record_render(
         patient_id=patient_id,
         timepoint=float(t_minutes),
         kind=RENDER_KIND,  # type: ignore[arg-type]
-        payload={"t_index": t_index, "visit_kind": str(visit_kind), **ai_delivery},
+        payload={"t_index": t_index, "visit_kind": str(visit_kind), **ai_delivery, **guard},
         render_id=render_id,
     )

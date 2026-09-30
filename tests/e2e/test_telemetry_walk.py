@@ -54,7 +54,8 @@ def _rows(db: Path, render_id: str) -> list[tuple[str, dict, str]]:
     try:
         rows = conn.execute(
             "SELECT kind, payload_json, tab_id FROM events "
-            "WHERE render_id = ? AND tab_id IS NOT NULL ORDER BY client_mono_ms, client_seq",
+            "WHERE render_id = ? AND tab_id IS NOT NULL AND kind NOT LIKE 'tab.%' "
+            "ORDER BY client_mono_ms, client_seq",
             (render_id,),
         ).fetchall()
     finally:

@@ -91,6 +91,12 @@ EventKind = Literal[
     "panel.viewport",
     "panel.open",
     "panel.close",
+    # S11m tab ownership audit (``tab_id`` = the tab concerned, ``render_id``
+    # = its render; categorical ``reason`` payload only).
+    "tab.claimed",
+    "tab.released",
+    "tab.conflict",
+    "tab.lease_expired",
 ]
 EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 
@@ -130,6 +136,28 @@ def _check_kind(kind: str) -> None:
         raise ValueError(f"unknown event kind {kind!r}")
 
 
+#: S11m: operational identity that must never enter an event payload.
+PROHIBITED_PAYLOAD_KEY = "name_normalized"
+
+
+def _check_payload(payload: Any) -> None:
+    """Refuse the normalised clinician name at any depth (S11m).
+
+    ``{"a": [{"name_normalized": "x"}]}`` raises; the row's ``clinician_id``
+    is the only clinician identity an event may carry.
+    """
+    if isinstance(payload, dict):
+        if PROHIBITED_PAYLOAD_KEY in payload:
+            raise ValueError(f"event payload must not contain {PROHIBITED_PAYLOAD_KEY!r}")
+        for value in payload.values():
+            _check_payload(value)
+        return
+
+    if isinstance(payload, list | tuple):
+        for value in payload:
+            _check_payload(value)
+
+
 def _check_mono(client_mono_ms: float | None) -> None:
     if client_mono_ms is None:
         return
@@ -149,6 +177,7 @@ def append(
     client_ts: str | None = None,
     client_seq: int | None = None,
     render_id: str | None = None,
+    tab_id: str | None = None,
     app_state: Any = None,
     commit: bool = True,
 ) -> int:
@@ -160,8 +189,12 @@ def append(
     writes and the behavioral events of one advance into a single atomic
     ``conn.commit()`` (see ``web/gating.py``); a failed batch is discarded
     whole by ``conn.rollback()``.
+
+    S11m: ``tab_id`` names the tab of a ``tab.*`` audit row; a payload
+    holding ``name_normalized`` anywhere raises before the insert.
     """
     _check_kind(kind)
+    _check_payload(payload)
 
     try:
         cursor = conn.execute(
@@ -175,7 +208,7 @@ def append(
                 _canonical(payload),
                 client_ts,
                 client_seq,
-                None,
+                tab_id,
                 render_id,
                 None,
             ),
@@ -206,6 +239,7 @@ def append_browser_batch(
     """
     for row in rows:
         _check_kind(row.kind)
+        _check_payload(row.payload)
         _check_mono(row.client_mono_ms)
 
     written = 0
@@ -236,3 +270,4 @@ def append_browser_batch(
     if written and app_state is not None:
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
     return written
+

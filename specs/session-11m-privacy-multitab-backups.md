@@ -4,102 +4,74 @@
 
 Harden Phase 2 behavioural data collection around clinician identity, simultaneous browser tabs, and study specific backups without changing the scientific study design.
 
-Session 11m closes three implementation gaps that remain after S11a through S11l:
+Session 11m closes three gaps left after S11a through S11l:
 
-- new behavioural records must use pseudonymous clinician identity without duplicating the normalised clinician name
-- one measured case must not silently behave as if two browser tabs were one authoritative view
-- every study backup must remain attributable to its study, database schema generation, and creation time
+- new behavioural records use the pseudonymous `clinician_id` and never duplicate the normalised clinician name
+- one measured case never silently behaves as if two browser tabs were one authoritative view
+- every study backup is attributable to its study, schema generation and creation time
 
-S11a through S11l are assumed complete. In particular, S11j provides `tab_id` and browser monotonic telemetry, S11k derives per tab panel exposure, and S11l leaves multi tab observations explicitly unresolved for S11m.
+S11a through S11l are complete. S11j provides `events.tab_id` / `render_id` / `client_mono_ms` (migration 12) and the render bound telemetry intake; S11k derives per tab panel exposure; S11j/S11k/S11l already report an observation with more than one contributing tab as `telemetry_status = multi_tab` (no seconds, no viewed).
 
-This specification is drafted against repository `main` after S11g through S11i were merged. The expected S11j migration adds `events.tab_id` and `events.client_mono_ms`; use the next free migration number at implementation time rather than renumbering existing migrations.
+## Review revisions (2026-09-28)
+
+The first draft was written before S11j–l landed. Changes against the implemented code:
+
+1. **Status name.** The implemented conflict status is `multi_tab` (`behavioral_timing.TelemetryStatus.MULTI_TAB`); `multi_tab_conflict` is dropped.
+2. **No `intervention.*` events exist.** S11l derives delivery from the `timepoint.render` `ai` payload plus the AI `panel.mount` inside a telemetry batch. "Mounted acknowledgements" are therefore covered by the telemetry guard.
+3. **Migration 13** (next free number).
+4. **`tab.*` events must not read as browser telemetry.** `db.telemetry.load_telemetry_rows` selects `tab_id IS NOT NULL`; a `tab.*` row carrying `tab_id` would enter the S11j timeline and flip observations to `multi_tab`. The reader now selects the closed browser/panel kind set.
+5. **The lease binds a render, not only a session.** A duplicated browser tab copies `sessionStorage` and so shares the tab id; an in-tab navigation sends the old page's release beacon, which can land after the new page's claim. Leases hold `(tab_id, render_id)`; writes carry both; a release only removes the lease of the render that sends it.
+6. **One heartbeat.** Lease refresh rides on the existing S11e `POST /case/{pid}/heartbeat` instead of a second `/tab/heartbeat` timer.
+7. **No release on blur/hidden.** Releasing on blur hands ownership to any other tab the moment the clinician glances at another window, and makes the owner lose its own case. A hidden owner keeps its lease while its heartbeat lands; the TTL covers vanished tabs; `pagehide` and logout release. Pause, completion and incomplete need no release call: a lease whose session is no longer the case's open session, or whose case is not `active`, is void.
+8. **Telemetry acceptance = the render was granted a claim**, not "currently holds the lease". Otherwise the owner's own `pagehide` exit beacon can be refused after its release beacon and the owner's observation turns `incomplete`. `telemetry.js` holds a render's events until its claim resolves (an early flush would otherwise be refused and reported as a gap) and drops the events of a refused render.
+9. **Guard scope.** Only a render of a measured `phase2_randomized` case whose pinned configuration carries `telemetry` is guarded: tab ids exist only there, and Phase 2 preflight already requires `telemetry`. The render payload records `tab_guard: true`, so the intake knows which renders need a claim; unguarded renders keep S11j behaviour (late events after completion, legacy data).
+10. **Server restart is transparent.** Startup clears leases; a live tab's next heartbeat or write finds no lease and acquires it under the normal claim rules instead of being refused forever.
+11. **`tab_conflict_detected`** is derived from `tab.conflict` events whose `render_id` belongs to the observation.
+12. **Refused renders leave the derivation.** A refused tab's render has a `timepoint.render` row but no accepted telemetry; S11j would count it as an unobserved render and turn the owner's observation `incomplete`. The S11l reader drops renders that have a `tab.conflict` and no `tab.claimed`.
+13. **Backup collisions get a suffix, not a refusal.** Implementation showed two shutdown backups within one second (a restart); refusing lost the second backup.
 
 ## Core invariants
 
 1. `clinician_id` remains the routine research identifier for clinicians.
-2. `clinicians.name_normalized` remains operational identity data and is not copied into new behavioural event payloads.
-3. Historical events are not rewritten solely to remove old `name_normalized` payloads.
-4. The optional clinician name keyfile remains an explicit operator action and remains separate from routine research outputs.
-5. At most one browser tab may own the primary measured view of one active clinician/patient case at a time.
-6. A second tab can never silently save answers, advance, keep the lifecycle alive, or contribute authoritative primary telemetry as if it were the owning tab.
-7. A detected tab conflict is auditable even when browser behaviour makes perfect prevention impossible.
-8. Tab conflict handling never changes randomised arm, case configuration provenance, lifecycle history, or ITT assignment.
-9. Revisit telemetry remains distinguishable from the primary measured view and never takes ownership away from the active primary view.
-10. Practice observations are not made part of the measured multi tab rule in S11m.
-11. Study mode backups are isolated by `study_id` and carry schema version and UTC creation time in their identity.
-12. A backup operation never silently relabels a database as another study.
-13. Retention and deletion remain operator/study policy. S11m adds no automatic pruning.
+2. `clinicians.name_normalized` remains operational identity data and is never written into a new event payload.
+3. Historical events are not rewritten to remove old `name_normalized` payloads.
+4. The optional clinician name keyfile remains an explicit operator action, separate from routine research outputs.
+5. At most one browser tab holds the lease of one active measured clinician/patient case at a time.
+6. A tab without the lease can never save answers, advance, pause, keep the lifecycle alive, or contribute accepted telemetry for a guarded render.
+7. A refused claim is auditable (`tab.conflict`) even though a second tab may briefly display the page before its claim is refused.
+8. Tab handling never changes the randomised arm, configuration provenance, lifecycle history or ITT assignment.
+9. A revisit render claims like any other render of the case, so it never takes the lease from another live tab.
+10. Practice cases are not guarded in S11m.
+11. Study mode backups are isolated by `study_id` and carry schema version and UTC creation time in their path.
+12. A backup never silently relabels a database as another study, and never overwrites an existing file.
+13. Retention and deletion remain operator policy. S11m adds no pruning.
 
 ## Existing behaviour being replaced
 
-### Behavioural identity
-
-The current login route appends:
-
-```
-kind = "clinician.login"
-payload = {"name_normalized": ...}
-```
-
-although the event row already contains `clinician_id`.
-
-S11m removes that duplication for new writes. The `clinicians` table remains unchanged because the normalised name is still needed for login lookup and explicit keyfile generation.
-
-### Multiple tabs
-
-S11j makes separate tabs observable but deliberately does not choose a conflict policy. S11k and S11l therefore derive per tab results first and mark an observation conflicted/indeterminate when more than one tab contributes in a way that cannot safely be combined.
-
-S11m adds the ownership rule that prevents new Phase 2 primary writes and authoritative telemetry from multiple tabs.
-
-### Backups
-
-The current backup helper writes files such as:
-
-```
-ehr_simulator_20260927T140000Z.db
-```
-
-into one backup directory. The backup itself contains the database tables, but the filename and directory do not make study identity or schema generation explicit.
-
-S11m makes study backup identity explicit while preserving the existing online SQLite backup mechanism.
+- `POST /login` appends `clinician.login` with payload `{"name_normalized": ...}` although the row already carries `clinician_id`.
+- Two tabs of the same case both save answers, advance, heartbeat and post telemetry; derivation reports `multi_tab` after the fact.
+- `db.backup.create_backup` writes `ehr_simulator_<UTC>.db` into one flat directory, whatever the study.
 
 ## In scope
 
 ### Clinician identity privacy
 
-For new events:
+- Successful login appends `clinician.login` with payload `{}`.
+- `events.append` and `events.append_browser_batch` refuse (`ValueError`, before any insert) a payload containing the key `name_normalized` at any depth of nested dicts/lists.
+- No migration rewrites historical event JSON.
+- `clinicians(clinician_id, name_normalized, …)` and the keyfile format `clinician_id,name_normalized` (mode `0600`) are unchanged.
 
-- `clinician_id` is carried in the existing event column
-- `payload_json` must not contain `name_normalized`
-- browser telemetry must not contain typed names, answer values, free text, raw clinical values, or browser fingerprint attributes
+### Guarded renders
 
-Change successful login event payload to `{}` unless a later categorical non identifying field is genuinely required.
+A render is **guarded** when all hold:
 
-Add a defensive event payload validation rule that refuses `name_normalized` anywhere in a newly appended payload. The check should recurse through dict/list payload structures so a future producer cannot reintroduce the field under a nested object.
+- study mode, and the case resolves to `observation_mode = measured` with an `arm_source = phase2_randomized` assignment
+- the case's pinned configuration has a `telemetry` block (so the render carries a `render_id`)
+- the lifecycle is `active`
 
-Do not add a migration that rewrites historical event JSON.
+A guarded render's `timepoint.render` payload gains `"tab_guard": true`; `#patient-view` gains `data-tab-claim-url` and `data-tab-release-url`. Nothing else in the payload changes.
 
-The existing clinician table remains:
-
-```
-clinicians(clinician_id, name_normalized, ...)
-```
-
-The existing keyfile contract remains:
-
-```
-clinician_id,name_normalized
-```
-
-with POSIX mode `0600` where supported.
-
-### Multi tab ownership model
-
-Add a server authoritative current lease for the active measured case.
-
-The lease is an operational concurrency primitive, not the research audit record. Audit history is stored in append only events.
-
-Expected table:
+### Lease table (migration 13)
 
 ```
 CREATE TABLE case_tab_leases (
@@ -107,6 +79,7 @@ CREATE TABLE case_tab_leases (
     patient_id    TEXT NOT NULL,
     session_id    TEXT NOT NULL REFERENCES sessions(session_id),
     tab_id        TEXT NOT NULL,
+    render_id     TEXT NOT NULL,
     claimed_at    TIMESTAMP NOT NULL,
     last_seen_at  TIMESTAMP NOT NULL,
     PRIMARY KEY (clinician_id, patient_id),
@@ -115,351 +88,249 @@ CREATE TABLE case_tab_leases (
 );
 ```
 
-This is expected to be the next migration after the S11j event column migration. If another migration lands first, use the next free number.
-
-`case_tab_leases` is intentionally mutable/current state:
-
-- same tab may refresh `last_seen_at`
-- release removes the row
-- a stale lease may be replaced atomically
-- startup may clear all rows because a lease from a prior server process cannot be assumed live
-
-Research auditability comes from events, not from retaining old lease rows.
+Mutable operational state, not research record: refresh updates `last_seen_at` (and `render_id` on a same tab claim), release deletes, a stale or void lease is replaced, lifespan startup deletes every row. Audit history lives in `tab.*` events. Timestamps come from `app.state.clock`.
 
 ### Lease timing
 
-Use a platform constant rather than a study configuration field:
+Platform constants (`web/tab_guard.py`), not study configuration, never in `config_hash`:
 
 ```
-TAB_LEASE_HEARTBEAT_SECONDS = 15
-TAB_LEASE_TTL_SECONDS = 45
+TAB_LEASE_TTL_SECONDS = 3 * HEARTBEAT_INTERVAL_SECONDS   # 45
 ```
 
-The TTL is an operational safety timeout, not an exposure definition and does not enter `config_hash`.
-
-A focused/visible primary measured page refreshes its lease at the heartbeat cadence.
-
-On `visibilitychange`, blur, `pagehide`, pause, completion, incomplete transition, or logout, the browser/server should release the lease best effort where the transition is known.
-
-If a browser disappears without releasing, another tab may claim only after the existing lease is stale under server time.
+A lease is **stale** when `now - last_seen_at > TAB_LEASE_TTL_SECONDS`, and **void** when its `session_id` is not the case's open session or the lifecycle is not `active`. Stale and void leases are treated as absent by every decision below.
 
 ### Lease service
 
-Add a small service/DAO boundary, for example:
+Layers: `db/tab_leases.py` (sole writer of `case_tab_leases`, pure SQL) → `web/tab_guard.py` (ownership decisions + `tab.*` events). All decisions run under `BEGIN IMMEDIATE`, one commit.
+
+`claim(render, tab_id)` — the render must be a guarded render of this clinician/patient in the case's open session:
+
+| lease | outcome | event |
+|---|---|---|
+| absent | insert, grant | `tab.claimed {reason: initial}` |
+| stale | replace, grant | `tab.lease_expired {reason: ttl}` (old tab) + `tab.claimed {reason: reclaim}` |
+| void | replace, grant | `tab.claimed {reason: initial}` |
+| same tab, same render | refresh, grant | none |
+| same tab, other render | move to this render, grant | `tab.claimed {reason: navigate}` |
+| other live tab | refuse | `tab.conflict {reason: live_other_tab}` |
+
+`require_owner(tab_id, render_id)` — used by every guarded write: a live lease with both ids → refresh, allow. A lease that is absent, stale or void → acquire exactly as `claim` would (restart recovery). Anything else → refuse (`TabOwnershipError`), nothing written except `tab.conflict` when the refusal is a live other tab.
+
+`release(tab_id, render_id)` — deletes the lease only when both ids match; otherwise a no-op. Records `tab.released {reason}`. Idempotent.
+
+`release_all(clinician_id)` — logout; `tab.released {reason: logout}` per removed lease.
+
+Browser supplied clinician, arm, session or configuration is never trusted; session and patient come from the server's render row.
+
+### Routes
 
 ```
-claim_case_tab(...)
-refresh_case_tab(...)
-release_case_tab(...)
-require_case_tab_owner(...)
+POST /case/{patient_id}/tab/claim     JSON {tab_id, render_id}
+POST /case/{patient_id}/tab/release   JSON {tab_id, render_id, reason}   (sendBeacon)
 ```
 
-All ownership decisions use the database row under `BEGIN IMMEDIATE` so two claim requests cannot both win.
+- claim granted: `204`; refused (live other tab, unknown/foreign/unguarded render, case not active): `409`; malformed body: `422`; unknown clinician: `401` (a `fetch()` must not follow the login redirect)
+- release: `204` always for a known clinician (no-op on mismatch); `422` malformed; `401` unknown clinician
+- refusal bodies reveal neither the arm nor the other tab
 
-Claim behaviour:
+### Protected writes
 
-1. resolve the authenticated clinician from the existing cookie
-2. require a measured Phase 2 case for that clinician/patient
-3. require the case lifecycle to be active
-4. require the supplied `session_id` to be the current open session for the case
-5. no existing lease -> insert and grant
-6. existing lease for same `tab_id` and same session -> refresh and grant idempotently
-7. existing live lease for another tab -> refuse with conflict
-8. existing stale lease -> record expiry, replace it, and grant
+For a guarded case, these requests must carry the owner identity — headers `X-Ehrsim-Tab-Id` and `X-Ehrsim-Render-Id`, or (plain form posts) form fields `ehrsim_tab_id` / `ehrsim_render_id`:
 
-A browser supplied clinician ID, arm, configuration version, or session for another case is never trusted.
+- `POST /patient/{pid}/timepoint/{t}/answer`
+- `POST /patient/{pid}/timepoint/{t}/advance`
+- `POST /case/{pid}/heartbeat`
+- `POST /case/{pid}/pause`
 
-### Public routes
+`require_owner` runs after the existing lifecycle `check`, before any write or `touch`. A refusal is `409` with header `X-Ehrsim-Tab: conflict` and no state change (no answer, progress, `last_seen_at` or lifecycle write). Missing identity on a guarded case is refused the same way: omitting the headers never bypasses the guard.
 
-Add measured case routes equivalent to:
+On the `200` advance, the owner's lease moves to the new render inside the same request (the lease already proves ownership), so the next write from the swapped view is accepted without waiting for a claim round trip.
 
-```
-POST /case/{patient_id}/tab/claim
-POST /case/{patient_id}/tab/heartbeat
-POST /case/{patient_id}/tab/release
-```
+`POST /case/start` and `POST /case/{pid}/resume` are not guarded (no render exists yet); the redirected page claims.
 
-Request body contains only the S11j `tab_id` and, where useful, the current session identifier already rendered by the server.
+### Telemetry intake
 
-Responses:
+`record_batch` additionally refuses (`409`, nothing written) a batch containing an event whose render payload has `tab_guard: true` unless a `tab.claimed` event exists with the same `render_id` and `tab_id`. The check is "ever granted", not "holds the lease now", so a granted render's late exit and its `pagehide` beacon are accepted after release or completion.
 
-- claim granted or idempotent same tab claim: `204`
-- live other tab owns the case: `409`
-- stale/terminal/wrong case or session: `409`
-- unauthenticated: existing login redirect/auth failure behaviour
-- non Phase 2 or practice route: the guard is not applied by this session
+`db.telemetry.load_telemetry_rows` selects only the S11j/S11k browser and panel kinds.
 
-The conflict response body must not reveal the randomised arm or the other tab's browser details.
+### Client guard (`static/case_tab_guard.js`)
 
-### Client guard
+For a view with `data-tab-claim-url`:
 
-Add a small client controller, for example `static/case_tab_guard.js`.
+1. marks `#patient-view` `data-tab-state="pending"`; answer controls, the advance button and the pause button are disabled until granted
+2. claims with the S11j tab id and the view's `render_id`
+3. `204` → `granted`, controls re-enabled
+4. `409` → `refused`: renders a blocking notice ("This case is open in another tab or window. Close it, then press Retry."), keeps controls disabled; Retry, `focus` and `visibilitychange → visible` re-claim
+5. adds the owner headers to every htmx request (`htmx:configRequest`) and to `heartbeat.js`; fills the pause form's hidden fields
+6. any write answered `409` with `X-Ehrsim-Tab: conflict` → `refused`
+7. `pagehide` → `sendBeacon` release (`reason: pagehide`)
+8. `htmx:afterSwap` of `#patient-view` → state of the new render (`granted` when the advance moved the lease — the guard re-claims idempotently to confirm)
 
-For a primary measured view:
+`window.ehrsim.tabState(renderId)` returns `granted|pending|refused|unguarded`. `telemetry.js` sends only events whose render is `granted` or `unguarded`, keeps `pending` ones queued, and drops `refused` ones without reporting a gap.
 
-1. page controls that can mutate measured state start disabled/pending
-2. the controller obtains the stable S11j tab ID
-3. it claims the case lease
-4. only after a successful claim are answer autosave, advance, lifecycle heartbeat, pause, and authoritative primary telemetry enabled
-5. a `409` renders a blocking conflict state and leaves those controls disabled
-6. visibility/focus return may revalidate ownership before resuming writes
-
-A second already rendered tab may briefly contain clinical HTML before its asynchronous claim is refused. S11m therefore does not claim perfect prevention of duplicate display. That unavoidable race must be audited and the second tab must not become an authoritative writer or telemetry source.
-
-### Protected measured writes
-
-For primary measured Phase 2 cases, require ownership for:
-
-- answer upsert/clear
-- advance
-- lifecycle heartbeat
-- pause
-- primary browser telemetry batches
-- primary panel exposure events
-- browser intervention mounted acknowledgements
-
-Resume creates or reopens the server session first; the resumed page must then claim a tab before ordinary measured writes continue.
-
-Start case itself is not tab owned because no case page lease exists before activation. The redirected first case page claims ownership.
-
-Revisit GETs remain read only. Revisit telemetry may be retained with `visit_kind=revisit`, but it must never satisfy the primary owner requirement or alter primary timing/PP derivation.
+A second tab may show clinical HTML until its claim is refused. S11m does not claim perfect display prevention; the refusal is audited and the tab never becomes a writer or a telemetry source.
 
 ### Event taxonomy
 
-Add at least:
-
-- `tab.claimed`
-- `tab.released`
-- `tab.conflict`
-- `tab.lease_expired`
-
-Use the S11j `tab_id` event column for the claimant/current tab.
-
-Payloads are categorical only. Suggested fields:
+Add to `EventKind`: `tab.claimed`, `tab.released`, `tab.conflict`, `tab.lease_expired`. `events.append` gains `tab_id`; `tab.*` rows carry `session_id`, `patient_id`, `timepoint`, `render_id` of the render concerned and `tab_id` of the tab concerned (for `tab.lease_expired`, the expired tab). Payloads are categorical only:
 
 ```
-tab.claimed:       {"reason": "initial|reclaim"}
-tab.released:      {"reason": "hidden|blur|pagehide|pause|complete|incomplete|logout|explicit"}
+tab.claimed:       {"reason": "initial|reclaim|navigate"}
+tab.released:      {"reason": "pagehide|logout"}
 tab.conflict:      {"reason": "live_other_tab"}
 tab.lease_expired: {"reason": "ttl"}
 ```
 
-Do not include clinician name, answer values, AI values, clinical values, or user agent/fingerprint data.
-
-The current owning tab ID need not be copied into another event's payload because it is already recoverable from accepted owner events. If implementation needs it for debugging, use only the opaque tab ID, never browser fingerprint attributes.
+No clinician name, answer, AI or clinical value, user agent or fingerprint data.
 
 ### Final multi tab derivation rule
 
-S11m finalises the S11j/S11k/S11l conflict rule.
+For each observation (clinician × patient × `t_index` × `visit_kind`):
 
-For each primary observation:
+- accepted telemetry from one tab → derive normally (S11j/S11k/S11l unchanged)
+- accepted telemetry from more than one tab (legacy S11j data, or sequential owners after a stale handover) → `multi_tab`, never summed (unchanged)
+- `tab_conflict_detected = true` when any `tab.conflict` event names a render of the observation's `(t_index, visit_kind)`; the owner's telemetry keeps its own status
 
-- accepted research events from one authoritative owner tab only -> derive normally
-- a refused second tab claim with no accepted competing primary telemetry -> set `tab_conflict_detected=true`, but the owner's telemetry may remain `complete`
-- accepted overlapping primary research telemetry from multiple tabs, an ownership gap that cannot be resolved, or legacy S11j data with multiple contributing tabs -> `telemetry_status=multi_tab_conflict`
-- never sum simultaneous tabs to manufacture foreground, active, panel, or AI exposure duration
-
-A conflict event by itself is not proof that the valid owner's measured telemetry is unusable.
-
-S11l conservative PP behaviour still applies when telemetry status is actually `multi_tab_conflict`/indeterminate.
+`behavioral_timing.ObservationTiming` and `panel_exposure.PanelSummary` are unchanged; `tab_conflict_detected` is added to `study_variables.ObservationVariables` (read from `tab.conflict` rows via a new `db.telemetry.load_conflict_render_ids`). A conflict event alone is not proof that the owner's telemetry is unusable, and it does not change PP.
 
 ### Backup identity
 
-Keep SQLite `Connection.backup()` as the copy mechanism.
-
-Before a study mode backup:
-
-1. open/read the source database identity
-2. require exactly the expected `study_id` when the caller is study aware
-3. read the current schema migration version from `schema_migrations`
-4. refuse if identity is missing/mismatching or schema state is invalid
-5. copy the database
-6. open the copied database read only and verify the same study identity and schema version
-
-For a study bound database, default destination becomes:
+`db/backup.py` keeps `Connection.backup()` and gains study identity:
 
 ```
-<backup_root>/<study_id>/study_<study_id>_schema_<schema_version>_<UTC>.db
+create_backup(db_path, backup_root, *, expected_study_id=None) -> Path
 ```
 
-Example:
+1. open the source; read `study_identity` (`study_identity.fetch`) and `MAX(version)` from `schema_migrations`
+2. `expected_study_id` given and ≠ stored (or stored is `None`) → `BackupIdentityError`, nothing created
+3. schema version missing → `BackupIdentityError`
+4. bound DB → `<backup_root>/<study_id>/study_<study_id>_schema_<N>_<UTC>.db`; unbound DB → legacy `<backup_root>/ehr_simulator_<UTC>.db`
+5. destination created exclusively (`O_EXCL`); a taken name moves to the next `_<n>` suffix (`…Z_2.db`), never overwritten — two shutdown backups inside one second (a quick restart) must both survive
+7. the copy is switched to `journal_mode=DELETE`: one self-contained file, no `-wal`/`-shm` sidecars
+6. copy; reopen the copy read only (`mode=ro` URI); its identity and schema version must equal the source's; else delete the copy and raise `BackupIdentityError`
 
-```
-data/backups/icu_ai_phase2/study_icu_ai_phase2_schema_13_20260927T140000Z.db
-```
+Example: `data/backups/icu_ai_phase2/study_icu_ai_phase2_schema_13_20260927T140000Z.db`.
 
-The internal copied `study_identity` and `schema_migrations` tables remain the authoritative identity. The path makes that identity visible operationally.
-
-For a non study/unbound database, preserve the existing legacy backup naming/placement behaviour unless a later general migration deliberately changes it.
-
-An explicit `--backup-dir` is treated as a backup root; study backups still go into its `<study_id>/` child directory.
-
-Never place two studies' Phase 2 backup files in one undifferentiated study directory.
-
-Do not copy or generate the clinician name keyfile as part of backup.
-
-### Backup collisions and failures
-
-A backup destination that already exists must not be silently overwritten.
-
-If verification of the copied backup fails:
-
-- delete the failed destination when safe
-- log a failure without clinical/identity mapping data
-- return/raise failure to the operator
-
-Shutdown backup failure should retain the existing explicit application logging behaviour. It must not rewrite the source DB.
+`--backup-dir` (serve and backup) is the backup root. The lifespan shutdown passes `expected_study_id=app.state.study_id` in study mode; its failure keeps the existing `db.backup.failed` logging and never writes the source. `backup` CLI reports the path and, for a bound DB, the study and schema version. Logs carry paths and ids, never clinical rows or the name mapping. No keyfile is ever copied or generated.
 
 ## Database/schema changes
 
-Expected one migration after S11j:
-
-- add `case_tab_leases`
-- no change to `clinicians`
-- no rewrite of historical `events`
-- no backup metadata table in the live research database
-
-S11j's expected `events.tab_id` and `events.client_mono_ms` columns are prerequisites.
+- migration 13 `s11m_case_tab_leases`: `case_tab_leases`
+- no change to `clinicians`, no rewrite of `events`, no backup table
 
 ## Configuration changes
 
-None.
-
-Multi tab lease timing is an operational constant, not a study parameter.
-
-Backup identity is derived from the bound database and schema migrations, not from new study configuration.
+None. Lease timing is a platform constant; backup identity comes from the DB.
 
 ## Public API/route changes
 
-New internal clinician facing routes:
-
-- `POST /case/{patient_id}/tab/claim`
-- `POST /case/{patient_id}/tab/heartbeat`
-- `POST /case/{patient_id}/tab/release`
-
-Existing measured mutation routes gain the S11m owner guard.
-
-CLI `backup` keeps its command name. Its output path changes for a study bound database to the study isolated path above.
+- new `POST /case/{pid}/tab/claim`, `POST /case/{pid}/tab/release`
+- answer, advance, heartbeat, pause gain the owner guard on guarded cases
+- `/telemetry/events` refuses unclaimed guarded renders
+- CLI `backup` output path for a bound DB changes as above
 
 ## Failure behaviour
 
-- event payload containing `name_normalized` -> reject before insert
-- second live tab claim -> `409`, record `tab.conflict`, no measured write ownership
-- non owner answer/advance/heartbeat/primary telemetry -> `409`, no state mutation
-- stale lease -> expire and replace atomically
-- server restart -> old operational leases are cleared; browser tabs must reclaim
-- missing/mismatching backup study identity -> refuse, no mislabeled backup
-- invalid schema version during backup -> refuse
-- copied backup identity mismatch -> fail and remove invalid destination where safe
-
-No failure path changes the case arm or configuration provenance.
+- payload containing `name_normalized` → `ValueError` before insert
+- live second tab claim → `409` + `tab.conflict`, no ownership
+- non owner or identity-less write on a guarded case → `409` + `X-Ehrsim-Tab: conflict`, nothing mutated
+- unclaimed guarded telemetry → `409`, nothing written
+- stale lease → expired and replaced atomically
+- server restart → leases cleared; the next heartbeat/write/claim reacquires
+- backup identity missing/mismatching, schema version missing, no free destination name, copy verification fails → `BackupIdentityError`, no (or a removed) destination
 
 ## Files expected to change
 
-- `src/ehr_simulator/db/migrations.py`
-- `src/ehr_simulator/db/events.py`
-- new `src/ehr_simulator/db/tab_leases.py`
-- new small tab ownership service module if kept separate from the DAO
-- `src/ehr_simulator/web/routes.py`
-- answer/advance/lifecycle request guards
-- S11j telemetry endpoint guard
-- `src/ehr_simulator/web/templates/_patient_view.html`
-- `src/ehr_simulator/web/static/case_tab_guard.js`
-- `src/ehr_simulator/web/static/answers.js`, `advance.js`, `heartbeat.js` integration where needed
-- `src/ehr_simulator/db/backup.py`
-- `src/ehr_simulator/web/app.py` shutdown backup call
-- `src/ehr_simulator/cli.py` backup reporting
-- schema fixture, tests, `CLAUDE.md`, checklist
+- `db/migrations.py`, `db/events.py`, new `db/tab_leases.py`, `db/telemetry.py`, `db/backup.py`, `db/exceptions.py`
+- new `web/tab_guard.py`; `web/routes.py`, `web/telemetry.py`, `web/timing_events.py` (render payload), `web/app.py` (lease clear, shutdown backup)
+- `study_variables.py`, `study_variables_reader.py`
+- templates `_patient_view.html`, `_questions_pane.html`, `base.html`; static `case_tab_guard.js`, `telemetry.js`, `heartbeat.js`, `style.css`
+- `cli.py`; schema fixture, tests, `CLAUDE.md`, checklist
 
 ## Required tests
 
 ### Clinician identity privacy
 
-1. Successful new login event stores `clinician_id` and does not store `name_normalized` in `payload_json`.
-2. `events.append()` refuses a top level `name_normalized` payload field.
-3. `events.append()` refuses nested `name_normalized` payload content.
-4. Existing historical event rows containing `name_normalized` remain readable and are not migrated.
-5. Clinician login lookup still uses `clinicians.name_normalized`.
-6. Explicit keyfile generation still returns the clinician ID/name mapping.
-7. Keyfile mode remains `0600` where supported and is not produced unless requested.
+1. New login event carries `clinician_id` and payload `{}`.
+2. `events.append` refuses a top level `name_normalized`.
+3. `events.append` refuses a nested `name_normalized` (dict in list in dict).
+4. `append_browser_batch` refuses it too, writing nothing.
+5. A historical row containing `name_normalized` stays readable after migrating.
+6. Login lookup still resolves through `clinicians.name_normalized`.
+7. Keyfile generation still maps id → name, mode `0600`, only when requested.
 
 ### Lease persistence and concurrency
 
-8. First active measured tab claim creates one lease.
-9. Same tab/session claim is idempotent and refreshes the lease.
-10. Two concurrent claim attempts cannot both become owner.
-11. Live second tab claim returns `409` and writes `tab.conflict`.
-12. Conflict event contains no clinician name, arm, answer, AI value, or clinical value.
-13. A stale lease is expired and a new tab can claim atomically.
-14. Stale replacement writes `tab.lease_expired` before/with the new ownership transition.
-15. Explicit owner release removes the current lease and is idempotent.
-16. Non owner release does not remove the valid owner's lease.
-17. Server startup clears persisted operational leases without deleting research events.
-18. Terminal/incomplete/paused case cannot hold or claim an active primary lease.
+8. First claim of a guarded render creates one lease and one `tab.claimed {initial}`.
+9. Same tab, same render claim is idempotent (no second event) and refreshes `last_seen_at`.
+10. Same tab, new render claim moves the lease (`navigate`).
+11. Two claims from different tabs: exactly one wins; the loser gets `409` and one `tab.conflict`.
+12. The conflict response and event hold no arm, name, answer, AI or clinical value.
+13. A stale lease is replaced: `tab.lease_expired` for the old tab then `tab.claimed {reclaim}`.
+14. A lease of a closed session (pause → resume) is void: another tab claims without conflict.
+15. Release by the holding render removes the lease and is idempotent.
+16. Release by another tab, or by an older render of the same tab, leaves the lease.
+17. Logout releases every lease of the clinician.
+18. Startup clears leases without touching events.
+19. Paused, completed or incomplete case cannot claim (`409`).
+20. Unguarded render (no telemetry block, practice, Phase 1) cannot claim (`409`); its writes need no identity.
 
 ### Protected writes
 
-19. Owner tab can save an answer.
-20. Non owner tab answer POST is refused without changing the answer row.
-21. Owner tab can advance.
-22. Non owner tab advance is refused without changing progress.
-23. Non owner lifecycle heartbeat does not extend `last_seen_at`.
-24. Non owner pause request is refused.
-25. Owner primary telemetry batch is accepted.
-26. Non owner primary telemetry is refused and does not contribute an accepted exposure event.
-27. Revisit telemetry stays labelled revisit and does not take primary ownership.
-28. Start case still activates without a pre existing tab lease; redirected page must claim before writes.
-29. Resume produces a page that must claim before measured writes continue.
+21. Owner can save an answer.
+22. Non owner answer is refused; the answer row and events are unchanged.
+23. Answer without identity headers on a guarded case is refused.
+24. Owner can advance; the lease moves to the new render and the next answer from it is accepted.
+25. Non owner advance is refused; progress unchanged.
+26. Non owner heartbeat does not move `last_seen_at`.
+27. Non owner pause is refused; lifecycle stays `active`.
+28. With no lease (after restart) the tab's heartbeat reacquires and succeeds.
+29. Start case and resume need no lease; the redirected page must claim before writing.
+
+### Telemetry
+
+30. Claimed render's batch is accepted.
+31. Unclaimed guarded render's batch is refused, nothing written.
+32. A granted render's exit is accepted after its release and after completion.
+33. Unguarded renders keep S11j intake behaviour.
+34. `tab.*` rows never appear in `load_telemetry_rows`; an observation with a claim and a refused conflict stays `complete`.
 
 ### Multi tab derivation
 
-30. One owner tab yields normal foreground/active/panel derivation.
-31. A refused second claim sets `tab_conflict_detected=true` without automatically invalidating otherwise complete owner telemetry.
-32. Accepted overlapping primary telemetry from two tabs yields `telemetry_status=multi_tab_conflict` and is never summed.
-33. Multi tab conflict remains distinguishable from complete zero exposure.
-34. S11l PP derivation remains conservative when telemetry is genuinely indeterminate.
+35. One owner tab derives normally.
+36. A refused second claim sets `tab_conflict_detected` without changing the owner's status or PP.
+37. Accepted telemetry from two tabs stays `multi_tab`, never summed, distinct from complete zero.
 
 ### Backup identity
 
-35. Study backup path includes `study_id`, schema version, and UTC timestamp.
-36. Study backup is written under `<backup_root>/<study_id>/`.
-37. Opening the copied backup shows the same `study_identity` as the source.
-38. Opening the copied backup shows the same schema migration version as the source.
-39. A mismatching expected study ID refuses before a backup is produced.
-40. Two study databases using the same backup root are written into separate study directories and cannot collide silently.
-41. Existing destination is not silently overwritten.
-42. Non study backup behaviour remains backwards compatible.
-43. Backup never emits a clinician name keyfile.
+38. Study backup path is `<root>/<study_id>/study_<study_id>_schema_<N>_<UTC>.db`.
+39. The copy holds the source's `study_identity` and schema version.
+40. Mismatching expected study refuses; nothing created.
+41. Two studies sharing a root land in separate directories.
+42. Existing destination is never overwritten; a same-second backup gets the `_2` suffix.
+43. Unbound DB keeps the legacy name and placement.
+44. Backup never writes a keyfile.
+45. Shutdown backup in study mode uses the study path.
+
+### Browser
+
+46. e2e: a second page of the same case shows the conflict notice, its answer controls stay disabled, and the owner's answers still save.
 
 ### Regression
 
-44. All S11a through S11l tests remain green.
-45. Full CI including browser/e2e tests remains green.
+47. All S11a through S11l tests stay green (updated only where the login payload, render payload or backup path is asserted).
+48. Full CI including e2e stays green.
 
 ## Out of scope
 
-S11m does not implement:
-
-- random study specific clinician IDs
-- browser/device fingerprinting
-- participant recruitment identity management
-- automatic retention/deletion
-- backup rotation or remote backup upload
-- encryption key management
-- final Phase 2 research export layout
-- a new PP rule for a merely attempted conflicting tab when owner telemetry remains valid
-- changing practice mode semantics
+Random study specific clinician ids, fingerprinting, recruitment identity, retention/deletion, backup rotation or upload, encryption, the Phase 2 export layout (S11n), a PP rule for attempted conflicts, practice guard, perfect prevention of a duplicate display.
 
 ## Acceptance
 
-S11m is complete when new behavioural events no longer duplicate the normalised clinician name; the optional name mapping remains operational and separate; exactly one tab can authoritatively mutate or measure an active primary Phase 2 case; every conflict is either prevented or explicitly auditable; multi tab telemetry has one final deterministic interpretation; and every study backup can be attributed from its path and contents to the correct study, schema generation, and creation time.
+New behavioural events never carry the normalised name; the name mapping stays operational and separate; exactly one tab can write to, keep alive, or report telemetry for an active guarded case; every refused tab is audited; multi tab telemetry has one deterministic interpretation; every study backup is attributable from its path and contents to its study, schema generation and creation time.
 
 ## Checklist items closed
 
-Primarily Session 11 implementation checklist sections:
-
-- 28 Clinician identity privacy
-- 30 Backup identity
-- 34 Multi tab protection
-
-S11m also finalises the multiple tab semantics referenced by sections 14 through 24 without changing their scientific thresholds.
+Sections 28 (clinician identity privacy), 30 (backup identity) and 34 (multi tab protection); the multi tab semantics referenced by sections 14–24 are finalised without changing their thresholds.

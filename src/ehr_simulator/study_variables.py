@@ -103,7 +103,9 @@ class CaseInputs:
 
     ``answers`` is keyed by ``(t_index, question_id)``; ``enter_t_indices``
     are the timepoints with an S10 ``timepoint.enter``; ``session_hashes``
-    maps each session to its pinned ``config_hash``.
+    maps each session to its pinned ``config_hash``. S11m: ``renders``
+    excludes renders whose tab claim was refused; ``conflict_renders`` are
+    every render a ``tab.conflict`` names.
     """
 
     study_id: str
@@ -124,6 +126,7 @@ class CaseInputs:
     renders: Sequence[RenderRow]
     telemetry_rows: Sequence[TelemetryRow]
     session_hashes: Mapping[str, str]
+    conflict_renders: Sequence[RenderRow] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +151,7 @@ class ObservationVariables:
     pp_compliant: bool | None
     pp_determinate: bool
     integrity_warnings: tuple[str, ...]
+    tab_conflict_detected: bool = False  # S11m: a second tab was refused here
 
     @property
     def intervention_failure(self) -> bool:
@@ -336,6 +340,7 @@ def _observation(
         pp_compliant=pp_compliant,
         pp_determinate=determinate,
         integrity_warnings=warnings,
+        tab_conflict_detected=any(r.t_index == t_index for r in inputs.conflict_renders),
     )
 
 

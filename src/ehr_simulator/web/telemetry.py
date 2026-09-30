@@ -11,6 +11,10 @@ row, so a page can never claim another patient, timepoint or arm::
 
 Telemetry is not case contact: nothing here touches ``last_seen_at`` or
 the S11e lifecycle, and late events of a finished case are still stored.
+
+S11m: a guarded render (``tab_guard`` in its payload) is reported only by a
+tab that was granted its lease at some point — "ever granted", so the
+owner's exit beacon still lands after its release beacon.
 """
 
 from __future__ import annotations
@@ -38,10 +42,13 @@ from ehr_simulator.db import events, telemetry
 __all__ = [
     "MAX_BATCH_BYTES",
     "MAX_BATCH_EVENTS",
+    "TabRequest",
     "TelemetryBatch",
     "TelemetryValidationError",
+    "UnclaimedRenderError",
     "UnknownRenderError",
     "parse_batch",
+    "parse_tab_request",
     "record_batch",
 ]
 
@@ -75,6 +82,17 @@ class TelemetryValidationError(ValueError):
 
 class UnknownRenderError(LookupError):
     """A ``render_id`` is unknown or belongs to another clinician (HTTP 409)."""
+
+
+class UnclaimedRenderError(LookupError):
+    """A guarded render reported by a tab never granted its lease (HTTP 409)."""
+
+
+#: ``timepoint.render`` payload key of an S11m guarded render.
+_GUARD_PAYLOAD_KEY = "tab_guard"
+
+#: Largest accepted tab claim/release body.
+_MAX_TAB_REQUEST_BYTES = 1024
 
 
 class _Payload(BaseModel):
@@ -195,6 +213,41 @@ class TelemetryBatch(BaseModel):
         return v
 
 
+class TabRequest(BaseModel):
+    """S11m ``/case/{pid}/tab/claim`` and ``/release`` body."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    tab_id: str
+    render_id: str
+    reason: Literal["pagehide"] | None = None
+
+    @field_validator("tab_id")
+    @classmethod
+    def _tab_id_shape(cls, v: str) -> str:
+        if not _TAB_ID_PATTERN.fullmatch(v):
+            raise ValueError("tab_id must be a lowercase UUID v4")
+        return v
+
+    @field_validator("render_id")
+    @classmethod
+    def _render_id_shape(cls, v: str) -> str:
+        if not _RENDER_ID_PATTERN.fullmatch(v):
+            raise ValueError("render_id must be 32 lowercase hex characters")
+        return v
+
+
+def parse_tab_request(raw: bytes) -> TabRequest:
+    """Decode one tab claim/release body; raise on anything off contract."""
+    if len(raw) > _MAX_TAB_REQUEST_BYTES:
+        raise TelemetryValidationError("tab request too large")
+
+    try:
+        return TabRequest.model_validate(json.loads(raw))
+    except (ValueError, ValidationError) as exc:
+        raise TelemetryValidationError(str(exc)) from exc
+
+
 def parse_batch(raw: bytes) -> TelemetryBatch:
     """Decode and validate one request body; raise on anything off contract.
 
@@ -219,13 +272,20 @@ def record_batch(
     """Store a validated batch; return the number of new rows.
 
     Every event must name a render of ``clinician_id``; one foreign or
-    unknown render refuses the whole batch before anything is written.
+    unknown render, or a guarded render this tab was never granted,
+    refuses the whole batch before anything is written.
     """
     renders = telemetry.fetch_renders(conn, (e.render_id for e in batch.events))
     for event in batch.events:
         render = renders.get(event.render_id)
         if render is None or render.clinician_id != clinician_id:
             raise UnknownRenderError(f"unknown render {event.render_id}")
+
+    guarded = [rid for rid, r in renders.items() if r.payload.get(_GUARD_PAYLOAD_KEY)]
+    granted = telemetry.claimed_tabs(conn, guarded)
+    for render_id in guarded:
+        if batch.tab_id not in granted.get(render_id, frozenset()):
+            raise UnclaimedRenderError(f"render {render_id} was never granted to this tab")
 
     rows = [
         events.BrowserEvent(

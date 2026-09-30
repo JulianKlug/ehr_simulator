@@ -37,7 +37,12 @@ from ehr_simulator.randomisation import (
 )
 from ehr_simulator.web import case_start
 from ehr_simulator.web.app import app_from_study_config
-from tests.conftest import _activate_configuration, _seed_clinician, seed_progress
+from tests.conftest import (
+    _activate_configuration,
+    _seed_clinician,
+    adopt_tab_views,
+    seed_progress,
+)
 
 HTTP_OK = 200
 HTTP_SEE_OTHER = 303
@@ -113,6 +118,7 @@ class Harness:
         )
         with TestClient(app) as client:
             client.cookies.set(COOKIE, clinician_id or self.clinician_id)
+            adopt_tab_views(client)
             yield client
 
     @contextmanager

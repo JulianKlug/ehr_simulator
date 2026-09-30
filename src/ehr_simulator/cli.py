@@ -218,19 +218,35 @@ def backup(
     backup_dir: Path = typer.Option(
         Path("data/backups"),
         "--backup-dir",
-        help="Directory the backup snapshot is written into. Auto-created.",
+        help=(
+            "Backup root. A study bound DB goes to <root>/<study_id>/"
+            "study_<study_id>_schema_<N>_<UTC>.db. Auto-created."
+        ),
     ),
 ) -> None:
-    """Snapshot the SQLite DB to a timestamped file in --backup-dir."""
-    from ehr_simulator.db.backup import create_backup
+    """Snapshot the SQLite DB into --backup-dir under its study identity."""
+    from ehr_simulator.db.backup import create_backup, read_identity
+    from ehr_simulator.db.exceptions import BackupIdentityError
     from ehr_simulator.logging import setup_logging
 
     setup_logging(Path("logs"))
     if not db_path.exists():
         typer.echo(f"Error: db_path does not exist: {db_path}", err=True)
         raise typer.Exit(code=1)
-    dest = create_backup(db_path, backup_dir)
+    try:
+        dest = create_backup(db_path, backup_dir)
+    except (BackupIdentityError, OSError, sqlite3.Error) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
     typer.echo(f"Backup written to: {dest}")
+    copy = sqlite3.connect(dest)
+    try:
+        identity = read_identity(copy)
+    finally:
+        copy.close()
+    if identity.study_id is not None:
+        typer.echo(f"Study: {identity.study_id}, schema version {identity.schema_version}")
 
 
 # ---------------------------------------------------------------------------

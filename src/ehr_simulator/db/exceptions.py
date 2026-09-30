@@ -92,3 +92,11 @@ class CaseLifecycleError(Exception):
     (terminal cases included) or a lifecycle row is missing or duplicated.
     Nothing is written when this is raised.
     """
+
+
+class BackupIdentityError(Exception):
+    """A backup cannot be attributed to its study and schema generation (S11m).
+
+    Messages carry paths, study ids and schema versions only — never
+    clinical, event or clinician rows.
+    """

@@ -299,7 +299,8 @@ def _post(client: TestClient, events_: list[dict], tab_id: str = TAB_ID) -> Any:
 def _browser_rows(client: TestClient) -> list[tuple]:
     return client.app.state.db.execute(
         "SELECT kind, session_id, patient_id, timepoint, tab_id, render_id, client_seq, "
-        "client_mono_ms, payload_json FROM events WHERE tab_id IS NOT NULL ORDER BY event_id"
+        "client_mono_ms, payload_json FROM events "
+        "WHERE tab_id IS NOT NULL AND kind NOT LIKE 'tab.%' ORDER BY event_id"
     ).fetchall()
 
 
@@ -454,8 +455,13 @@ def test_redelivery_is_idempotent(telemetry_harness: Any) -> None:
 def test_same_seq_from_another_tab_is_kept(telemetry_harness: Any) -> None:
     study, config = telemetry_harness
     with study.boot(config) as client:
-        _, render_id = _open_case(client)
+        patient_id, render_id = _open_case(client)
         _post(client, [_event(render_id, 1)])
+        # S11m: the render passes to the other tab (release, then claim).
+        body = {"tab_id": TAB_ID, "render_id": render_id}
+        client.post(f"/case/{patient_id}/tab/release", json=body)
+        body["tab_id"] = OTHER_TAB_ID
+        assert client.post(f"/case/{patient_id}/tab/claim", json=body).status_code == 204
         _post(client, [_event(render_id, 1)], tab_id=OTHER_TAB_ID)
         rows = _browser_rows(client)
 

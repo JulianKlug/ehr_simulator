@@ -506,12 +506,14 @@ First use case:
 
 # 28. Clinician identity privacy
 
-- [ ] Remove `name_normalized` from new behavioural event payloads.
-- [ ] Keep clinician name only where operationally required.
-- [ ] Continue using `clinician_id` in routine events.
-- [ ] Preserve existing optional name mapping keyfile support.
-- [ ] Keep keyfile separate from routine research exports.
-- [ ] Retain existing keyfile filesystem protection.
+- [x] Remove `name_normalized` from new behavioural event payloads.
+- [x] Keep clinician name only where operationally required.
+- [x] Continue using `clinician_id` in routine events.
+- [x] Preserve existing optional name mapping keyfile support.
+- [x] Keep keyfile separate from routine research exports.
+- [x] Retain existing keyfile filesystem protection.
+
+(S11m: login payload `{}`; `events.append` refuses `name_normalized` at any depth.)
 
 Historical data do not require migration solely to remove names from old event payloads.
 
@@ -532,11 +534,11 @@ Historical data do not require migration solely to remove names from old event p
 
 Ensure backups remain attributable to:
 
-- [ ] `study_id`
-- [ ] schema/database version
-- [ ] backup timestamp
+- [x] `study_id`
+- [x] schema/database version
+- [x] backup timestamp
 
-Do not merge backups across studies.
+Do not merge backups across studies. (S11m: `<root>/<study_id>/study_<study_id>_schema_<N>_<UTC>.db`, verified read only, never overwritten.)
 
 Retention remains an operational policy rather than an automatic simulator rule.
 
@@ -621,11 +623,11 @@ Replace the current blanket mixed generation refusal.
 
 Add explicit browser tab identity.
 
-- [ ] Generate per tab identifier.
-- [ ] Include it in behavioural events.
-- [ ] Detect simultaneous active views of the same measured case.
-- [ ] Prefer preventing conflicting active case views.
-- [ ] If prevention cannot be guaranteed, make the conflict auditable.
+- [x] Generate per tab identifier.
+- [x] Include it in behavioural events.
+- [x] Detect simultaneous active views of the same measured case.
+- [x] Prefer preventing conflicting active case views.
+- [x] If prevention cannot be guaranteed, make the conflict auditable. (S11j tab id; S11m `case_tab_leases` + `tab.*` events.)
 
 ---
 

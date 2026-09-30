@@ -465,6 +465,25 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_events_browser_delivery
     ON events (render_id, tab_id, client_seq) WHERE tab_id IS NOT NULL;
 """
 
+# S11m: the current tab lease of one active measured case. Mutable
+# operational state (refreshed, moved, deleted, cleared at boot); the
+# research audit is the ``tab.*`` events. No inline SQL comments: sqlite_master
+# stores the DDL verbatim and the schema-snapshot test compares it byte-for-byte.
+_S11M_TAB_LEASES_DDL = """
+CREATE TABLE IF NOT EXISTS case_tab_leases (
+    clinician_id  TEXT NOT NULL,
+    patient_id    TEXT NOT NULL,
+    session_id    TEXT NOT NULL REFERENCES sessions(session_id),
+    tab_id        TEXT NOT NULL,
+    render_id     TEXT NOT NULL,
+    claimed_at    TIMESTAMP NOT NULL,
+    last_seen_at  TIMESTAMP NOT NULL,
+    PRIMARY KEY (clinician_id, patient_id),
+    FOREIGN KEY (clinician_id, patient_id)
+        REFERENCES arm_assignments(clinician_id, patient_id)
+);
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
@@ -506,6 +525,7 @@ MIGRATIONS: tuple[Migration, ...] = (
         add_columns=_S11J_TELEMETRY_COLUMNS,
         post_sql=_S11J_TELEMETRY_DDL,
     ),
+    Migration(version=13, name="s11m_case_tab_leases", up_sql=_S11M_TAB_LEASES_DDL),
 )
 
 
