@@ -51,6 +51,14 @@ def list_for_clinician(conn: sqlite3.Connection, clinician_id: str) -> tuple[Pra
     return tuple(PracticeCase(*row) for row in rows)
 
 
+def list_all(conn: sqlite3.Connection) -> tuple[PracticeCase, ...]:
+    """S11n: every practice case, by clinician then start order."""
+    rows = conn.execute(
+        f"SELECT {_COLUMNS} FROM practice_cases ORDER BY clinician_id, started_at, rowid"
+    ).fetchall()
+    return tuple(PracticeCase(*row) for row in rows)
+
+
 def fetch_all_pairs(conn: sqlite3.Connection) -> frozenset[tuple[str, str]]:
     """Every ``(clinician_id, patient_id)`` practice pair (export exclusion)."""
     rows = conn.execute("SELECT clinician_id, patient_id FROM practice_cases").fetchall()

@@ -83,6 +83,15 @@ def list_for_clinician(conn: sqlite3.Connection, clinician_id: str) -> tuple[Rep
     return tuple(_row(row) for row in rows)
 
 
+def list_all(conn: sqlite3.Connection) -> tuple[ReplacementPlan, ...]:
+    """S11n: every plan, by clinician then generation order."""
+    rows = conn.execute(
+        f"SELECT {_COLUMNS} FROM case_replacements "
+        "ORDER BY clinician_id, generated_at, replacement_case_position"
+    ).fetchall()
+    return tuple(_row(row) for row in rows)
+
+
 def pending_for_clinician(
     conn: sqlite3.Connection, clinician_id: str
 ) -> tuple[ReplacementPlan, ...]:

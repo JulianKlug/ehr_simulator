@@ -271,3 +271,37 @@ def append_browser_batch(
         app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
     return written
 
+
+@dataclass(frozen=True)
+class EventRow:
+    """S11n: one stored ``events`` row, payload as stored (canonical JSON)."""
+
+    event_id: int
+    session_id: str | None
+    clinician_id: str
+    patient_id: str | None
+    timepoint: float | None
+    kind: str
+    payload_json: str
+    client_ts: str | None
+    server_ts: str
+    client_seq: int | None
+    tab_id: str | None
+    render_id: str | None
+    client_mono_ms: float | None
+
+
+def list_by_prefix(conn: sqlite3.Connection, prefixes: Sequence[str]) -> tuple[EventRow, ...]:
+    """S11n: every event whose ``kind`` starts with one of ``prefixes``
+    (e.g. ``"answer."``), in ``event_id`` order. Timestamps stay text."""
+    if not prefixes:
+        return ()
+
+    where = " OR ".join("kind LIKE ?" for _ in prefixes)
+    rows = conn.execute(
+        "SELECT event_id, session_id, clinician_id, patient_id, timepoint, kind, payload_json, "
+        "CAST(client_ts AS TEXT), CAST(server_ts AS TEXT), client_seq, tab_id, render_id, "
+        f"client_mono_ms FROM events WHERE {where} ORDER BY event_id",
+        tuple(f"{p}%" for p in prefixes),
+    ).fetchall()
+    return tuple(EventRow(*row) for row in rows)

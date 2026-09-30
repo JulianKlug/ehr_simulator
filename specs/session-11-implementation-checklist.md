@@ -24,7 +24,7 @@ If implementation exceeds the normal one to two day session budget, split work r
 - [x] Use the study ID in the default database filename.
 - [x] Persist study identity inside the database.
 - [x] Refuse startup when configured study ID conflicts with database study ID.
-- [ ] Include `study_id` in Phase 2 exports. (S11n)
+- [x] Include `study_id` in Phase 2 exports. (S11n)
 - [x] Add regression tests preventing cross study database reuse.
 
 ---
@@ -41,9 +41,9 @@ If implementation exceeds the normal one to two day session budget, split work r
 - [x] Associate every newly activated case with its active configuration version.
 - [x] Do not change the configuration identity of an already activated case.
 - [x] Permit new configuration versions within the same `study_id`.
-- [ ] Update export behaviour so mixed valid configuration versions are allowed. (S11n)
+- [x] Update export behaviour so mixed valid configuration versions are allowed. (S11n `export-phase2`)
 - [x] Continue refusing missing or inconsistent configuration identities.
-- [ ] Produce a summary of cases and observations by configuration version. (S11n)
+- [x] Produce a summary of cases and observations by configuration version. (S11n `configuration_counts.csv`)
 
 ---
 
@@ -97,7 +97,7 @@ Also:
 - [x] Draw replacement only from patients not previously seen by the clinician.
 - [x] Never overwrite the original incomplete case.
 - [x] Record replacement relationship.
-- [ ] Include both original and replacement in audit exports. (S11f persists; S11n exports.)
+- [x] Include both original and replacement in audit exports. (S11f persists; S11n exports.)
 - [x] Preserve AI versus no AI balance as closely as possible.
 - [x] Preserve patient level balance as closely as possible.
 - [x] Respect study specific block constraints.
@@ -550,45 +550,47 @@ Do not put all Phase 2 information into one answers CSV.
 
 Provide linked outputs for at least:
 
+(S11n: `export-phase2` bundle — `timepoints.csv`, `answers.csv`, `panel_summaries.csv`, `behavioral_events.csv`, `randomisation_audit.csv`, `configuration_history.csv`, `configuration_counts.csv`, `manifest.json`.)
+
 ## Answers and timepoints
 
-- [ ] clinician responses
-- [ ] arm
-- [ ] timing summaries
-- [ ] completion status
-- [ ] configuration version
+- [x] clinician responses
+- [x] arm
+- [x] timing summaries
+- [x] completion status
+- [x] configuration version
 
 ## Panel summaries
 
-- [ ] panel viewed
-- [ ] cumulative duration
-- [ ] episode count
-- [ ] first view latency
-- [ ] first and last view timestamps
-- [ ] panel open counts
+- [x] panel viewed
+- [x] cumulative duration
+- [x] episode count
+- [x] first view latency
+- [x] first and last view timestamps
+- [x] panel open counts
 
 ## Raw events
 
-- [ ] behavioural source events
-- [ ] tab identity
-- [ ] configuration identity
+- [x] behavioural source events
+- [x] tab identity
+- [x] configuration identity
 
 ## Randomisation audit
 
-- [ ] planned schedule
-- [ ] generated arm
-- [ ] activated status
-- [ ] activation timestamp
-- [ ] lifecycle outcome
-- [ ] replacement links
+- [x] planned schedule
+- [x] generated arm
+- [x] activated status
+- [x] activation timestamp
+- [x] lifecycle outcome
+- [x] replacement links
 
 ## Configuration history
 
-- [ ] `config_version`
-- [ ] `config_hash`
-- [ ] activation timestamp
-- [ ] description
-- [ ] reason where present
+- [x] `config_version`
+- [x] `config_hash`
+- [x] activation timestamp
+- [x] description
+- [x] reason where present
 
 ---
 
@@ -596,13 +598,13 @@ Provide linked outputs for at least:
 
 Ensure linked outputs expose stable join keys including:
 
-- [ ] `study_id`
-- [ ] `clinician_id`
-- [ ] `patient_id`
-- [ ] timepoint
-- [ ] case/session identity
-- [ ] `config_version`
-- [ ] `config_hash`
+- [x] `study_id`
+- [x] `clinician_id`
+- [x] `patient_id`
+- [x] timepoint
+- [x] case/session identity
+- [x] `config_version`
+- [x] `config_hash`
 
 ---
 
@@ -610,12 +612,12 @@ Ensure linked outputs expose stable join keys including:
 
 Replace the current blanket mixed generation refusal.
 
-- [ ] Permit multiple valid configuration versions inside one study export.
-- [ ] Keep every observation attributable to one version.
-- [ ] Refuse missing configuration identity.
-- [ ] Refuse unknown configuration identity.
-- [ ] Refuse internal inconsistencies.
-- [ ] Produce counts by configuration version.
+- [x] Permit multiple valid configuration versions inside one study export.
+- [x] Keep every observation attributable to one version.
+- [x] Refuse missing configuration identity.
+- [x] Refuse unknown configuration identity.
+- [x] Refuse internal inconsistencies.
+- [x] Produce counts by configuration version.
 
 ---
 

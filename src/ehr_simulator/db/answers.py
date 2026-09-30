@@ -259,6 +259,18 @@ def fetch_for_pair(
     return tuple(_answer_row(row) for row in rows)
 
 
+def fetch_recorded_at(
+    conn: sqlite3.Connection, clinician_id: str, patient_id: str
+) -> dict[tuple[float, str], object]:
+    """S11n: ``{(timepoint, question_id): ts_recorded}`` of one clinician × patient."""
+    rows = conn.execute(
+        "SELECT timepoint, question_id, ts_recorded FROM answers "
+        "WHERE clinician_id = ? AND patient_id = ?",
+        (clinician_id, patient_id),
+    ).fetchall()
+    return {(float(r[0]), r[1]): r[2] for r in rows}
+
+
 def fetch_for_cell(
     conn: sqlite3.Connection,
     *,

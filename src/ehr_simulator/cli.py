@@ -806,6 +806,119 @@ def export_answers(
 
 
 # ---------------------------------------------------------------------------
+# export-phase2 (S11n)
+# ---------------------------------------------------------------------------
+
+
+@app_typer.command("export-phase2")
+def export_phase2(
+    study_path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="Path to study_config.yaml (identifies the study)."
+    ),
+    db_path: Path | None = typer.Option(
+        None,
+        "--db-path",
+        help="SQLite DB; defaults to the study's db_path / data/study_<study_id>.db.",
+    ),
+    out_dir: Path | None = typer.Option(
+        None,
+        "--out-dir",
+        help="Bundle directory; defaults to <db dir>/exports/phase2_<study_id>_<UTC>/.",
+    ),
+    keyfile: Path | None = typer.Option(
+        None,
+        "--keyfile",
+        help="Optional POSIX 0600 id→name keyfile, outside --out-dir, for the bundle's clinicians.",
+    ),
+    include_practice: bool = typer.Option(
+        False, "--include-practice", help="Add practice_timepoints.csv and practice_answers.csv."
+    ),
+    force: bool = typer.Option(
+        False, "--force", help="Replace an existing --out-dir (and --keyfile) after a full build."
+    ),
+) -> None:
+    """Export the linked Phase 2 research bundle (every configuration version)."""
+    from datetime import UTC, datetime
+
+    from ehr_simulator import case_lifecycle, export_bundle, export_phase2
+    from ehr_simulator.cli_support import OperatorError, assert_schema_current
+    from ehr_simulator.config import load_study_config
+    from ehr_simulator.db import connect, resolve_db_path
+    from ehr_simulator.db.connection import AccessMode
+    from ehr_simulator.db.exceptions import StudyIdentityError
+    from ehr_simulator.db.study_identity import require as require_study_identity
+    from ehr_simulator.logging import get_logger, setup_logging
+
+    setup_logging(Path("logs"))
+    try:
+        study = load_study_config(study_path)
+        target_db = resolve_db_path(study, cli_override=db_path)
+        if not target_db.exists():
+            raise OperatorError(f"database not found: {target_db}")
+        if out_dir is None:
+            stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+            out_dir = target_db.parent / "exports" / f"phase2_{study.study_id}_{stamp}"
+        if out_dir.exists() and not force:
+            raise OperatorError(f"{out_dir} already exists; pass --force to replace it")
+
+        conn = connect(target_db, access=AccessMode.READ_ONLY)
+        try:
+            assert_schema_current(conn)
+            require_study_identity(conn, study.study_id)
+            overdue = case_lifecycle.overdue_cases(conn, datetime.now(UTC))
+            bundle = export_phase2.build_phase2_bundle(
+                conn,
+                study_id=study.study_id,
+                practice_export=(
+                    export_phase2.PracticeExport.INCLUDE
+                    if include_practice
+                    else export_phase2.PracticeExport.EXCLUDE
+                ),
+                keyfile=(
+                    export_phase2.KeyfileRequest.REQUESTED
+                    if keyfile is not None
+                    else export_phase2.KeyfileRequest.NONE
+                ),
+            )
+        finally:
+            conn.close()
+
+        export_bundle.write_bundle(
+            bundle,
+            out_dir,
+            overwrite=export_bundle.Overwrite.REPLACE if force else export_bundle.Overwrite.REFUSE,
+            keyfile=keyfile,
+        )
+    except (
+        ConfigError,
+        OperatorError,
+        StudyIdentityError,
+        export_phase2.Phase2ExportError,
+        export_bundle.BundleWriteError,
+        OSError,
+        sqlite3.Error,
+    ) as exc:
+        typer.echo(f"Error: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if overdue:
+        typer.echo(
+            f"Warning: {len(overdue)} open case(s) are past their grace and export as "
+            "open; run expire-cases first.",
+            err=True,
+        )
+    rows = {t.name: len(t.rows) for t in bundle.tables}
+    get_logger().info("export.phase2.written", event_kind="export.phase2.written", **rows)
+    typer.echo(
+        f"Wrote Phase 2 bundle ({len(bundle.tables)} files, "
+        f"{len(bundle.config_versions)} configuration version(s)) to {out_dir}"
+    )
+    if keyfile is not None:
+        n = len(bundle.keyfile_rows or ())
+        typer.echo(f"Wrote keyfile ({n} clinician(s), mode 600) to {keyfile}")
+
+
+# ---------------------------------------------------------------------------
 # divergence-view (S10)
 # ---------------------------------------------------------------------------
 

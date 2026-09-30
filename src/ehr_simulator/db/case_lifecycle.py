@@ -129,6 +129,12 @@ def list_for_clinician(conn: sqlite3.Connection, clinician_id: str) -> dict[str,
     return {row[1]: _row(row) for row in rows}
 
 
+def list_all(conn: sqlite3.Connection) -> dict[tuple[str, str], CaseLifecycle]:
+    """S11n: every lifecycle row keyed by ``(clinician_id, patient_id)``."""
+    rows = conn.execute(f"SELECT {_COLUMNS} FROM case_lifecycle").fetchall()
+    return {(row[0], row[1]): _row(row) for row in rows}
+
+
 def list_open(conn: sqlite3.Connection) -> list[CaseLifecycle]:
     """Every ``active`` or ``paused`` case, across clinicians."""
     rows = conn.execute(

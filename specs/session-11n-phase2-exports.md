@@ -2,486 +2,226 @@
 
 ## Goal
 
-Produce one reproducible, pseudonymised Phase 2 export bundle that preserves configuration provenance, planned and realised randomisation, timepoint level behavioural outcomes, panel exposure, PP variables, missing response provenance, and raw research telemetry without forcing all information into one wide answers CSV.
+Produce one reproducible, pseudonymised Phase 2 export bundle that preserves configuration provenance, planned and realised randomisation, timepoint level behavioural outcomes, panel exposure, PP variables, missing response provenance and raw research telemetry, without forcing everything into one wide answers CSV.
 
-S11a through S11m are assumed complete.
+S11a through S11m are complete. The exporter accepts several valid configuration versions inside one study and interprets every case under its own pinned snapshot, never under the YAML active at export time.
 
-The Phase 2 exporter must accept multiple valid configuration versions inside one study. It must interpret each case and observation under its own pinned configuration snapshot rather than under whichever YAML happens to be active at export time.
+## Review revisions (2026-09-28)
+
+Changes against the first draft, from the implemented S11j–m code:
+
+1. **No `intervention.*` events.** AI delivery, failure and leakage come from S11l (`timepoint.render` `ai` payload + AI `panel.mount`). The event family is dropped.
+2. **`behavioral_events.csv` must include `timepoint.render` and a `render_id` column.** Renders are what bind browser rows to an observation; without them no panel summary is reproducible from the file. `case.*` and `session.*` events are included too (pause/resume/reconnect episodes are behavioural and cheap to carry).
+3. **S11l integrity problems are exported, not refused.** S11l's invariant 7 promises that one bad row never blocks the export. Answer arm drift, AI on a no AI case and similar S11l warnings go into an `integrity_warnings` column. Refusal is reserved for provenance and linkage failures the bundle cannot represent (unknown/mismatched config, schedule/assignment disagreement, unparseable snapshot or answer, S10 `TimingError`).
+4. **Status vocabularies are the implemented ones.** `telemetry_status` ∈ `complete|incomplete|gapped|missing|multi_tab|invalid` (+ `not_configured` when the pinned config has no `telemetry`); answer states use S11h `editable|derived|hidden` and S11l `answered|not_applicable|missing`.
+5. **Panel rows drop `first/last_view_server_ts`.** A browser row's `server_ts` is its batch arrival time, not a view time. `mounted` is added.
+6. **Legacy `export-answers` is not blocked on Phase 2 databases.** It already refuses mixed configuration generations (hash drift), and S11e/S11i tests rely on its single generation Phase 2 behaviour (incomplete cases, overdue warning, free text policy). Its drift refusal now names `export-phase2`.
+7. **The runtime "panel summary reproducible" check is dropped** (the exporter derives the summaries from the same rows, so the check is tautological); reproducibility is a test.
+8. `--keyfile` is a file path, as in `export-answers`.
+9. **Events of pairs that are not activated measured cases are out of scope** (practice, pre Phase 2 walks, clinician level rows) and excluded, not refused; only an event of a measured case with unattributable provenance refuses.
+10. **Replacement chains need two id columns.** A replacement case can itself end incomplete and be replaced, so `randomisation_audit.csv` carries `replacement_id` (this item replaces another) and `replaced_by_replacement_id` (this case was replaced).
 
 ## Core invariants
 
 1. One export is a read consistent snapshot of one bound `study_id`.
-2. Multiple known configuration versions in one study are valid.
-3. Every exported research row is attributable to a known `(config_version, config_hash)` pair.
-4. Missing, unknown, or internally inconsistent configuration provenance refuses the entire bundle.
-5. No historical row is reinterpreted under the current active configuration.
+2. Several known configuration versions in one study are valid.
+3. Every exported research row names one known `(config_version, config_hash)`.
+4. Missing, unknown or inconsistent configuration provenance refuses the whole bundle.
+5. No row is reinterpreted under the active configuration.
 6. Activated incomplete cases remain visible.
-7. ITT arm is the immutable realised assignment and is never replaced by PP status.
-8. AI delivery, AI viewed, intervention failure/leakage, telemetry status, and PP are derived from S11l source data rather than mutable export-only guesses.
-9. Raw events remain source data; panel/time/PP summaries must be reproducible from source events plus pinned configuration.
-10. Missing telemetry is exported as missing/indeterminate, never as zero.
-11. Hidden conditional questions are not exported as missing responses.
-12. Practice data are excluded from routine measured research files by default.
-13. Free text values are exported only when the case pinned policy explicitly allows routine export.
-14. The clinician name keyfile remains a separate explicit operator output and is never placed into the routine Phase 2 bundle.
-15. Export generation performs no database writes.
-16. No final output directory is left half written after a validation failure.
+7. The ITT arm is the immutable `arm_assignments.arm`; PP never replaces it.
+8. AI delivery, viewing, failure, leakage, telemetry status and PP come from S11l; foreground/active time from S11j; panel exposure from S11k. The exporter derives nothing of its own.
+9. Raw events stay the source; every summary is reproducible from the exported events plus the exported configuration snapshots.
+10. Missing telemetry is blank with an explicit status, never zero.
+11. Hidden conditional questions are not missing responses.
+12. Practice data stay out of measured files.
+13. Free text values are exported only under a case pinned `routine_export: include_explicit`.
+14. The clinician name keyfile is a separate explicit output, never inside the bundle.
+15. Export performs no database write.
+16. No final output directory is left half written.
 
-## Existing behaviour being replaced
+## Existing behaviour kept
 
-The current S9c `export-answers` path:
-
-- creates one wide CSV
-- is interpreted against the supplied live study/questions configuration
-- requires one live `config_hash`
-- refuses mixed configuration generations
-- carries only the original timing fields and answer columns
-
-That behaviour is appropriate for the earlier single generation workflow but is not a valid Phase 2 research export contract.
-
-S11n adds a separate Phase 2 bundle builder. The legacy exporter remains available for pre Phase 2 compatibility, but it must not be presented as the Phase 2 research export.
+`export-answers` (S9c) stays the single generation wide CSV. Under hash drift it refuses as today, with the message now ending `use export-phase2 for mixed configuration Phase 2 databases`.
 
 ## CLI contract
 
-Add:
-
 ```
 ehr-simulator export-phase2 STUDY_CONFIG \
-    [--db-path PATH] \
-    [--out-dir DIR] \
-    [--keyfile PATH] \
-    [--include-practice] \
-    [--force]
+    [--db-path PATH] [--out-dir DIR] [--keyfile FILE] [--include-practice] [--force]
 ```
 
-`STUDY_CONFIG` is used to identify the study and resolve the default database path. The exporter does not require a current questions file because historical question/config snapshots come from `configuration_history`.
+`STUDY_CONFIG` identifies the study and resolves the DB path; historical study/question snapshots come from `configuration_history`, so no questions file is needed.
 
-Default output directory:
+1. load `STUDY_CONFIG` (for `study_id` and `db_path` only)
+2. DB missing → exit 1; open read only (`AccessMode.READ_ONLY`)
+3. `assert_schema_current`; `study_identity.require(conn, study_id)`
+4. build the whole bundle in memory from one `BEGIN … ROLLBACK` snapshot
+5. validate every dataset and join
+6. write into a sibling staging directory `.<name>.staging-<random>`, `manifest.json` last
+7. publish by `rename`
 
-```
-<db parent>/exports/phase2_<study_id>_<UTC>/
-```
+Default out dir: `<db parent>/exports/phase2_<study_id>_<UTC>/`. An existing `--out-dir` refuses unless `--force`; under `--force` the old directory is renamed aside only after staging succeeded, the new one renamed in, then the old one removed. Any failure leaves the previous bundle untouched and removes the staging directory.
 
-The command must:
+`export-phase2` warns (stderr, exit 0) when open cases are past their grace, as `export-answers` does. There is no `--only-complete`.
 
-1. load/validate the supplied study config sufficiently to obtain its `study_id` and database path
-2. open the DB read only
-3. require current DB schema
-4. require DB study identity to match the supplied `study_id`
-5. build the complete export from one explicit read transaction
-6. validate every dataset and join before final output is published
-7. write into a sibling staging directory
-8. atomically publish the staging directory by rename after all files succeed
+Exit 0 on success, 1 on any refusal (process exit contract pinned by a subprocess test).
 
-If `--out-dir` already exists, refuse unless `--force` is supplied.
-
-Under `--force`, build the new bundle completely first. Only then remove/replace the existing destination so a failure cannot leave a partially updated bundle.
-
-No `--only-complete` option exists for the Phase 2 bundle. Incomplete activated cases are part of the research record and must remain visible.
-
-## Relationship to `export-answers`
-
-Preserve `export-answers` for non Phase 2/legacy workflows.
-
-When a database contains Phase 2 randomised cases or multiple configuration versions, `export-answers` must refuse with an operator message directing the user to `export-phase2` rather than silently producing a partial or misinterpreted single generation file.
-
-Existing keyfile generation helpers may be reused by both commands.
-
-## Read snapshot and provenance registry
-
-Create a Phase 2 export module, for example:
-
-`src/ehr_simulator/export_phase2.py`
-
-The builder receives one read only SQLite connection and opens one explicit:
+## Module layout
 
 ```
-BEGIN
-...
-ROLLBACK
+cli.py ─► export_phase2.py            build + validate (pure over a snapshot)
+             ├─ study_variables_reader.load_case_inputs   (S11l inputs)
+             ├─ study_variables / behavioral_timing / panel_exposure (pure)
+             ├─ timing (S10 elapsed)
+             └─ db.* read DAOs
+          export_bundle.py            CSV rendering, manifest, staged directory publish
+          export.py                   guard_cell, encode helpers, keyfile writer (reused)
 ```
 
-snapshot, following the existing S9c pattern.
+`export_phase2` never imports `web`.
 
-Load once inside that snapshot:
+## Snapshot and provenance registry
 
-- `study_identity`
-- all `configuration_history`
-- measured `arm_assignments`
-- measured `sessions`
-- measured `progress`
-- measured `answers`
-- `case_lifecycle`
-- `randomisation_schedules`
-- `randomisation_schedule_items`
-- `case_replacements`
-- research behavioural events
-- any S11j/S11k/S11l rows/events required by derivation
+Inside one snapshot, load `study_identity`, all `configuration_history`, measured `arm_assignments` (`phase2_randomized`), `case_lifecycle`, schedules + items, `case_replacements`, measured `answers`/`progress`/`sessions`, practice cases, and the research events.
 
-Build a registry keyed by `config_version`.
+Registry keyed by `config_version`; for every version referenced by a schedule, assignment, session, progress row or answer:
 
-For every referenced version/hash:
+- version exists in `configuration_history`
+- hash equals the registered hash
+- history row's `study_id` equals the bound study
+- stored study and questions snapshots parse (`parse_study_snapshot`, `parse_questions_snapshot`)
 
-- version must exist
-- hash must equal the registered hash
-- history row must belong to the same study
-- stored study/questions snapshots must parse successfully
+Never fall back to the active config.
 
-Never fall back to the active config when provenance is missing.
+## Format
 
-## Export format
+- export schema version `phase2_export_v1`
+- UTF 8, one header row, RFC 4180 quoting, `\n` line ends
+- `export.guard_cell` on every user/config supplied text cell (answer values, question ids, free text, descriptions, JSON snapshots)
+- canonical JSON: sorted keys, compact separators
+- booleans `true`/`false`; numeric zero `0`/`0.0`, never blank; blank = missing/not applicable, always next to a status column that says which
+- floats: `repr(float)`; timestamps: ISO 8601 UTC as stored
+- case identity: `study_id + clinician_id + patient_id` (no new `case_id`)
+- every timepoint file carries `t_index` and `timepoint_minutes` of the pinned config
 
-Phase 2 export schema version:
+## Bundle files
 
 ```
-phase2_export_v1
-```
-
-CSV files are UTF 8 with one header row and RFC 4180 compatible quoting.
-
-Use the existing spreadsheet formula guard for user/config supplied text fields.
-
-Canonical JSON fields use sorted keys and compact separators.
-
-Empty CSV cell means missing/not applicable only where the corresponding status field makes its meaning explicit. Numeric zero is written as `0`/`0.0`, never as blank.
-
-Booleans use lowercase:
-
-```
-true
-false
-```
-
-Stable case identity is the existing composite:
-
-```
-study_id + clinician_id + patient_id
-```
-
-Do not add a new persisted `case_id` in S11n. `session_id` is included where the source is session specific.
-
-Every timepoint file includes both `t_index` and `timepoint_minutes` from the case pinned configuration.
-
-## Required bundle files
-
-The routine measured bundle contains:
-
-```
-timepoints.csv
-answers.csv
-panel_summaries.csv
-behavioral_events.csv
-randomisation_audit.csv
-configuration_history.csv
-configuration_counts.csv
+timepoints.csv  answers.csv  panel_summaries.csv  behavioral_events.csv
+randomisation_audit.csv  configuration_history.csv  configuration_counts.csv
 manifest.json
 ```
 
 ### `timepoints.csv`
 
-One row per configured timepoint for every activated measured case, including timepoints never reached before an incomplete case ended.
-
-Minimum columns:
+One row per configured timepoint of every activated measured case (unreached ones included).
 
 ```
-study_id
-clinician_id
-patient_id
-t_index
-timepoint_minutes
-config_version
-config_hash
-arm
-arm_source
-schedule_id
-case_position
-activated_at
-lifecycle_state
-case_completed_at
-case_incomplete_at
-incomplete_reason
-timepoint_reached
-timepoint_started_at
-timepoint_ended_at
-elapsed_seconds
-foreground_seconds
-active_seconds
-telemetry_status
-tab_conflict_detected
-ai_delivered
-ai_viewed
-ai_qualifying_seconds
-intervention_failure
-intervention_failure_reasons
-intervention_leakage
-pp_compliant
+study_id clinician_id patient_id t_index timepoint_minutes config_version config_hash
+arm arm_source schedule_id case_position activated_at
+lifecycle_state case_completed_at case_incomplete_at incomplete_reason
+timepoint_reached timepoint_started_at timepoint_ended_at elapsed_seconds
+telemetry_status foreground_seconds active_seconds tab_conflict_detected
+ai_delivered ai_viewed ai_viewing_status ai_qualifying_seconds ai_episode_count
+intervention_failure intervention_failure_reasons intervention_leakage
+pp_compliant pp_determinate integrity_warnings
 ```
 
-Rules:
-
-- `arm` comes from immutable `arm_assignments`
-- `config_version/hash` are activation provenance, not schedule generation provenance
-- all configured timepoints are emitted for an activated case
-- `timepoint_reached=false` keeps unreached later observations distinguishable from missing telemetry
-- `elapsed_seconds` uses S10 derivation
-- `foreground_seconds` and `active_seconds` use S11j primary visit derivation
-- AI fields and PP use S11l primary observation derivation
-- missing/indeterminate telemetry leaves duration/view fields blank and supplies `telemetry_status`
-- `intervention_failure_reasons` is a stable pipe joined categorical list in sorted/documented order
+- `arm`, `schedule_id`, `case_position`, `activated_at`, `config_*` from `arm_assignments` (activation provenance)
+- `timepoint_reached` = S11l `reached`
+- `timepoint_started_at/ended_at/elapsed_seconds` = S10 `timing.derive_timepoint_timings`
+- `telemetry_status/foreground_seconds/active_seconds` = S11j primary observation (`visit_kind = primary`); no primary render → `missing`; pinned config without `telemetry` → `not_configured`, blank seconds
+- AI, failure, leakage, PP, warnings = S11l `ObservationVariables`; `tab_conflict_detected` = S11m
+- `intervention_failure_reasons`, `integrity_warnings`: pipe joined, sorted
+- a `None` S11l value is blank
 
 ### `answers.csv`
 
-Long format, one row for every expected question cell under the case pinned questions/configuration and effective S11h branch.
-
-Minimum columns:
+Long format: one row per `(case, t_index, question)` of the pinned questions snapshot, every configured timepoint.
 
 ```
-study_id
-clinician_id
-patient_id
-t_index
-timepoint_minutes
-config_version
-config_hash
-question_id
-branch_status
-response_present
-response_value
-value_exported
-answer_source
-derived_from_question_id
-missing_response_reason
-ts_recorded
+study_id clinician_id patient_id t_index timepoint_minutes config_version config_hash
+question_id response_type branch_state required_now response_status response_value
+value_exported answer_source derived_from_question_id missing_reason ts_recorded
 ```
 
-`branch_status` values:
-
-- `required_or_visible`
-- `hidden_not_applicable`
-
-Rules:
-
-- a hidden question is emitted as `hidden_not_applicable`, `response_present=false`, and no missing reason
-- clinician and rule generated answers remain distinguishable through `answer_source`
-- rule generated values are real present responses
-- missing reasons come from S11l and are never statistical imputations
-- multi select values use the existing stable pipe encoding in configured option order
-- scalar/text values use the existing strict answer codec
-
-Free text handling is evaluated under the case pinned `study_behaviour.free_text` policy:
-
-- `routine_export=include_explicit` -> export the value with formula guard
-- otherwise -> keep the row and response presence/provenance, but leave `response_value` blank and set `value_exported=false`
-
-This preserves missingness/branch audit without leaking free text content.
+- `branch_state` = S11h `editable|derived|hidden` evaluated on the stored clinician answers of that timepoint; `required_now` = S11h
+- `response_status`, `missing_reason` = S11l `ResponseProvenance`
+- `response_value`: the stored value decoded by `answer_codec.decode_stored_answer` (multi select pipe encoded in option order); an undecodable value refuses the bundle
+- `free_text` values are written only when the case pinned `study_behaviour.free_text.routine_export` is `include_explicit`; otherwise `response_value` is blank and `value_exported=false` (presence and provenance stay)
+- rows for question ids unknown to the pinned snapshot refuse the bundle
 
 ### `panel_summaries.csv`
 
-One row per derived panel/timepoint/visit summary for measured cases.
-
-Minimum columns:
+One row per S11k summary of every observation with at least one render, for every `PANEL_IDS` panel, except the AI panel on a no AI case unless it has AI panel events (leakage).
 
 ```
-study_id
-clinician_id
-patient_id
-t_index
-timepoint_minutes
-config_version
-config_hash
-panel_id
-visit_kind
-qualifying_seconds
-viewed
-episode_count
-time_to_first_view_seconds
-first_view_client_ts
-last_view_client_ts
-first_view_server_ts
-last_view_server_ts
-panel_open_count
-telemetry_status
+study_id clinician_id patient_id t_index timepoint_minutes config_version config_hash
+visit_kind panel_id mounted telemetry_status qualifying_seconds viewed episode_count
+panel_open_count time_to_first_view_seconds first_view_client_ts last_view_client_ts
 tab_conflict_detected
 ```
 
-Rules:
-
-- derivation uses S11k source events and pinned thresholds
-- primary and revisit rows stay distinguishable
-- primary rows are the authoritative source for PP related AI viewed status
-- complete observed zero exposure is written as `0.0` and `viewed=false`
-- missing/indeterminate telemetry is blank with an explicit status
-- simultaneous panel durations may overlap and are never summed into a total attention measure
-- no AI cases do not fabricate an AI panel summary for a panel that did not exist
+Primary and revisit rows are distinct; complete zero exposure is `0.0` / `viewed=false`; indeterminate is blank with its status; panels are never summed.
 
 ### `behavioral_events.csv`
 
-Raw research behavioural/audit source events needed to reproduce timing, exposure, and intervention integrity.
-
-Include research event families such as:
-
-- `answer.upsert`, `answer.clear`
-- `advance.ok`, `advance.blocked`
-- `timepoint.enter`, `timepoint.exit`, `timepoint.revisit`
-- S11j `browser.*`
-- S11k `panel.*`
-- S11l `intervention.*`
-- S11m `tab.*`
-
-Exclude purely operational identity/login events and operator maintenance events from this routine research file, including:
-
-- `clinician.login`
-- `clinician.logout`
-- `progress.reset`
-
-Case lifecycle/randomisation provenance is represented in the dedicated audit file, so `case.*`, `session.*`, and `practice.*` events need not be duplicated here unless required by one of the pure derivations.
-
-Minimum columns:
+Every measured event of kinds `answer.*`, `advance.*`, `timepoint.*` (render, enter, exit, revisit), `browser.*`, `panel.*`, `tab.*`, `case.*`, `session.*`, ordered by `event_id`. Excluded: `clinician.*`, `progress.reset`, `practice.*`, and every event of a practice case.
 
 ```
-study_id
-event_id
-session_id
-clinician_id
-patient_id
-timepoint
-t_index
-config_version
-config_hash
-tab_id
-visit_kind
-kind
-client_ts
-server_ts
-client_seq
-client_mono_ms
-payload_json
+study_id event_id session_id clinician_id patient_id timepoint t_index visit_kind
+config_version config_hash render_id tab_id kind client_ts server_ts client_seq
+client_mono_ms payload_json
 ```
 
-Configuration provenance is resolved through the event session/case context. An included patient scoped event whose configuration identity cannot be established is an export integrity failure.
-
-Payload rules:
-
-- retain only the event's documented categorical/non identifying research payload
-- never export `name_normalized`
-- never export free text response content
-- never export raw answer values
-- never export raw clinical values or raw AI prediction/explanation values
-- historical login payloads containing `name_normalized` are excluded with their operational event family rather than copied into the research bundle
+- `config_*` = the case's activation provenance; an event naming a session of another case refuses the bundle; events of pairs that are not activated measured cases are excluded
+- `t_index` from the pinned timepoints; `visit_kind` from the event's render (blank when none)
+- `payload_json` is the stored canonical payload. Stored payloads are categorical by construction (S11j/S11k closed models; `answer.*` carries `value_chars`, never a value); the exporter additionally refuses the bundle if any exported payload contains `name_normalized`
 
 ### `randomisation_audit.csv`
 
-One row per planned `randomisation_schedule_item`, whether activated or not.
-
-Minimum columns:
+One row per `randomisation_schedule_items` row, activated or not.
 
 ```
-study_id
-clinician_id
-schedule_id
-generation_config_version
-generation_config_hash
-generated_at
-algorithm_version
-master_seed
-derived_seed_hex
-allocation_state_json
-starting_ai_count
-starting_no_ai_count
-starting_arm
-block_length
-block_sequence_json
-case_position
-patient_id
-planned_arm
-block_number
-position_in_block
-preceding_block_arm
-planned_cases_since_ai
-assignment_seed
-activated
-activated_at
-activation_config_version
-activation_config_hash
-realised_arm
-arm_source
-lifecycle_state
-completed_at
-incomplete_at
-incomplete_reason
-replacement_id
-replaces_patient_id
-replaced_by_patient_id
-replacement_generated_at
-replacement_activated_at
+study_id clinician_id schedule_id generation_config_version generation_config_hash
+generated_at algorithm_version master_seed derived_seed_hex allocation_state_json
+starting_ai_count starting_no_ai_count starting_arm block_length block_sequence_json
+case_position patient_id planned_arm block_number position_in_block
+preceding_block_arm planned_cases_since_ai assignment_seed
+activated activated_at activation_config_version activation_config_hash realised_arm
+lifecycle_state completed_at incomplete_at incomplete_reason
+replacement_id replaces_patient_id replacement_generated_at replacement_activated_at
+replaced_by_replacement_id replaced_by_patient_id
 ```
 
-Rules:
-
-- planned fields come from immutable schedule rows
-- realised fields come from `arm_assignments` and lifecycle rows
-- planned but unactivated item has `activated=false` and blank realised fields
-- generation configuration and activation configuration are separate columns and may differ
-- replacement linkage is visible in both directions
-- incomplete original cases remain present even after a replacement activates
-- the stored `allocation_state_json`, seed material, algorithm version, starting arm/counts, and block metadata must be sufficient to reproduce the scheduler inputs defined by S11c
-
-A mismatch between planned arm and a realised `phase2_randomized` assignment is an integrity failure, not an export correction.
+- planned fields from the schedule rows; realised fields from `arm_assignments` + `case_lifecycle`
+- unactivated → `activated=false`, realised fields blank
+- `replacement_id`, `replaces_patient_id`, `replacement_*_at` on the replacement item's row; `replaced_by_replacement_id`, `replaced_by_patient_id` on the original's row
+- a realised assignment whose `(schedule_id, case_position)` item is missing, whose patient differs, or whose arm ≠ `planned_arm` refuses the bundle; so does a replacement pointing to a missing item or assignment, and a lifecycle row without an assignment
+- the exported generation inputs regenerate the schedule (`randomisation.generate_schedule`) — a test, not a runtime step
 
 ### `configuration_history.csv`
 
-One row per registered configuration version, activation order.
-
-Minimum columns:
-
 ```
-study_id
-config_version
-config_hash
-activated_at
-change_description
-change_reason
-study_json
-questions_json
+study_id config_version config_hash activated_at change_description change_reason study_json questions_json
 ```
 
-The canonical stored snapshots are included so the bundle can reproduce historical question/config interpretation without the original operator files.
-
-Do not export filesystem only source paths that S11b intentionally excludes from stored snapshots.
+Activation order. Snapshots as stored (they never contain filesystem paths).
 
 ### `configuration_counts.csv`
 
-One row per configuration version.
-
-Minimum columns:
-
 ```
-study_id
-config_version
-config_hash
-scheduled_items_generated
-activated_cases
-completed_cases
-incomplete_cases
-expected_timepoints
-reached_primary_timepoints
+study_id config_version config_hash scheduled_items_generated activated_cases
+completed_cases incomplete_cases open_cases expected_timepoints reached_primary_timepoints
 answer_rows_present
 ```
 
-Counting rules:
-
-- schedule item count is grouped by schedule generation provenance
-- case/lifecycle/timepoint/answer counts are grouped by activation configuration provenance
-- practice rows are not included in measured counts
-- counts are recomputed from the same read snapshot as the exported data
-
-These counts are an audit summary and do not replace the row level files.
+Schedule items grouped by generation version; everything else by activation version; practice never counted; computed from the same row sets the files are written from.
 
 ### `manifest.json`
 
-Write last inside the staging directory.
-
-Minimum shape:
+Written last.
 
 ```
 {
@@ -489,264 +229,179 @@ Minimum shape:
   "study_id": "...",
   "generated_at_utc": "...",
   "source_schema_version": 13,
-  "included_config_versions": ["..."],
+  "included_config_versions": ["v1", "v2"],
   "practice_included": false,
-  "files": {
-    "timepoints.csv": {"rows": 0, "sha256": "..."},
-    "answers.csv": {"rows": 0, "sha256": "..."}
-  }
+  "files": {"timepoints.csv": {"rows": 0, "sha256": "..."}, ...}
 }
 ```
 
-List every produced file with row count and SHA256.
+Every bundle file except the manifest, with data row count and SHA256. No clinician name, no keyfile path.
 
-Do not include clinician names or keyfile path in the manifest.
+## Practice
 
-## Practice/QA export
-
-S11i explicitly deferred practice/QA export handling to S11n.
-
-Default `export-phase2` excludes `observation_mode=practice` everywhere.
-
-With `--include-practice`, add separate files:
+Default: practice excluded everywhere. `--include-practice` adds
 
 ```
-practice_timepoints.csv
-practice_answers.csv
+practice_timepoints.csv  practice_answers.csv
 ```
 
-They must never be merged into measured `timepoints.csv` or `answers.csv`.
+- `practice_timepoints.csv`: `study_id clinician_id patient_id t_index timepoint_minutes config_version config_hash observation_mode arm practice_started_at practice_completed_at timepoint_started_at timepoint_ended_at elapsed_seconds telemetry_status foreground_seconds active_seconds`
+- `practice_answers.csv`: the `answers.csv` columns plus `observation_mode`, with `response_status` = `answered|not_applicable|missing` and a blank `missing_reason` (no lifecycle exists)
+- never merged into measured files, audit, counts or PP; free text policy of the practice case's pinned config applies; `manifest.practice_included = true`
 
-Each practice row includes:
+## Keyfile
 
-- `study_id`
-- `clinician_id`
-- `patient_id`
-- `config_version`
-- `config_hash`
-- fixed practice `arm`
-- timing/answer fields available from the practice session/progress/answer rows
-- `observation_mode=practice`
+`--keyfile FILE` (explicit opt in): clinician ids present in the bundle only, `clinician_id,name_normalized`, mode `0600` via `export.write_keyfile`, refused when it resolves inside `--out-dir`, not listed in the manifest. A keyfile failure makes the command exit 1 after the bundle is published, stating that the bundle was written and the keyfile was not.
 
-Do not calculate measured randomisation audit or measured PP status for practice rows.
+## Integrity refusals
 
-Free text policy still applies under the practice case pinned configuration.
+Before anything is published, refuse on:
 
-The manifest records `practice_included=true` when these files are present.
+- study identity mismatch
+- missing `config_version` on an assignment, session, progress or answer row of a measured Phase 2 case
+- unknown version, wrong hash, foreign study history row, unparseable snapshot
+- session/progress/answer version or hash ≠ its case's assignment
+- realised vs planned schedule disagreement, dangling replacement or lifecycle row
+- event of a measured case that cannot be attributed to its case/configuration
+- answer at a timepoint or with a question unknown to the pinned snapshot
+- undecodable stored answer
+- S10 `TimingError`
+- `name_normalized` in an exported payload
 
-## Keyfile behaviour
-
-`--keyfile PATH` is still explicit opt in.
-
-The keyfile:
-
-- contains only clinician IDs present in the produced bundle
-- uses the existing `clinician_id,name_normalized` format
-- is written with mode `0600` where supported
-- must resolve to a path outside `--out-dir`
-- is not listed as a routine research file in `manifest.json`
-
-If the operator points `--keyfile` inside the bundle directory, refuse and explain that the identifying mapping must remain separate.
-
-## Integrity validation
-
-Refuse the entire bundle before publication when any of the following occurs:
-
-- DB study identity differs from supplied study
-- missing `config_version` or `config_hash` on a row that requires provenance
-- unknown config version
-- known version with wrong hash
-- config history row from another study
-- stored config/question snapshot no longer parses
-- assignment/session/progress/answer provenance disagreement
-- answer arm differs from immutable assignment
-- randomised realised arm differs from planned schedule item
-- schedule/replacement link points to a missing row
-- lifecycle row without realised assignment
-- included event cannot be attributed to its measured case/configuration
-- timepoint not present in the pinned configuration
-- unknown question under the pinned questions snapshot
-- invalid stored answer encoding
-- negative derived timing/exposure
-- impossible S11l intervention/PP combination
-- panel summary cannot be reproduced from its raw source events under the pinned threshold
-
-Do not repair these states during export.
+Nothing is repaired.
 
 ## Ordering
 
-Use deterministic ordering:
+- `configuration_history.csv`, `configuration_counts.csv`: `activated_at`, `config_version`
+- `randomisation_audit.csv`: `clinician_id`, `schedule_id`, `case_position`
+- `timepoints.csv`, `answers.csv`, `panel_summaries.csv`: `clinician_id`, `activated_at`, `patient_id`, `t_index`, then question order / `visit_kind`, `panel_id`
+- `behavioral_events.csv`: `event_id`
+- practice files: `clinician_id`, `started_at`, `patient_id`, `t_index`, question order
 
-- `configuration_history.csv`: activation time, config version
-- `configuration_counts.csv`: activation time, config version
-- `randomisation_audit.csv`: clinician ID, schedule ID, case position
-- `timepoints.csv`: clinician ID, activation/case position, t index
-- `answers.csv`: clinician ID, activation/case position, t index, pinned question order
-- `panel_summaries.csv`: clinician ID, activation/case position, t index, visit kind, panel ID
-- `behavioral_events.csv`: event ID
-- practice files: clinician ID, practice start time/patient, t index/question order
-
-The same database snapshot should produce byte stable CSV content apart from manifest/export generation timestamp when no source data changed.
+An unchanged DB yields byte identical CSVs; only `manifest.generated_at_utc` differs.
 
 ## Database/schema changes
 
-None are required for S11n if S11a through S11m persistence contracts are complete.
-
-Do not add materialised export summary tables merely to make export easier.
-
-Derived values should remain reproducible from immutable rows/events/config snapshots.
+None. Read helpers may be added to DAOs.
 
 ## Configuration changes
 
 None.
 
-Export schema version is an exporter contract, not a study `config_hash` field.
-
 ## Public API/route changes
 
-No clinician facing routes.
-
-Add CLI command `export-phase2`.
-
-Legacy `export-answers` remains for pre Phase 2 compatibility but refuses use where it would misrepresent a Phase 2/mixed version database.
+CLI `export-phase2`. No routes.
 
 ## Failure behaviour
 
-- validation/provenance failure -> exit 1, no final output directory
-- output exists without `--force` -> exit 1 before publication
-- staging file write failure -> clean staging best effort, leave prior final output untouched
-- keyfile failure -> no claim that the full requested export succeeded; do not silently omit it
-- overdue lifecycle cases -> do not silently relabel; they export in their persisted current state and operator tooling may still warn to run `expire-cases`
-- missing telemetry -> export explicit status/nulls rather than substitute timing
+- validation/provenance failure → exit 1, no output directory
+- existing destination without `--force` → exit 1 before building
+- staging write failure → staging removed, prior bundle untouched, exit 1
+- keyfile failure → exit 1 with the bundle path named
+- overdue open cases → exported in their persisted state + warning
 
 ## Files expected to change
 
-- new `src/ehr_simulator/export_phase2.py`
-- small reusable CSV/atomic directory writer helpers if appropriate
-- `src/ehr_simulator/cli.py`
-- read helpers in `db/config_history.py`, `db/randomisation.py`, `db/replacements.py`, `db/case_lifecycle.py` where existing APIs are insufficient
-- S11j timing derivation module
-- S11k `panel_exposure.py`
-- S11l `study_variables.py`
-- `src/ehr_simulator/export.py` only for legacy command guard/shared helpers
-- tests, README/operator docs, `CLAUDE.md`, checklist
+New `export_phase2.py`, `export_bundle.py`; `cli.py`; `export.py` (drift message); `db/telemetry.py`, `db/events.py`, `db/randomisation.py`, `db/replacements.py`, `db/case_lifecycle.py`, `db/sessions.py` read helpers; tests; `README.md`, `CLAUDE.md`, checklist.
 
 ## Required tests
 
 ### Snapshot and provenance
 
-1. Export of one valid configuration version succeeds.
-2. Two valid configuration versions in one study succeed.
-3. Each case/timepoint row retains its activation version/hash.
-4. Schedule generation version remains distinct from later activation version where applicable.
-5. Missing config version refuses the bundle.
-6. Unknown config version refuses the bundle.
-7. Known version/wrong hash refuses the bundle.
-8. Stored snapshot parse failure refuses the bundle.
-9. Foreign study identity refuses before files are published.
-10. Export reads one coherent SQLite snapshot even if another connection commits after the snapshot begins.
+1. One valid configuration version exports.
+2. Two versions in one study export.
+3. Each case/timepoint row keeps its activation version/hash.
+4. Schedule generation version stays distinct from a later activation version.
+5. Missing config version refuses.
+6. Unknown config version refuses.
+7. Known version with wrong hash refuses.
+8. Unparseable stored snapshot refuses.
+9. Foreign study identity refuses, nothing published.
+10. The snapshot ignores a commit made by another connection after it began.
 
 ### Timepoints and answers
 
-11. Every activated measured case appears, including incomplete cases.
-12. Unreached configured timepoints appear with `timepoint_reached=false` and no fabricated timing.
-13. Complete zero foreground/active/exposure remains numeric zero, distinct from missing telemetry.
-14. S10 elapsed time is preserved.
-15. S11j foreground/active values match pure derivation.
-16. S11l AI delivery/viewed/failure/leakage/PP values match pure derivation.
-17. Required reached unanswered question exports `reached_unanswered`.
-18. Hidden conditional question exports `hidden_not_applicable`, not missing.
-19. Rule generated answer exports `answer_source=rule` and is present.
-20. Incomplete case missing later response retains the S11l reason.
-21. Mixed question schemas export correctly in long format without inventing union wide columns.
-22. Invalid stored answer encoding refuses.
+11. Every activated case appears, incomplete included.
+12. Unreached timepoints: `timepoint_reached=false`, blank timing.
+13. Complete zero exposure is `0.0`, distinct from missing telemetry.
+14. S10 elapsed matches `timing`.
+15. Foreground/active match `behavioral_timing`.
+16. AI delivered/viewed/failure/leakage/PP match `study_variables`.
+17. Reached unanswered required question → `reached_unanswered`.
+18. Hidden question → `not_applicable`, `branch_state=hidden`, no reason.
+19. Rule answer → `answer_source=rule`, `answered`, `branch_state=derived`.
+20. Incomplete case keeps S11l reasons for later timepoints.
+21. Two question schemas export in long format without union columns.
+22. Undecodable stored answer refuses.
+23. S11l integrity warning (answer arm drift) exports in `integrity_warnings` instead of refusing.
 
 ### Free text and privacy
 
-23. Free text under `routine_export=exclude` retains response provenance but not the value.
-24. Free text under `include_explicit` exports only in `answers.csv`/practice answers with cell guarding.
-25. Free text never appears in `behavioral_events.csv`, panel summaries, manifest, or configuration counts.
-26. Routine bundle contains no `name_normalized`.
-27. Historical login event containing `name_normalized` is not copied into `behavioral_events.csv`.
-28. Keyfile is absent unless requested.
-29. Requested keyfile is mode `0600` and separate from the bundle.
-30. Keyfile path inside `out-dir` is refused.
+24. Free text under `exclude`: row kept, value blank, `value_exported=false`.
+25. Free text under `include_explicit`: value exported, cell guarded.
+26. Free text never appears in events, panels, manifest or counts.
+27. Bundle contains no `name_normalized`, historical login rows excluded.
+28. Keyfile absent unless requested.
+29. Requested keyfile is mode `0600`, outside the bundle.
+30. Keyfile inside `--out-dir` refuses.
 
-### Panel and behavioural telemetry
+### Panels and events
 
-31. Panel raw events reproduce exported panel duration, viewed flag, episode count, first latency, timestamps, and open count.
-32. Primary and revisit panel rows remain distinct.
-33. Multi tab conflict is not silently summed.
-34. A refused second tab conflict flag may coexist with otherwise complete owner telemetry.
-35. Raw behavioural rows carry tab ID and configuration identity.
-36. Included event with unattributable case/config provenance refuses.
+31. Exported raw events re-derive every exported panel row and primary timing value.
+32. Primary and revisit rows stay distinct.
+33. Multi tab observation stays `multi_tab`, blank seconds.
+34. A refused second tab sets `tab_conflict_detected` next to complete owner telemetry.
+35. Event rows carry `render_id`, `tab_id` and configuration identity.
+36. An event of a measured case without attributable provenance refuses.
+37. No AI case exports no AI panel row unless it leaked.
 
 ### Randomisation audit
 
-37. Every schedule item appears whether activated or not.
-38. Planned patient order and arm match persisted schedule.
-39. Activated item shows activation timestamp/version/hash and realised arm.
-40. Planned versus realised mismatch refuses.
-41. Incomplete lifecycle outcome remains visible.
-42. Original and replacement rows expose reconstructable bidirectional linkage.
-43. Randomisation algorithm version, seed/context, block metadata, and allocation state are exported.
-44. Rebuilding the known test schedule from exported generation inputs reproduces the planned schedule.
+38. Every schedule item appears, activated or not.
+39. Planned order and arm match the stored schedule.
+40. Activated item shows activation time, version, hash, realised arm.
+41. Planned vs realised mismatch refuses.
+42. Incomplete lifecycle outcome visible.
+43. Original ↔ replacement linkage in both directions.
+44. Exported generation inputs regenerate the planned schedule.
 
-### Configuration files/counts
+### Configuration
 
-45. Configuration history exports version, hash, activation timestamp, description, optional reason, and snapshots.
-46. `configuration_counts.csv` activated/completed/incomplete case counts match row level data.
+45. History exports version, hash, activation time, description, reason, snapshots.
+46. Counts match row level data per activation version.
 47. Reached primary timepoint counts match `timepoints.csv`.
-48. Counts remain separated by activation configuration version.
 
 ### Practice
 
-49. Default Phase 2 export contains no practice rows.
-50. `--include-practice` creates separate practice files only.
-51. Practice rows never enter measured randomisation/PP files or counts.
-52. Practice free text follows its pinned export policy.
+48. Default export has no practice rows.
+49. `--include-practice` adds only the two practice files.
+50. Practice never enters measured files or counts.
+51. Practice free text follows its pinned policy.
 
-### Atomic output and manifest
+### Output
 
-53. A validation failure creates no final bundle directory.
-54. Existing destination refuses without `--force`.
-55. A staged write failure leaves an existing final bundle unchanged.
-56. Manifest names every produced routine file and correct row count.
-57. Manifest SHA256 values match the final files.
-58. Manifest contains study/schema/export identity and no clinician names.
-59. Same unchanged DB snapshot yields deterministic row ordering/content.
+52. Validation failure leaves no directory.
+53. Existing destination refuses without `--force`.
+54. `--force` failure leaves the previous bundle unchanged.
+55. Manifest lists every file with correct row counts.
+56. Manifest SHA256 match the files.
+57. Manifest has no clinician name.
+58. Two exports of an unchanged DB are byte identical apart from the manifest timestamp.
+59. Subprocess: refusal exits 1, success 0.
 
-### Legacy/regression
+### Legacy / regression
 
-60. Pre Phase 2 `export-answers` behaviour remains green.
-61. Phase 2/mixed version use of legacy `export-answers` refuses with guidance to `export-phase2`.
-62. All S11a through S11m tests remain green.
-63. Full CI remains green.
+60. `export-answers` behaviour unchanged; its drift refusal names `export-phase2`.
+61. All S11a–S11m tests stay green; full CI green.
 
 ## Out of scope
 
-S11n does not implement:
-
-- statistical analysis or effect estimation
-- statistical imputation
-- de identification beyond the locked pseudonymous identifier policy
-- automatic upload to a data warehouse
-- Parquet/Arrow as a required format
-- a clinician name mapping inside the routine bundle
-- mutable materialised summary tables
-- changing randomisation or PP definitions
-- changing retention policy
+Statistics, imputation, further de identification, warehouse upload, Parquet, a name mapping in the bundle, materialised summary tables, new randomisation or PP definitions, retention.
 
 ## Acceptance
 
-S11n is complete when one command can export a read consistent, pseudonymised, linked Phase 2 bundle for a study containing multiple valid configuration versions; every row carries sufficient stable identity/provenance to join and interpret it; incomplete cases and planned versus realised randomisation remain reconstructable; raw events reproduce timing/panel summaries; PP and missingness remain faithful to S11l; practice/free text/keyfile data obey their privacy boundaries; and any provenance inconsistency refuses the bundle instead of being silently repaired.
+One command exports a read consistent, pseudonymised, linked Phase 2 bundle for a study with several valid configuration versions; every row carries the identity and provenance to join and interpret it; incomplete cases and planned vs realised randomisation are reconstructable; raw events reproduce timing and panel summaries; PP and missingness are exactly S11l's; practice, free text and keyfile obey their boundaries; provenance inconsistencies refuse instead of being repaired.
 
 ## Checklist items closed
 
-Primarily Session 11 implementation checklist:
-
-- 31 Phase 2 export set
-- 32 Common export identifiers
-- 33 Mixed configuration export behaviour
-
-S11n also closes the export related deferred items from study identity, configuration provenance, randomisation provenance, timing/panel telemetry, PP, intervention failure/leakage, missing responses, practice mode, and free text.
+Sections 31 (export set), 32 (common identifiers), 33 (mixed configuration export), plus the export deferrals in sections 3, 5, 9 and 21–27.
