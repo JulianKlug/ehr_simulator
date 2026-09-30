@@ -378,13 +378,30 @@ def test_g_resume_keeps_the_branch(integrated: Integrated) -> None:
     assert slot is not None and not slot.find("form")
 
 
-def test_g_unreached_and_unanswered_stay_distinct(
-    integrated: Integrated, bundle: Phase2Bundle
-) -> None:
-    lost = _rows(bundle, "answers.csv", patient_id=integrated.z_lost.patient_id)
-    reasons = {r["missing_reason"] for r in lost if r["response_status"] == "missing"}
-    assert reasons == {"case_abandoned"}
-    assert {r["response_status"] for r in lost if r["t_index"] == "0"} >= {"answered"}
+def test_g_reached_unanswered_and_unreached_stay_distinct(tmp_path: Path) -> None:  # 21
+    """A case abandoned at a timepoint it reached: that timepoint's blank
+    required questions are reached_unanswered, later ones case_abandoned."""
+    h = _new_study(tmp_path)
+    with _tab(h) as client:
+        patient_id = _started_patient(_start(client))
+        render_id = _page(client, patient_id)
+        _claim(client, patient_id, TAB_A, render_id)
+        headers = {**HX, **_owner(TAB_A, render_id)}
+        client.post(
+            f"/patient/{patient_id}/timepoint/0/answer",
+            data={"question_id": "confidence", "value": "3"},
+            headers=headers,
+        )
+        h.clock.advance(GRACE + 1)
+        client.post(f"/case/{patient_id}/heartbeat")
+
+    bundle = _bundle(h.db_path, h.v1.study.study_id)
+    cells = {(r["t_index"], r["question_id"]): r for r in _rows(bundle, "answers.csv")}
+    assert cells[("0", "confidence")]["response_status"] == "answered"
+    assert cells[("0", "deterioration_6h")]["missing_reason"] == "reached_unanswered"
+    assert cells[("0", "good_outcome_3mo")]["missing_reason"] == "reached_unanswered"
+    assert cells[("1", "deterioration_6h")]["missing_reason"] == "case_abandoned"
+    assert cells[("0", "primary_cause")]["response_status"] == "not_applicable"
 
 
 # ---------------------------------------------------------------------------
