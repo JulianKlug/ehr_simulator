@@ -165,9 +165,10 @@ def _bundle(xh: LifecycleHarness, **kwargs: Any) -> export_phase2.Phase2Bundle:
         conn.close()
 
 
-def _rows(bundle: export_phase2.Phase2Bundle, name: str) -> list[dict[str, str]]:
+def _rows(bundle: export_phase2.Phase2Bundle, name: str, **match: str) -> list[dict[str, str]]:
     table = next(t for t in bundle.tables if t.name == name)
-    return [dict(zip(table.header, row, strict=True)) for row in table.rows]
+    rows = [dict(zip(table.header, row, strict=True)) for row in table.rows]
+    return [r for r in rows if all(r[k] == v for k, v in match.items())]
 
 
 def _sql(xh: LifecycleHarness, sql: str, params: tuple = ()) -> None:
@@ -704,6 +705,10 @@ def test_history_and_counts(xh: LifecycleHarness, walked: dict) -> None:  # 45-4
 
 @pytest.fixture
 def ph(tmp_path: Path, study_fixture_dir: Path) -> LifecycleHarness:
+    return _practice_study(tmp_path, study_fixture_dir, "exclude")
+
+
+def _practice_study(tmp_path: Path, study_fixture_dir: Path, routine: str) -> LifecycleHarness:
     data = yaml.safe_load((study_fixture_dir / "study_lifecycle.yaml").read_text())
     data["telemetry"] = TELEMETRY
     data["patient_ids"] = ["synth_001", "synth_002"]
@@ -711,7 +716,7 @@ def ph(tmp_path: Path, study_fixture_dir: Path) -> LifecycleHarness:
     data["study_behaviour"] = {
         "backward_navigation": "allow_readonly",
         "practice": {"enabled": True, "patient_ids": ["synth_003"], "arm": "no_ai"},
-        "free_text": {"enabled": True, "routine_export": "exclude"},
+        "free_text": {"enabled": True, "routine_export": routine},
     }
     path = tmp_path / "study_practice.yaml"
     path.write_text(yaml.safe_dump(data))
@@ -837,3 +842,112 @@ def test_process_exit_codes(xh: LifecycleHarness, walked: dict) -> None:  # 59
     base = [str(xh.v1.study_yaml), "--db-path", str(xh.db_path), "--out-dir", str(out)]
     assert run(*base) == 0
     assert run(*base) == 1
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "replacement_patient_id = (SELECT patient_id FROM randomisation_schedule_items "
+        "WHERE patient_id NOT IN (SELECT replacement_patient_id FROM case_replacements) LIMIT 1)",
+        "planned_arm = CASE planned_arm WHEN 'ai' THEN 'no_ai' ELSE 'ai' END",
+        "clinician_id = 'ffffffffffffffff'",
+    ],
+    ids=["patient", "arm", "clinician"],
+)
+def test_inconsistent_replacement_refuses(xh: LifecycleHarness, walked: dict, change: str) -> None:
+    """Review fix: a plan must agree with the schedule item it names."""
+    with xh.conn() as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DROP TRIGGER trg_case_replacements_activate_once")
+        conn.execute(f"UPDATE case_replacements SET {change}")
+        conn.commit()
+    with pytest.raises(Phase2ExportError, match="replacement"):
+        _bundle(xh)
+
+
+# ---------------------------------------------------------------------------
+# Review additions: targeted cases for #13, #21, #52
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("routine", "exported"), [("exclude", False), ("include_explicit", True)])
+def test_practice_free_text_follows_its_policy(
+    tmp_path: Path, study_fixture_dir: Path, routine: str, exported: bool
+) -> None:  # 51
+    ph = _practice_study(tmp_path, study_fixture_dir, routine)
+    with _tab(ph) as client:
+        client.post("/practice/start", follow_redirects=False)
+        saved = client.post(
+            "/patient/synth_003/timepoint/0/answer",
+            data={"question_id": "free_notes", "value": "practice note"},
+            headers=HX,
+        )
+        assert saved.status_code == 200, saved.text
+
+    bundle = _bundle(ph, practice_export=PracticeExport.INCLUDE)
+    cell = _rows(bundle, "practice_answers.csv", t_index="0", question_id="free_notes")[0]
+    assert cell["response_status"] == "answered"
+    assert cell["value_exported"] == str(exported).lower()
+    assert (cell["response_value"] == "practice note") is exported
+
+
+def test_complete_zero_exposure_differs_from_missing(xh: LifecycleHarness) -> None:  # 13
+    with _tab(xh) as client:
+        patient_id = _started_patient(_start(client))
+        render_id = _page(client, patient_id)
+        _claim(client, patient_id, TAB_A, render_id)
+        mount = {"panel_id": "labs", "expanded": True, "collapsible": True, "state": "loading"}
+        events = [
+            _event(render_id, 1, "browser.timepoint_enter", client_mono_ms=0.0),
+            _event(render_id, 2, "panel.mount", client_mono_ms=10.0, payload=mount),
+            _event(render_id, 3, "browser.timepoint_exit", client_mono_ms=3000.0),
+        ]
+        assert _post(client, TAB_A, events).status_code == HTTP_NO_CONTENT
+
+    bundle = _bundle(xh)
+    labs = _rows(bundle, "panel_summaries.csv", patient_id=patient_id, t_index="0", panel_id="labs")
+    assert labs[0]["mounted"] == "true" and labs[0]["telemetry_status"] == "complete"
+    assert (labs[0]["qualifying_seconds"], labs[0]["viewed"]) == ("0.0", "false")
+    later = _rows(bundle, "timepoints.csv", patient_id=patient_id, t_index="1")[0]
+    assert later["telemetry_status"] == "missing"
+    assert later["foreground_seconds"] == later["active_seconds"] == ""
+    assert not _rows(bundle, "panel_summaries.csv", patient_id=patient_id, t_index="1")
+
+
+def test_two_question_schemas_export_long(
+    xh: LifecycleHarness, study_fixture_dir: Path
+) -> None:  # 21
+    with _tab(xh) as client:
+        first = _walk(client, stop_at=0)
+    questions = yaml.safe_load((study_fixture_dir / "questions.yaml").read_text())
+    questions["questions"].append(
+        {
+            "question_id": "extra_q",
+            "prompt": "Extra",
+            "response_type": "categorical",
+            "options": ["A", "B"],
+            "required": False,
+        }
+    )
+    q_path = xh.tmp_path / "questions_v2.yaml"
+    q_path.write_text(yaml.safe_dump(questions))
+    v2 = xh.variant("v2")
+    v2 = type(v2)(v2.version, v2.study_yaml, q_path)
+    xh.activate(v2)
+    with xh.client(v2) as client:
+        client.event_hooks["response"].clear()
+        del client.tab_views
+        _walk(client, patient_id=first)
+        second = _walk(client, stop_at=0)
+
+    bundle = _bundle(xh)
+    table = next(t for t in bundle.tables if t.name == "answers.csv")
+    assert "extra_q" not in table.header
+    ids = {
+        pid: {r["question_id"] for r in _rows(bundle, "answers.csv", patient_id=pid)}
+        for pid in (first, second)
+    }
+    assert "extra_q" not in ids[first]
+    assert ids[second] == ids[first] | {"extra_q"}
+    extra = _rows(bundle, "answers.csv", patient_id=second, t_index="0", question_id="extra_q")
+    assert extra[0]["config_version"] == "v2" and extra[0]["response_status"] == "missing"

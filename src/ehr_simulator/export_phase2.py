@@ -892,6 +892,13 @@ def _audit_rows(
         position = (plan.replacement_schedule_id, plan.replacement_case_position)
         if position not in items:
             raise Phase2ExportError(f"{where} points to a missing schedule item")
+        stored, item = items[position]
+        if (
+            stored.schedule.clinician_id != plan.clinician_id
+            or item.patient_id != plan.replacement_patient_id
+            or item.planned_arm != plan.planned_arm
+        ):
+            raise Phase2ExportError(f"{where} disagrees with the schedule item it names")
         if plan.activated_at is not None and position not in realised:
             raise Phase2ExportError(f"{where} is activated but its case is missing")
         replacing[position] = plan
