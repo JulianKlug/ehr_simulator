@@ -12,6 +12,9 @@
 #   uv run ehr-simulator activate-config configs/example_phase2_config.yaml configs/example_phase2_questions.yaml \
 #       --version v1 --description "Phase 2 example"
 #   uv run ehr-simulator serve --config  configs/example_phase2_config.yaml --questions configs/example_phase2_questions.yaml
+#   uv run ehr-simulator expire-cases configs/example_phase2_config.yaml   # when clinicians left
+#   uv run ehr-simulator backup --db-path data/study_example_phase2.db
+#   uv run ehr-simulator export-phase2 configs/example_phase2_config.yaml
 #
 # Editing this file changes config_hash: stop the server, activate a new
 # --version, restart.
@@ -85,7 +88,7 @@ clinician_facing:
 # timepoint). Feedback flags must stay false (no feedback is implemented).
 # Practice cases (enabled: true) need their own patient_ids, disjoint from
 # patient_ids in every version. Free text is off; enabling it makes
-# `routine_export` decide whether export-answers includes those columns.
+# `routine_export` decide whether export-answers and export-phase2 include their values.
 # First use case: allow_readonly (gate §10.1).
 study_behaviour:
   backward_navigation: allow_readonly

@@ -639,40 +639,42 @@ The eventual S11 specification should contain a complete numbered test inventory
 
 At minimum include regression coverage for:
 
-- [ ] GET does not consume randomisation.
-- [ ] Start case activates exactly once.
-- [ ] Activated assignment is immutable.
-- [ ] Patient is never repeated for the same clinician.
-- [ ] Adaptive scheduling improves or preserves configured balance.
-- [ ] Existing activated assignments survive later scheduling.
-- [ ] Starting arm balancing works.
-- [ ] Randomisation reproduces from stored inputs.
-- [ ] Study ID mismatch refuses startup.
-- [ ] Configuration change does not mutate active cases.
-- [ ] Mixed valid configuration versions export successfully.
-- [ ] Invalid configuration provenance still refuses export.
-- [ ] No AI condition contains no AI panel.
-- [ ] AI condition displays only the frozen intervention artifact.
-- [ ] Conditional cause question gating works.
-- [ ] Three month outcome dependency works.
-- [ ] Background tab time does not count toward panel exposure.
-- [ ] Unfocused browser time does not count toward panel exposure.
-- [ ] Separate exposure episodes accumulate correctly.
-- [ ] Exposure resets at the next timepoint.
-- [ ] Collapsed panel does not accumulate exposure.
-- [ ] AI viewing does not require recent interaction.
-- [ ] Active time excludes inactivity beyond threshold.
-- [ ] Passive mouse movement does not reset inactivity.
-- [ ] Panel open does not automatically imply viewed.
-- [ ] Intervention failure preserves ITT arm.
-- [ ] AI leakage preserves no AI ITT arm.
-- [ ] PP compliance is observation specific.
-- [ ] Missing responses remain missing.
-- [ ] Replacement case never repeats a patient.
-- [ ] Pause/resume within configured grace period works.
-- [ ] Timeout produces an incomplete activated case.
-- [ ] Behavioural events contain clinician ID but not clinician name.
-- [ ] Tab conflicts are prevented or recorded.
+(Each item is covered by its owning S11x test file; the cross component path by `tests/test_phase2_integration.py`, `tests/e2e/test_phase2_walk.py` and `tests/e2e/test_multitab_walk.py` — S11o.)
+
+- [x] GET does not consume randomisation.
+- [x] Start case activates exactly once.
+- [x] Activated assignment is immutable.
+- [x] Patient is never repeated for the same clinician.
+- [x] Adaptive scheduling improves or preserves configured balance.
+- [x] Existing activated assignments survive later scheduling.
+- [x] Starting arm balancing works.
+- [x] Randomisation reproduces from stored inputs.
+- [x] Study ID mismatch refuses startup.
+- [x] Configuration change does not mutate active cases.
+- [x] Mixed valid configuration versions export successfully.
+- [x] Invalid configuration provenance still refuses export.
+- [x] No AI condition contains no AI panel.
+- [x] AI condition displays only the frozen intervention artifact.
+- [x] Conditional cause question gating works.
+- [x] Three month outcome dependency works.
+- [x] Background tab time does not count toward panel exposure.
+- [x] Unfocused browser time does not count toward panel exposure.
+- [x] Separate exposure episodes accumulate correctly.
+- [x] Exposure resets at the next timepoint.
+- [x] Collapsed panel does not accumulate exposure.
+- [x] AI viewing does not require recent interaction.
+- [x] Active time excludes inactivity beyond threshold.
+- [x] Passive mouse movement does not reset inactivity.
+- [x] Panel open does not automatically imply viewed.
+- [x] Intervention failure preserves ITT arm.
+- [x] AI leakage preserves no AI ITT arm.
+- [x] PP compliance is observation specific.
+- [x] Missing responses remain missing.
+- [x] Replacement case never repeats a patient.
+- [x] Pause/resume within configured grace period works.
+- [x] Timeout produces an incomplete activated case.
+- [x] Behavioural events contain clinician ID but not clinician name.
+- [x] Tab conflicts are prevented or recorded.
 
 ---
 
@@ -720,3 +722,5 @@ Phase 2 software implementation is complete only when the simulator can:
 14. Preserve configuration provenance for every research observation.
 15. Avoid introducing scientific decisions that belong to the study protocol.
 
+
+Status (S11o, 2026-09-28): 1–14 are implemented and exercised end to end by `tests/test_phase2_integration.py` (A–G, I, J scenarios) and the Phase 2 e2e walks. 15 holds as far as code goes: study specific parameters stay configuration (section 36); the `primary_cause` options in `configs/example_phase2_questions.yaml` remain labelled placeholders (gate §26 item 11 open), and the `technical_failure` missing reason stays reserved (section 24).

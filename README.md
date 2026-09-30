@@ -7,15 +7,12 @@ AI model predicted, and asks you a short set of questions at each timepoint.
 The point isn't the chart. The point is to measure how AI assistance changes
 the assessments and decisions you'd make.
 
-> **Status — September 2026.** Sessions 1–6, 9a + 9b. You sign in with your
-> name, walk three synthetic patients across three timepoints with vitals,
-> labs, admission, imaging, and AI panels visible, and answer the configured
-> questions at each timepoint — answers auto-save to a local SQLite file, and
-> the next timepoint stays locked until the current one is answered.
-> **CSV export and AI-on/AI-off randomization are not in this build yet** —
-> they ship in Sessions 9c and 11. If a teammate has asked you to use this for
-> an actual study session, you are an early reviewer, not an end user. See
-> *What this build is for* below.
+> **Status — September 2026.** Phase 1 (walk patients, answer gated
+> questions, CSV export) and Phase 2 (randomised AI / no AI cases with
+> behavioural telemetry and a linked research export) are implemented on
+> synthetic patients. Real Geneva / MIMIC data in the UI is not wired yet.
+> If a teammate asked you to use this for a study session, you are an early
+> reviewer, not an end user. See *What this build is for* below.
 
 ---
 
@@ -48,6 +45,38 @@ The server stays in your terminal — `Ctrl-C` to stop. Logs go to
 `./logs/current.jsonl` (one JSON record per request, rolled at UTC midnight);
 answers and interaction events go to `./data/study_<study_id>.db` in study
 mode, or `./data/ehr_simulator.db` without a study config.
+
+---
+
+## Running a Phase 2 study
+
+A study config with a `randomisation` block (see
+`configs/example_phase2_config.yaml`) runs Phase 2: clinicians press
+**Start case** and get their next patient and arm from a stored schedule.
+Operator sequence:
+
+```bash
+uv run ehr-simulator validate-config STUDY.yaml QUESTIONS.yaml
+uv run ehr-simulator activate-config STUDY.yaml QUESTIONS.yaml --version v1 --description "…"
+uv run ehr-simulator serve --config STUDY.yaml --questions QUESTIONS.yaml
+uv run ehr-simulator expire-cases STUDY.yaml      # cases whose clinician never came back
+uv run ehr-simulator backup --db-path data/study_<study_id>.db
+uv run ehr-simulator export-phase2 STUDY.yaml     # the research bundle
+```
+
+- **One database per study.** The server refuses a database of another `study_id`.
+- **Configuration changes are explicit.** Editing the YAML changes its hash;
+  activate a new `--version` and restart. Started cases keep their version.
+- **Start case is the allocation boundary.** Opening a page never assigns an arm.
+- **One tab per case.** A second browser tab of the same active case shows a
+  notice and cannot save; close the other tab and press Retry.
+- **Backups are study isolated:** `data/backups/<study_id>/study_<study_id>_schema_<N>_<UTC>.db`.
+- **`export-phase2` writes linked CSVs** (`timepoints`, `answers`,
+  `panel_summaries`, `behavioral_events`, `randomisation_audit`,
+  `configuration_history`, `configuration_counts`, `manifest.json`) across every
+  configuration version. `--keyfile FILE` (outside the bundle, mode 600) is the
+  only output that maps `clinician_id` back to names. `export-answers` stays the
+  single configuration wide CSV.
 
 ---
 
@@ -202,15 +231,18 @@ Findings from earlier sessions: `specs/feedback/session-02-feedback.md`.
 ## Privacy
 
 The simulator runs entirely on your local machine. Nothing leaves your laptop.
-No cloud, no telemetry. Three things are written to disk:
+No cloud. In Phase 2 the page reports interaction timing (visibility, focus,
+clicks/keys/scrolls without their content, which panels were on screen) to the
+local server only. Three things are written to disk:
 
 - `logs/current.jsonl` — request paths, timepoint indices, and your
   `clinician_id`. Never any free-text input.
 - `data/ehr_simulator.db` (or `data/study_<study_id>.db` in study mode) —
-  your name (case-folded), your answers including
-  free text, and one row per interaction event.
+  your name (case-folded, in the clinicians table only), your answers including
+  free text, and one row per interaction event keyed by `clinician_id`.
 - `data/backups/` — a copy of that database, made when a server that wrote
-  something shuts down. `serve --backup-dir` moves it.
+  something shuts down (`data/backups/<study_id>/` in study mode).
+  `serve --backup-dir` moves it.
 
 Move the database with `serve --db-path`, the `EHR_SIM_DB_PATH` environment
 variable, or `db_path:` in the study config. The last two must point inside the
@@ -225,9 +257,6 @@ database, and the identity check still applies to any path you name.
 These are scheduled for later sessions. If you're missing one of these, you
 are not missing it because of a bug:
 
-- **CSV export of answers** — they live in SQLite only for now. (Session 9c.)
-- **AI on/off randomization** — the AI panel is always shown for now.
-  (Session 11.)
 - **MIMIC / Geneva real-data** — only synthetic patients today. (Sessions 7
   and 8.)
 - **DICOM image rendering** — the imaging panel shows the report text, not

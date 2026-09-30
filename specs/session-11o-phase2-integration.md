@@ -8,6 +8,18 @@ No major scientific or platform feature originates in S11o.
 
 S11o is the final integration/regression gate. When an integration scenario exposes a defect, fix the owning implementation while preserving its locked specification. Do not solve an integration failure by inventing a new study policy.
 
+## Review revisions (2026-09-28)
+
+Changes against the first draft, from the implemented S11a–S11n code:
+
+1. **Failure and leakage are generated through public boundaries, no test hooks.** S11l has no `intervention.*` events. Scenario E uses an AI render reported `shown` whose complete telemetry carries no AI `panel.mount` (`display_failure`, posted through `/telemetry/events`). The `missing_artifact` path (boot refuses a mismatched artifact, so it cannot be staged end to end on the synthetic reference) stays covered by the S11g/S11l unit tests. Scenario F posts an AI `panel.mount` for a no AI render through `/telemetry/events` (leakage).
+2. **Status name** is `multi_tab` (S11m revision 1).
+3. **Multi tab e2e** uses two Playwright pages in one browser context: shared cookie, separate `sessionStorage`, so two tab ids.
+4. **Legacy export on the mixed database** is refused by the existing hash drift rule; the assertion is that refusal plus the `export-phase2` hint (S11n revision 6).
+5. **An open case blocks Start case** (S11d/S11e: active or paused). Scenario D therefore resumes case A under the v2 server and finishes it before case B starts; A stays pinned to v1 throughout.
+6. **Harmless v2 change** for Scenario D: `case_lifecycle.study_target_completed_cases` (display only, S11e) — it moves `config_hash` without a new scientific parameter.
+7. **Test files** trimmed to three: `tests/test_phase2_integration.py` (TestClient + CLI, scenarios A–G, I–K), `tests/e2e/test_phase2_walk.py` (AI and no AI browser walks, S11h branch), `tests/e2e/test_multitab_walk.py` (scenario H; shared with S11m test 46).
+
 ## Core invariants
 
 1. S11o introduces no new scientific design decision.
@@ -52,7 +64,7 @@ The fixture must exercise existing configuration capabilities rather than add ne
 - free text disabled or excluded from routine export
 - S11j telemetry thresholds including 60 second inactivity, 5 percent panel viewport threshold, 2 second viewed threshold
 
-Use a second configuration version that changes a harmless study behaviour/config field already allowed by the gate while preserving the same `study_id` and dataset. The test must not invent a new scientific parameter solely to force a hash change.
+Use a second configuration version that changes only `case_lifecycle.study_target_completed_cases` (display only), preserving `study_id` and dataset. No new scientific parameter is invented to force a hash change.
 
 ### Scenario A — normal AI case
 
@@ -127,7 +139,7 @@ Exercise:
 activate v1
 → start case A
 → activate v2
-→ keep case A open/resume
+→ resume case A under the v2 server and finish it
 → start case B
 → export mixed versions
 ```
@@ -140,11 +152,11 @@ Assert:
 - mixed version Phase 2 export succeeds
 - row level version/hash values are correct
 - configuration counts agree with row level observations
-- legacy single generation export cannot silently reinterpret the mixed database
+- legacy `export-answers` refuses the mixed database (hash drift) and names `export-phase2`
 
 ### Scenario E — AI intervention failure
 
-Create one controlled AI assigned observation where the S11l failure path is triggered, for example browser mounted acknowledgement never arrives or the configured intervention is made unavailable through the existing test hook/fixture mechanism.
+Create AI assigned observations where the S11l failure path triggers: a `shown` render whose complete telemetry has no AI `panel.mount` (`display_failure`).
 
 Assert:
 
@@ -159,7 +171,7 @@ Do not mutate production artifact identity rules merely to make this test easy.
 
 ### Scenario F — no AI leakage
 
-Inject a controlled trustworthy leakage signal through the S11l test/service boundary for a no AI observation.
+Post an AI `panel.mount` for a no AI render through `/telemetry/events` (the intake accepts any closed panel id; S11l reads it as leakage).
 
 Assert:
 
@@ -194,7 +206,7 @@ Assert:
 - second tab answer/advance/primary telemetry is blocked
 - `tab.conflict` is auditable
 - valid owner telemetry is not double counted
-- when a true unresolved multi tab telemetry conflict is deliberately constructed in a lower level fixture, derived status is `multi_tab_conflict` and durations are not summed
+- when accepted telemetry from two tabs is deliberately constructed in a lower level fixture, derived status is `multi_tab` and durations are not summed
 
 ### Scenario I — backup identity and restore smoke
 
@@ -234,14 +246,12 @@ S11o does not remove earlier behaviour merely because Phase 2 now exists.
 
 Prefer a small number of readable scenario files over one giant test.
 
-Suggested additions:
+Files:
 
 ```
-tests/e2e/test_phase2_ai_walk.py
-tests/e2e/test_phase2_no_ai_walk.py
-tests/e2e/test_phase2_multitab.py
 tests/test_phase2_integration.py
-tests/test_phase2_export_integration.py
+tests/e2e/test_phase2_walk.py
+tests/e2e/test_multitab_walk.py
 ```
 
 Reuse existing test helpers/fixtures for:

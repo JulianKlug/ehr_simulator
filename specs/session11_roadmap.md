@@ -1,5 +1,7 @@
 # Session 11 — Phase 2 Implementation Roadmap
 
+> **Status (2026-09-28):** S11a–S11o implemented. The per subsession specs (`specs/session-11{a..o}-*.md`) are authoritative where they refine this plan; S11m–o carry review revisions against the implemented code.
+
 ## 1. Purpose
 
 Session 11 implements the Phase 2 study framework defined by the locked Phase 2 gate.
