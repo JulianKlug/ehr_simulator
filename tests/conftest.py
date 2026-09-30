@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from collections.abc import Iterator
+from enum import StrEnum
 from pathlib import Path
 
 import pytest
@@ -402,3 +403,40 @@ def ensure_tab_owner(client: object, patient_id: str, t_index: int) -> None:
         client.headers[RENDER_ID_HEADER] = views[patient_id]  # type: ignore[attr-defined]
         return
     client.get(f"/patient/{patient_id}/timepoint/{t_index}")  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# S11p: clinician profiles
+# ---------------------------------------------------------------------------
+
+
+class ProfileSetup(StrEnum):
+    AUTO = "auto"  # save a valid profile at boot when the study collects one
+    NONE = "none"
+
+
+def valid_profile_form(config: object) -> dict[str, str]:
+    """A physician profile drawn from the configured vocabulary."""
+    return {
+        "professional_role": "physician",
+        "years_of_practice": "7.5",
+        "country_of_practice": config.countries[0],  # type: ignore[attr-defined]
+        "primary_specialty": config.specialties[0],  # type: ignore[attr-defined]
+    }
+
+
+def ensure_profile(client: object) -> None:
+    """Save a valid profile once, unless one exists or none is collected."""
+    study = getattr(client.app.state, "study", None)  # type: ignore[attr-defined]
+    config = getattr(study, "clinician_profile", None)
+    if config is None:
+        return
+    from ehr_simulator.db import clinician_profiles
+
+    clinician_id = client.cookies.get("ehrsim_clinician_id")  # type: ignore[attr-defined]
+    if clinician_profiles.fetch(client.app.state.db, clinician_id) is not None:  # type: ignore[attr-defined]
+        return
+    response = client.post(  # type: ignore[attr-defined]
+        "/profile", data=valid_profile_form(config), follow_redirects=False
+    )
+    assert response.status_code == 303, response.text

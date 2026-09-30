@@ -33,6 +33,7 @@ from ehr_simulator import cli, export_phase2
 from ehr_simulator.behavioral_timing import derive_observation_timings
 from ehr_simulator.db import connect
 from ehr_simulator.db.connection import AccessMode
+from ehr_simulator.db.migrations import MIGRATIONS
 from ehr_simulator.db.telemetry import RenderRow, TelemetryRow
 from ehr_simulator.export_bundle import (
     MANIFEST_NAME,
@@ -216,9 +217,10 @@ def test_one_version_exports_every_file(xh: LifecycleHarness, walked: dict) -> N
         "randomisation_audit.csv",
         "configuration_history.csv",
         "configuration_counts.csv",
+        "clinicians.csv",
     ]
     assert bundle.config_versions == ("v1",)
-    assert bundle.source_schema_version == 13
+    assert bundle.source_schema_version == len(MIGRATIONS)
 
 
 def _mixed(xh: LifecycleHarness) -> dict[str, str]:

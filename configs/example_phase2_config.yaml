@@ -115,3 +115,13 @@ telemetry:
   inactivity_threshold_seconds: 60
   panel_viewport_threshold: 0.05
   panel_viewed_threshold_seconds: 2.0
+
+# S11p clinician characteristics, collected once before the first measured
+# case (Start case refuses until complete; locked afterwards). Role is fixed
+# (physician | nurse); physicians pick a specialty, nurses none. Countries
+# are ISO 3166-1 alpha-2 codes.
+# PLACEHOLDER: both lists are study decisions; replace them before
+# measured data collection.
+clinician_profile:
+  specialties: [neurology, emergency_medicine, internal_medicine, intensive_care, other]
+  countries: [CH, FR, DE, IT, AT]

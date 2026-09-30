@@ -25,6 +25,7 @@ Changes against the first draft, from the implemented S11j–m code:
 
 11. **Replacement plans are checked against the item they name.** The foreign key covers only `(replacement_schedule_id, replacement_case_position)`; the exporter additionally refuses a plan whose schedule belongs to another clinician, whose item patient ≠ `replacement_patient_id`, or whose item arm ≠ the plan's `planned_arm`.
 12. **`tab_conflict_detected` in `timepoints.csv`** counts primary renders only (S11m revision 14); `panel_summaries.csv` keeps the per `visit_kind` flag.
+13. **S11p adds `clinicians.csv`** (one row per bundle clinician: `profile_status` and the stored characteristics, never the name); see `specs/session-11p-clinician-characteristics.md`.
 
 ## Core invariants
 

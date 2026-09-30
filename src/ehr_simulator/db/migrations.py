@@ -484,6 +484,40 @@ CREATE TABLE IF NOT EXISTS case_tab_leases (
 );
 """
 
+# S11p: clinician characteristics, one row per clinician. Editable until
+# the clinician's first measured case exists, then locked (trigger); a
+# physician always has a specialty, a nurse never. No inline SQL comments:
+# sqlite_master stores the DDL verbatim and the schema-snapshot test
+# compares it byte-for-byte.
+_S11P_CLINICIAN_PROFILES_DDL = """
+CREATE TABLE IF NOT EXISTS clinician_profiles (
+    clinician_id         TEXT PRIMARY KEY REFERENCES clinicians(clinician_id),
+    professional_role    TEXT NOT NULL CHECK (professional_role IN ('physician', 'nurse')),
+    years_of_practice    REAL NOT NULL CHECK (years_of_practice >= 0),
+    country_of_practice  TEXT NOT NULL,
+    primary_specialty    TEXT,
+    recorded_at          TIMESTAMP NOT NULL,
+    updated_at           TIMESTAMP NOT NULL,
+    CHECK ((professional_role = 'physician') = (primary_specialty IS NOT NULL))
+);
+
+CREATE TRIGGER IF NOT EXISTS trg_clinician_profiles_locked
+BEFORE UPDATE ON clinician_profiles
+WHEN EXISTS (
+    SELECT 1 FROM arm_assignments
+    WHERE clinician_id = OLD.clinician_id AND arm_source = 'phase2_randomized'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'clinician profile is locked once a measured case exists');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_clinician_profiles_no_delete
+BEFORE DELETE ON clinician_profiles
+BEGIN
+    SELECT RAISE(ABORT, 'clinician profiles are never deleted');
+END;
+"""
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
@@ -526,6 +560,7 @@ MIGRATIONS: tuple[Migration, ...] = (
         post_sql=_S11J_TELEMETRY_DDL,
     ),
     Migration(version=13, name="s11m_case_tab_leases", up_sql=_S11M_TAB_LEASES_DDL),
+    Migration(version=14, name="s11p_clinician_profiles", up_sql=_S11P_CLINICIAN_PROFILES_DDL),
 )
 
 

@@ -72,9 +72,12 @@ from typing import Any, Literal
 from fastapi import APIRouter, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from ehr_simulator.clinician_profile import FIELDS as PROFILE_FIELDS
+from ehr_simulator.clinician_profile import MAX_YEARS_OF_PRACTICE, ProfileValidationError
 from ehr_simulator.config.questions import Questions
 from ehr_simulator.config.study import BackwardNavigation
 from ehr_simulator.db import arm_assignments, clinicians, cookies, events, practice
+from ehr_simulator.db.clinician_profiles import ProfileLockedError
 from ehr_simulator.db.exceptions import (
     CaseLifecycleError,
     ConfigurationProvenanceError,
@@ -102,8 +105,15 @@ from ehr_simulator.web.case_start import (
     case_patient_ids,
     case_states,
     index_state,
+    profile_missing,
     replacement_markers,
     start_next_case,
+)
+from ehr_simulator.web.clinician_profile_page import (
+    ProfileContext,
+    profile_config,
+    profile_context,
+    save_profile,
 )
 from ehr_simulator.web.gating import (
     AdvanceResult,
@@ -173,6 +183,9 @@ _PAUSE_DISABLED_MSG = "Pausing is not enabled for this study"
 _HX_REQUEST_HEADER = "hx-request"
 _HX_HISTORY_RESTORE_HEADER = "hx-history-restore-request"
 _INDEX_URL = "/"
+_PROFILE_URL = "/profile"
+_NO_PROFILE_MSG = "This study does not collect clinician profiles"
+_HTTP_UNPROCESSABLE = status.HTTP_422_UNPROCESSABLE_CONTENT
 _TELEMETRY_URL = "/telemetry/events"
 
 Chrome = Literal["dense", "epic"]
@@ -840,9 +853,83 @@ async def login_post(
         payload={},  # S11m: the row's clinician_id is the only identity
         app_state=request.app.state,
     )
-    response: Response = RedirectResponse("/", status_code=303)
+    # S11p: a clinician without the required profile fills it in first.
+    state = request.app.state
+    target = _PROFILE_URL if profile_missing(state.db, state, clinician_id) else _INDEX_URL
+    response: Response = RedirectResponse(target, status_code=303)
     cookies.set_clinician_cookie(response, clinician_id)
     return response
+
+
+def _profile_page(
+    request: Request,
+    ctx: ProfileContext,
+    *,
+    form: dict[str, str] | None = None,
+    errors: dict[str, str] | None = None,
+    status_code: int = status.HTTP_200_OK,
+) -> Response:
+    """The form prefilled from the submission, else the stored profile."""
+    stored = ctx.stored
+    values = dict.fromkeys(PROFILE_FIELDS, "")
+    if stored is not None:
+        values.update(
+            professional_role=stored.professional_role,
+            years_of_practice=f"{stored.years_of_practice:g}",
+            country_of_practice=stored.country_of_practice,
+            primary_specialty=stored.primary_specialty or "",
+        )
+    values.update(form or {})
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "profile.html",
+        {
+            "ctx": ctx,
+            "values": values,
+            "errors": errors or {},
+            "max_years": f"{MAX_YEARS_OF_PRACTICE:g}",
+        },
+        status_code=status_code,
+    )
+
+
+@router.get(_PROFILE_URL, response_class=HTMLResponse)
+async def profile_get(request: Request) -> Response:
+    """S11p: the clinician characteristics form (404 when not collected)."""
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect
+    config = profile_config(request.app.state)
+    if config is None:
+        return HTMLResponse(content=_error_flash(_NO_PROFILE_MSG), status_code=404)
+    return _profile_page(request, profile_context(request.app.state.db, config, clinician_id or ""))
+
+
+@router.post(_PROFILE_URL)
+async def profile_post(request: Request) -> Response:
+    """S11p: store the characteristics; 422 invalid, 409 locked, 303 saved."""
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect
+    update_request_context(clinician_id=clinician_id)
+    state = request.app.state
+    config = profile_config(state)
+    if config is None:
+        return HTMLResponse(content=_error_flash(_NO_PROFILE_MSG), status_code=404)
+
+    raw = await request.form()
+    form = {name: str(raw.get(name) or "") for name in PROFILE_FIELDS}
+    try:
+        save_profile(state.db, state, clinician_id=clinician_id or "", config=config, form=form)
+    except ProfileValidationError as exc:
+        ctx = profile_context(state.db, config, clinician_id or "")
+        return _profile_page(
+            request, ctx, form=form, errors=exc.errors, status_code=_HTTP_UNPROCESSABLE
+        )
+    except ProfileLockedError:
+        ctx = profile_context(state.db, config, clinician_id or "")
+        return _profile_page(request, ctx, status_code=status.HTTP_409_CONFLICT)
+    return RedirectResponse(_INDEX_URL, status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.post("/logout")

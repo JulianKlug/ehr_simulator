@@ -1,0 +1,64 @@
+{#- S11p clinician profile. Editable until the first measured case starts,
+    then read only. Characteristics describe the clinician; they never
+    change which cases or arms are assigned. -#}
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>EHR simulator — clinician profile</title>
+    <link rel="stylesheet" href="/static/theme.css" />
+</head>
+<body>
+    <main class="login-page profile-page">
+        <h1>Clinician profile</h1>
+        {% if ctx.locked %}
+        <p class="pane-lock-note" role="note">Locked — recorded before your first case. Ask the study team to correct it.</p>
+        {% else %}
+        <p>Please describe your background once before your first case. It is used only to describe the study sample.</p>
+        {% endif %}
+        {% if errors %}
+        <p class="error-flash" role="alert">Please correct the fields marked below.</p>
+        {% endif %}
+        <form method="post" action="/profile" class="profile-form">
+            <fieldset{% if ctx.locked %} disabled{% endif %}>
+                <label for="professional_role">Professional role</label>
+                <select id="professional_role" name="professional_role" required>
+                    <option value="">—</option>
+                    {% for role in ctx.roles %}
+                    <option value="{{ role }}"{% if values.professional_role == role %} selected{% endif %}>{{ role|capitalize }}</option>
+                    {% endfor %}
+                </select>
+                {% if errors.professional_role %}<p class="field-error">{{ errors.professional_role }}</p>{% endif %}
+
+                <label for="years_of_practice">Years of practice</label>
+                <input id="years_of_practice" name="years_of_practice" type="number"
+                       min="0" max="{{ max_years }}" step="any" inputmode="decimal"
+                       value="{{ values.years_of_practice }}" required>
+                {% if errors.years_of_practice %}<p class="field-error">{{ errors.years_of_practice }}</p>{% endif %}
+
+                <label for="country_of_practice">Country of practice</label>
+                <select id="country_of_practice" name="country_of_practice" required>
+                    <option value="">—</option>
+                    {% for code in ctx.config.countries %}
+                    <option value="{{ code }}"{% if values.country_of_practice == code %} selected{% endif %}>{{ code }}</option>
+                    {% endfor %}
+                </select>
+                {% if errors.country_of_practice %}<p class="field-error">{{ errors.country_of_practice }}</p>{% endif %}
+
+                <label for="primary_specialty">Primary specialty <small>(physicians only)</small></label>
+                <select id="primary_specialty" name="primary_specialty">
+                    <option value="">—</option>
+                    {% for code in ctx.config.specialties %}
+                    <option value="{{ code }}"{% if values.primary_specialty == code %} selected{% endif %}>{{ code|replace("_", " ") }}</option>
+                    {% endfor %}
+                </select>
+                {% if errors.primary_specialty %}<p class="field-error">{{ errors.primary_specialty }}</p>{% endif %}
+
+                <button type="submit">Save profile</button>
+            </fieldset>
+        </form>
+        <p><a class="resume-link" href="/">← Study index</a></p>
+    </main>
+</body>
+</html>

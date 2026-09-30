@@ -724,3 +724,12 @@ Phase 2 software implementation is complete only when the simulator can:
 
 
 Status (S11o, 2026-09-28): 1–14 are implemented and exercised end to end by `tests/test_phase2_integration.py` (A–G, I, J scenarios) and the Phase 2 e2e walks. 15 holds as far as code goes: study specific parameters stay configuration (section 36); the `primary_cause` options in `configs/example_phase2_questions.yaml` remain labelled placeholders (gate §26 item 11 open), and the `technical_failure` missing reason stays reserved (section 24).
+
+---
+
+# 38. Clinician characteristics (S11p)
+
+- [x] Collect role, years of practice, country and physician specialty before the first measured case.
+- [x] Keep them out of randomisation inputs and event payloads.
+- [x] Lock them once the first measured case exists.
+- [x] Export them pseudonymously in `clinicians.csv`.

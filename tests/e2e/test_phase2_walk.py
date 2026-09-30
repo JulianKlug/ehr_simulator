@@ -6,6 +6,8 @@ first use case questions, telemetry on, so every case is tab guarded)::
     Start case ─► claim granted ─► S11h branch ─► answers ─► advance × 3
     Start case ─► the other arm ─► … ─► completed
     export-phase2 on the live DB ─► both arms, delivery, no AI surface
+
+The clinician first fills the S11p profile the example collects.
 """
 
 from __future__ import annotations
@@ -90,6 +92,13 @@ def test_ai_and_no_ai_cases_walk_and_export(
     page.goto(f"{live_phase2_server}/login")
     page.fill('input[name="clinician_name"]', "Dr. Phase Two")
     page.click('button[type="submit"]')
+    # S11p: the example collects characteristics before the first case.
+    page.wait_for_url(f"{live_phase2_server}/profile")
+    page.select_option("#professional_role", "physician")
+    page.fill("#years_of_practice", "12")
+    page.select_option("#country_of_practice", "CH")
+    page.select_option("#primary_specialty", "neurology")
+    page.click('.profile-form button[type="submit"]')
     page.wait_for_url(f"{live_phase2_server}/")
 
     first = _walk_case(page, branch=True)
@@ -125,3 +134,8 @@ def test_ai_and_no_ai_cases_walk_and_export(
     assert (cause["branch_state"], cause["response_status"]) == ("hidden", "not_applicable")
     death = cells[(first[0], "0", "death_3mo")]
     assert (death["answer_source"], death["response_value"]) == ("rule", "No")
+    with (out / "clinicians.csv").open(newline="") as fh:
+        profiles = list(csv.DictReader(fh))
+    assert [
+        (p["professional_role"], p["years_of_practice"], p["primary_specialty"]) for p in profiles
+    ] == [("physician", "12.0", "neurology")]

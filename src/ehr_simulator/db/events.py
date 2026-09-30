@@ -97,6 +97,9 @@ EventKind = Literal[
     "tab.released",
     "tab.conflict",
     "tab.lease_expired",
+    # S11p: a clinician profile was created or updated (payload: action only,
+    # never a characteristic).
+    "clinician.profile_saved",
 ]
 EVENT_KINDS: frozenset[str] = frozenset(get_args(EventKind))
 

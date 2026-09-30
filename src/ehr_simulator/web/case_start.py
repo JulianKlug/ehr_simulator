@@ -46,7 +46,7 @@ from enum import StrEnum
 from typing import Any
 
 from ehr_simulator.case_lifecycle import limit_reached
-from ehr_simulator.db import arm_assignments, events, progress, sessions
+from ehr_simulator.db import arm_assignments, clinician_profiles, events, progress, sessions
 from ehr_simulator.db import case_lifecycle as lifecycle_dao
 from ehr_simulator.db import randomisation as schedules
 from ehr_simulator.db import replacements as replacements_dao
@@ -87,6 +87,11 @@ class ClinicianLimitReachedError(CaseStartRefusedError):
     """The active configuration's per-clinician case limit is reached (S11e)."""
 
 
+class ProfileRequiredError(CaseStartRefusedError):
+    """S11p: the active configuration collects clinician characteristics and
+    this clinician has none yet."""
+
+
 class StartOutcome(StrEnum):
     ACTIVATED = "activated"
     RESUMED = "resumed"
@@ -98,6 +103,7 @@ class IndexAction(StrEnum):
     RESUME_PAUSED = "resume_paused"
     LIMIT_REACHED = "limit_reached"
     EXHAUSTED = "exhausted"
+    PROFILE_REQUIRED = "profile_required"  # S11p
 
 
 @dataclass(frozen=True)
@@ -207,6 +213,19 @@ def _open_case_after_timeouts(
     return opened, contact
 
 
+def profile_missing(conn: sqlite3.Connection, app_state: Any, clinician_id: str) -> bool:
+    """S11p: the active configuration collects characteristics this clinician lacks."""
+    study = getattr(app_state, "study", None)
+    if study is None or study.clinician_profile is None:
+        return False
+    return clinician_profiles.fetch(conn, clinician_id) is None
+
+
+def _refuse_without_profile(conn: sqlite3.Connection, app_state: Any, clinician_id: str) -> None:
+    if profile_missing(conn, app_state, clinician_id):
+        raise ProfileRequiredError("Complete your clinician profile before starting the first case")
+
+
 def index_state(conn: sqlite3.Connection, app_state: Any, clinician_id: str) -> CaseIndexState:
     """Which case action the study index offers. Pure read: never creates a schedule."""
     opened = find_open_case(conn, clinician_id)
@@ -221,6 +240,9 @@ def index_state(conn: sqlite3.Connection, app_state: Any, clinician_id: str) -> 
 
     if _limit_reached(conn, app_state, clinician_id):
         return CaseIndexState(IndexAction.LIMIT_REACHED)
+
+    if profile_missing(conn, app_state, clinician_id):
+        return CaseIndexState(IndexAction.PROFILE_REQUIRED)
 
     stored = schedules.fetch_for_clinician(conn, app_state.study.study_id, clinician_id)
     if stored is not None and _next_activation(conn, stored.schedule, clinician_id) is None:
@@ -249,6 +271,7 @@ def start_next_case(conn: sqlite3.Connection, app_state: Any, *, clinician_id: s
         return _resumed(conn, clinician_id, opened)
 
     _refuse_at_limit(conn, app_state, clinician_id)
+    _refuse_without_profile(conn, app_state, clinician_id)
 
     # Phase A: the schedule (planned only) commits on its own.
     study = app_state.study
@@ -287,6 +310,7 @@ def _activate_next(
 
         active = require_active_case(conn, app_state)
         _refuse_at_limit(conn, app_state, clinician_id)
+        _refuse_without_profile(conn, app_state, clinician_id)
         upcoming = _next_activation(conn, schedule, clinician_id)
         if upcoming is None:
             raise ScheduleExhaustedError("no further cases: every scheduled case is activated")

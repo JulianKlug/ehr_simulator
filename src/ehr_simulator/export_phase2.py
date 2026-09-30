@@ -14,7 +14,7 @@ configuration snapshot it was activated with, never the active one::
                │     S11l delivery / viewed / PP / missing responses
                ├─► timepoints.csv · answers.csv · panel_summaries.csv
                └─► behavioral_events.csv (raw source rows)
-    configuration_history.csv · configuration_counts.csv
+    configuration_history.csv · configuration_counts.csv · clinicians.csv (S11p)
 
 The exporter derives nothing of its own: every research value comes from
 ``timing``, ``behavioral_timing``, ``panel_exposure`` or ``study_variables``.
@@ -46,6 +46,7 @@ from ehr_simulator.config.study import FreeTextExport, StudyConfig
 from ehr_simulator.db import (
     answers,
     arm_assignments,
+    clinician_profiles,
     clinicians,
     config_history,
     events,
@@ -329,6 +330,19 @@ PRACTICE_TIMEPOINTS_HEADER = (
 )
 
 PRACTICE_ANSWERS_HEADER = (*ANSWERS_HEADER, "observation_mode")
+
+#: S11p: one row per bundle clinician; never the name.
+CLINICIANS_HEADER = (
+    "study_id",
+    "clinician_id",
+    "profile_status",
+    "professional_role",
+    "years_of_practice",
+    "country_of_practice",
+    "primary_specialty",
+)
+PROFILE_COMPLETE = "complete"
+PROFILE_MISSING = "missing"
 
 
 # ---------------------------------------------------------------------------
@@ -1118,6 +1132,31 @@ def _practice_tables(
 # ---------------------------------------------------------------------------
 
 
+def _clinician_rows(
+    conn: sqlite3.Connection, study_id: str, ids: tuple[str, ...]
+) -> list[tuple[str, ...]]:
+    """S11p characteristics as stored; blank with ``missing`` when none."""
+    profiles = clinician_profiles.fetch_by_ids(conn, ids)
+    out = []
+    for clinician_id in ids:
+        profile = profiles.get(clinician_id)
+        if profile is None:
+            out.append((study_id, clinician_id, PROFILE_MISSING, "", "", "", ""))
+            continue
+        out.append(
+            (
+                study_id,
+                clinician_id,
+                PROFILE_COMPLETE,
+                profile.professional_role,
+                _num(profile.years_of_practice),
+                profile.country_of_practice,
+                _text(profile.primary_specialty),
+            )
+        )
+    return out
+
+
 def _schema_version(conn: sqlite3.Connection) -> int:
     value = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
     if value is None:
@@ -1239,6 +1278,10 @@ def _build(
         clinician_ids |= {p.clinician_id for p in practice_cases}
 
     ids = tuple(sorted(clinician_ids))
+    tables.insert(
+        len(tables) - (2 if included else 0),
+        Table("clinicians.csv", CLINICIANS_HEADER, tuple(_clinician_rows(conn, study_id, ids))),
+    )
     keyfile_rows = None
     if keyfile is KeyfileRequest.REQUESTED:
         keyfile_rows = tuple(clinicians.fetch_by_ids(conn, ids)) if ids else ()

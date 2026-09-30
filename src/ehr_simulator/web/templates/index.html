@@ -21,6 +21,9 @@
             <form method="post" action="/case/{{ case_state.open_patient_id }}/resume">
                 <button type="submit" class="advance-btn case-btn case-resume">Resume case</button>
             </form>
+            {% elif case_state.action == "profile_required" %}
+            <p>Before your first case, please complete your clinician profile.</p>
+            <a class="advance-btn case-btn case-profile" href="/profile">Complete your profile</a>
             {% elif case_state.action == "limit_reached" %}
             <p class="case-limit">No further cases can be started. Thank you.</p>
             {% elif case_state.action == "start" %}

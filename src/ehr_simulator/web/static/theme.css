@@ -760,3 +760,16 @@ body.chrome-epic [role="tabpanel"][hidden] {
     opacity: 0.5;
     pointer-events: none;
 }
+
+/* S11p: clinician profile form. */
+.profile-form fieldset {
+    border: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.35rem;
+}
+
+.field-error {
+    margin: 0 0 0.4rem 0;
+    color: var(--color-error);
+}

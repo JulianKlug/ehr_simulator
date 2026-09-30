@@ -68,12 +68,15 @@ uv run ehr-simulator export-phase2 STUDY.yaml     # the research bundle
 - **Configuration changes are explicit.** Editing the YAML changes its hash;
   activate a new `--version` and restart. Started cases keep their version.
 - **Start case is the allocation boundary.** Opening a page never assigns an arm.
+- **Clinician profile first.** A study with a `clinician_profile` block asks each
+  clinician for role, years of practice, country and (physicians) specialty
+  before their first case; it locks once that case starts.
 - **One tab per case.** A second browser tab of the same active case shows a
   notice and cannot save; close the other tab and press Retry.
 - **Backups are study isolated:** `data/backups/<study_id>/study_<study_id>_schema_<N>_<UTC>.db`.
 - **`export-phase2` writes linked CSVs** (`timepoints`, `answers`,
   `panel_summaries`, `behavioral_events`, `randomisation_audit`,
-  `configuration_history`, `configuration_counts`, `manifest.json`) across every
+  `configuration_history`, `configuration_counts`, `clinicians`, `manifest.json`) across every
   configuration version. `--keyfile FILE` (outside the bundle, mode 600) is the
   only output that maps `clinician_id` back to names. `export-answers` stays the
   single configuration wide CSV.

@@ -17,7 +17,7 @@ import sqlite3
 import threading
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -38,9 +38,11 @@ from ehr_simulator.randomisation import (
 from ehr_simulator.web import case_start
 from ehr_simulator.web.app import app_from_study_config
 from tests.conftest import (
+    ProfileSetup,
     _activate_configuration,
     _seed_clinician,
     adopt_tab_views,
+    ensure_profile,
     seed_progress,
 )
 
@@ -88,6 +90,9 @@ class Harness:
     db_path: Path
     clinician_id: str
     v1: Config
+    #: S11p: give every booted clinician a valid profile when the study asks
+    #: for one (the gate's own tests switch this off).
+    profile_setup: ProfileSetup = field(default_factory=lambda: ProfileSetup.AUTO)
 
     def activate(self, config: Config) -> None:
         _activate_configuration(
@@ -118,6 +123,8 @@ class Harness:
         )
         with TestClient(app) as client:
             client.cookies.set(COOKIE, clinician_id or self.clinician_id)
+            if self.profile_setup is ProfileSetup.AUTO:
+                ensure_profile(client)
             adopt_tab_views(client)
             yield client
 

@@ -35,6 +35,7 @@ from ehr_simulator import cli
 from ehr_simulator.db import connect
 from ehr_simulator.db.backup import create_backup, read_identity
 from ehr_simulator.db.connection import AccessMode
+from ehr_simulator.db.migrations import MIGRATIONS
 from ehr_simulator.export_phase2 import Phase2Bundle, build_phase2_bundle
 from tests.test_case_lifecycle import GRACE, LifecycleHarness, _harness
 from tests.test_case_start import _start, _started_patient
@@ -419,13 +420,13 @@ def test_i_backup_is_attributable_and_exports_the_same(
     dest = create_backup(h.db_path, tmp_path / "backups", expected_study_id=study_id)
 
     assert dest.parent == tmp_path / "backups" / study_id
-    assert dest.name.startswith(f"study_{study_id}_schema_13_")
+    assert dest.name.startswith(f"study_{study_id}_schema_{len(MIGRATIONS)}_")
     copy = connect(dest, access=AccessMode.READ_ONLY)
     try:
         identity = read_identity(copy)
     finally:
         copy.close()
-    assert (identity.study_id, identity.schema_version) == (study_id, 13)
+    assert (identity.study_id, identity.schema_version) == (study_id, len(MIGRATIONS))
     assert _bundle(dest, study_id).tables == source.tables
 
 
