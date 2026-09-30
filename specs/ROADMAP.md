@@ -211,12 +211,13 @@ Scope (historical draft):
 
 **Note (TODOS.md):** chart library may be re-evaluated for the divergence view specifically (plotnine + JS scrubber overlay vs small D3 island). Decision deferred to S10 spec authoring time. → Plotnine (SVG) shipped; the polished v1.0 view remains S12.
 
-### Phase-2 policy gate (not a code session)
+### Phase-2 policy gate (not a code session) — locked
 
-Before Session 11 (randomization) ships, the following must be filed/locked:
-- OSF pre-registration of primary endpoints + "AI-viewed = panel in viewport ≥3s" operational definition (D8).
-- IRB data-handling paragraph + clinician_name pseudonym policy (D9).
-- Competitive survey (3-4 hours): 6-10 closest analogues catalogued (D3).
+Decided in `specs/policy/phase2-gate.md` (§2), which supersedes the earlier draft of this gate (OSF preregistration, an IRB data-handling paragraph and a competitive survey before Session 11; "AI viewed = viewport ≥3 s"):
+- OSF preregistration is **not** a prerequisite; individual studies may preregister later, so study parameters stay configuration.
+- No dedicated IRB data-handling document is required; the pseudonymous `clinician_id` scheme stays, under the gate's privacy rules (S11m).
+- No systematic competitive review is required; a short record of reviewed systems is kept for later documentation.
+- **AI viewed** = at least 2 cumulative seconds with ≥5 % of the expanded AI panel content in the viewport while the document is visible and the window focused (gate §15; configured in the study `telemetry` block, S11k/S11l).
 
 Backup cadence (D10) is **not** in this gate — it lives in S6 per /plan-eng-review (TODOS.md).
 

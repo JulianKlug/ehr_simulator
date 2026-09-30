@@ -19,10 +19,10 @@ Deferred items from the /autoplan review on 2026-04-21. These are OUT of scope f
 
 ## Policy commitments (not code, but tracked)
 
-- **Pre-registration on OSF** before Phase 2 data collection begins. (D8)
-- **IRB data-handling paragraph** written before Phase 1 ships, with `clinician_name` pseudonym policy clarified. (D9)
+- ~~**Pre-registration on OSF** before Phase 2 data collection begins. (D8)~~ **SUPERSEDED by `specs/policy/phase2-gate.md` §2.1**: not a prerequisite; individual studies may preregister when appropriate.
+- ~~**IRB data-handling paragraph** written before Phase 1 ships, with `clinician_name` pseudonym policy clarified. (D9)~~ **SUPERSEDED by `specs/policy/phase2-gate.md` §2.2**: no dedicated IRB document required; the `clinician_id` pseudonym policy is implemented in S11m (no names in events or routine exports, optional mode-600 keyfile).
 - ~~**SQLite backup cadence**: nightly copy to a second filesystem + CSV export after every session, from Phase 1 ship onward. (D10)~~ **CLOSED in S6**: shutdown-time backup wired into the lifespan + `ehr-simulator backup` CLI command, write-counter-gated to avoid dev-iteration clutter. ~~CSV export remains S9c.~~ **CLOSED in S9c**: `ehr-simulator export-answers` ships per `specs/session-09c-csv-export.md` (one row per patient × clinician × timepoint, strict decoding, formula-injection guard, optional 0600 id→name keyfile).
-- **Competitive survey** (3-4 hours) before Phase 1α starts: catalog 6-10 closest analogues (MedAlign, HAIM, OHDSI ATLAS, Medplum, CES, etc.), document why this tool is distinct. (D3)
+- ~~**Competitive survey** (3-4 hours) before Phase 1α starts: catalog 6-10 closest analogues (MedAlign, HAIM, OHDSI ATLAS, Medplum, CES, etc.), document why this tool is distinct. (D3)~~ **SUPERSEDED by `specs/policy/phase2-gate.md` §2.3**: no systematic review required. Remaining (documentation, not a gate): keep a short record of reviewed systems and how they differ, for publication work.
 
 ## From plan-eng-review (2026-05-05)
 
