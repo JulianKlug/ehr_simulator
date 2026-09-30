@@ -79,7 +79,10 @@
         button.dataset.action = RETRY_ACTION;
         button.textContent = "Retry";
         el.appendChild(button);
-        view.insertBefore(el, view.firstChild);
+        // In the questions pane: where the clinician acts, and the pane is a
+        // fixed overlay that would otherwise cover a notice in the page.
+        const host = view.querySelector("#questions-pane") || view;
+        host.insertBefore(el, host.firstChild);
         return el;
     }
 
