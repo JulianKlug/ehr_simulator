@@ -20,6 +20,11 @@ Changes against the first draft, from the implemented S11a–S11n code:
 6. **Harmless v2 change** for Scenario D: `case_lifecycle.study_target_completed_cases` (display only, S11e) — it moves `config_hash` without a new scientific parameter.
 7. **Test files** trimmed to three: `tests/test_phase2_integration.py` (TestClient + CLI, scenarios A–G, I–K), `tests/e2e/test_phase2_walk.py` (AI and no AI browser walks, S11h branch), `tests/e2e/test_multitab_walk.py` (scenario H; shared with S11m test 46).
 
+## Review revisions (2026-09-30, PR review)
+
+8. **Missingness needs a constructed case.** Test 21 abandons a case at a timepoint it reached with required questions blank, so `reached_unanswered` (that timepoint) and `case_abandoned` (later ones) are both exported; checking an abandoned case alone proved only the latter.
+9. **Evidence per numbered requirement.** The PR review added the targeted cases S11m 37a/45a and S11n 13, 21, 43a, 51 (see those specs); a checklist item is ticked only against a test that constructs its case.
+
 ## Core invariants
 
 1. S11o introduces no new scientific design decision.
@@ -427,7 +432,7 @@ Do not add placeholder values that look like final scientific decisions when the
 18. Deterioration branch changes correctly after an earlier saved dependent answer.
 19. Good outcome/death derivation behaves as specified.
 20. Hidden question is not exported as missing.
-21. Reached unanswered and unreached timepoint remain distinguishable in the final bundle.
+21. Reached unanswered and unreached timepoint remain distinguishable in the final bundle: a case abandoned at a reached timepoint exports `reached_unanswered` there and `case_abandoned` after it.
 
 ### Multi tab
 

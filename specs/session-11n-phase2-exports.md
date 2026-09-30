@@ -21,6 +21,11 @@ Changes against the first draft, from the implemented S11j–m code:
 9. **Events of pairs that are not activated measured cases are out of scope** (practice, pre Phase 2 walks, clinician level rows) and excluded, not refused; only an event of a measured case with unattributable provenance refuses.
 10. **Replacement chains need two id columns.** A replacement case can itself end incomplete and be replaced, so `randomisation_audit.csv` carries `replacement_id` (this item replaces another) and `replaced_by_replacement_id` (this case was replaced).
 
+## Review revisions (2026-09-30, PR review)
+
+11. **Replacement plans are checked against the item they name.** The foreign key covers only `(replacement_schedule_id, replacement_case_position)`; the exporter additionally refuses a plan whose schedule belongs to another clinician, whose item patient ≠ `replacement_patient_id`, or whose item arm ≠ the plan's `planned_arm`.
+12. **`tab_conflict_detected` in `timepoints.csv`** counts primary renders only (S11m revision 14); `panel_summaries.csv` keeps the per `visit_kind` flag.
+
 ## Core invariants
 
 1. One export is a read consistent snapshot of one bound `study_id`.
@@ -198,7 +203,7 @@ replaced_by_replacement_id replaced_by_patient_id
 - planned fields from the schedule rows; realised fields from `arm_assignments` + `case_lifecycle`
 - unactivated → `activated=false`, realised fields blank
 - `replacement_id`, `replaces_patient_id`, `replacement_*_at` on the replacement item's row; `replaced_by_replacement_id`, `replaced_by_patient_id` on the original's row
-- a realised assignment whose `(schedule_id, case_position)` item is missing, whose patient differs, or whose arm ≠ `planned_arm` refuses the bundle; so does a replacement pointing to a missing item or assignment, and a lifecycle row without an assignment
+- a realised assignment whose `(schedule_id, case_position)` item is missing, whose patient differs, or whose arm ≠ `planned_arm` refuses the bundle; so does a replacement pointing to a missing item or assignment, a replacement whose item belongs to another clinician's schedule, names another patient than `replacement_patient_id` or another arm than the plan's `planned_arm`, and a lifecycle row without an assignment
 - the exported generation inputs regenerate the schedule (`randomisation.generate_schedule`) — a test, not a runtime step
 
 ### `configuration_history.csv`
@@ -261,7 +266,7 @@ Before anything is published, refuse on:
 - missing `config_version` on an assignment, session, progress or answer row of a measured Phase 2 case
 - unknown version, wrong hash, foreign study history row, unparseable snapshot
 - session/progress/answer version or hash ≠ its case's assignment
-- realised vs planned schedule disagreement, dangling replacement or lifecycle row
+- realised vs planned schedule disagreement, dangling or inconsistent replacement (clinician, patient or arm ≠ its schedule item), lifecycle row without assignment
 - event of a measured case that cannot be attributed to its case/configuration
 - answer at a timepoint or with a question unknown to the pinned snapshot
 - undecodable stored answer
@@ -323,7 +328,7 @@ New `export_phase2.py`, `export_bundle.py`; `cli.py`; `export.py` (drift message
 
 11. Every activated case appears, incomplete included.
 12. Unreached timepoints: `timepoint_reached=false`, blank timing.
-13. Complete zero exposure is `0.0`, distinct from missing telemetry.
+13. Complete zero exposure is `0.0`, distinct from missing telemetry (a mounted panel never on screen: `mounted=true`, `0.0`, `viewed=false`; an unreached timepoint: status `missing`, blank seconds, no panel rows).
 14. S10 elapsed matches `timing`.
 15. Foreground/active match `behavioral_timing`.
 16. AI delivered/viewed/failure/leakage/PP match `study_variables`.
@@ -331,7 +336,7 @@ New `export_phase2.py`, `export_bundle.py`; `cli.py`; `export.py` (drift message
 18. Hidden question → `not_applicable`, `branch_state=hidden`, no reason.
 19. Rule answer → `answer_source=rule`, `answered`, `branch_state=derived`.
 20. Incomplete case keeps S11l reasons for later timepoints.
-21. Two question schemas export in long format without union columns.
+21. Two question schemas export in long format without union columns (v2 adds a question; v1 cases never list it, v2 cases do).
 22. Undecodable stored answer refuses.
 23. S11l integrity warning (answer arm drift) exports in `integrity_warnings` instead of refusing.
 
@@ -363,6 +368,7 @@ New `export_phase2.py`, `export_bundle.py`; `cli.py`; `export.py` (drift message
 41. Planned vs realised mismatch refuses.
 42. Incomplete lifecycle outcome visible.
 43. Original ↔ replacement linkage in both directions.
+43a. A replacement plan whose item names another patient, arm or clinician refuses the bundle.
 44. Exported generation inputs regenerate the planned schedule.
 
 ### Configuration
@@ -376,7 +382,7 @@ New `export_phase2.py`, `export_bundle.py`; `cli.py`; `export.py` (drift message
 48. Default export has no practice rows.
 49. `--include-practice` adds only the two practice files.
 50. Practice never enters measured files or counts.
-51. Practice free text follows its pinned policy.
+51. Practice free text follows its pinned policy (a stored practice value is exported only under `include_explicit`).
 
 ### Output
 

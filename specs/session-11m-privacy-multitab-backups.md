@@ -30,6 +30,12 @@ The first draft was written before S11j–l landed. Changes against the implemen
 12. **Refused renders leave the derivation.** A refused tab's render has a `timepoint.render` row but no accepted telemetry; S11j would count it as an unobserved render and turn the owner's observation `incomplete`. The S11l reader drops renders that have a `tab.conflict` and no `tab.claimed`.
 13. **Backup collisions get a suffix, not a refusal.** Implementation showed two shutdown backups within one second (a restart); refusing lost the second backup.
 
+## Review revisions (2026-09-30, PR review)
+
+14. **The conflict flag is visit specific.** `ObservationVariables.tab_conflict_detected` (the primary `timepoints.csv` row) counts only conflicts on **primary** renders; a refused revisit of the same timepoint no longer flags the primary observation. Panel rows keep their own `(t_index, visit_kind)` flag.
+15. **Locked controls are really disabled.** While pending or refused the guard sets `disabled` on the answer fieldsets, `#advance-btn` and the pause button (request cancellation stays as a second line), and on `granted` re-enables only the controls it disabled itself, so a server-locked timepoint stays locked.
+16. **No schema version, no backup — bound or not.** An unmigrated SQLite file is refused instead of receiving a legacy backup.
+
 ## Core invariants
 
 1. `clinician_id` remains the routine research identifier for clinicians.
@@ -159,7 +165,7 @@ On the `200` advance, the owner's lease moves to the new render inside the same 
 
 For a view with `data-tab-claim-url`:
 
-1. marks `#patient-view` `data-tab-state="pending"`; answer controls, the advance button and the pause button are disabled until granted
+1. marks `#patient-view` `data-tab-state="pending"`; the answer fieldsets, `#advance-btn` and the pause button get `disabled` until granted (the guard marks what it disabled and re-enables only those)
 2. claims with the S11j tab id and the view's `render_id`
 3. `204` → `granted`, controls re-enabled
 4. `409` → `refused`: renders a blocking notice ("This case is open in another tab or window. Close it, then press Retry."), keeps controls disabled; Retry, `focus` and `visibilitychange → visible` re-claim
@@ -191,9 +197,9 @@ For each observation (clinician × patient × `t_index` × `visit_kind`):
 
 - accepted telemetry from one tab → derive normally (S11j/S11k/S11l unchanged)
 - accepted telemetry from more than one tab (legacy S11j data, or sequential owners after a stale handover) → `multi_tab`, never summed (unchanged)
-- `tab_conflict_detected = true` when any `tab.conflict` event names a render of the observation's `(t_index, visit_kind)`; the owner's telemetry keeps its own status
+- `tab_conflict_detected = true` when any `tab.conflict` event names a render of the observation's `(t_index, visit_kind)`; the owner's telemetry keeps its own status. The primary observation (`ObservationVariables`, `timepoints.csv`) counts primary renders only; a conflict on a revisit never flags it
 
-`behavioral_timing.ObservationTiming` and `panel_exposure.PanelSummary` are unchanged; `tab_conflict_detected` is added to `study_variables.ObservationVariables` (read from `tab.conflict` rows via a new `db.telemetry.load_conflict_render_ids`). A conflict event alone is not proof that the owner's telemetry is unusable, and it does not change PP.
+`behavioral_timing.ObservationTiming` and `panel_exposure.PanelSummary` are unchanged; `tab_conflict_detected` is added to `study_variables.ObservationVariables` (read from `tab.conflict` rows via `db.telemetry.load_tab_render_ids`). A conflict event alone is not proof that the owner's telemetry is unusable, and it does not change PP.
 
 ### Backup identity
 
@@ -205,7 +211,7 @@ create_backup(db_path, backup_root, *, expected_study_id=None) -> Path
 
 1. open the source; read `study_identity` (`study_identity.fetch`) and `MAX(version)` from `schema_migrations`
 2. `expected_study_id` given and ≠ stored (or stored is `None`) → `BackupIdentityError`, nothing created
-3. schema version missing → `BackupIdentityError`
+3. schema version missing → `BackupIdentityError`, whether or not the DB is study bound
 4. bound DB → `<backup_root>/<study_id>/study_<study_id>_schema_<N>_<UTC>.db`; unbound DB → legacy `<backup_root>/ehr_simulator_<UTC>.db`
 5. destination created exclusively (`O_EXCL`); a taken name moves to the next `_<n>` suffix (`…Z_2.db`), never overwritten — two shutdown backups inside one second (a quick restart) must both survive
 7. the copy is switched to `journal_mode=DELETE`: one self-contained file, no `-wal`/`-shm` sidecars
@@ -302,6 +308,7 @@ None. Lease timing is a platform constant; backup identity comes from the DB.
 35. One owner tab derives normally.
 36. A refused second claim sets `tab_conflict_detected` without changing the owner's status or PP.
 37. Accepted telemetry from two tabs stays `multi_tab`, never summed, distinct from complete zero.
+37a. A tab refused only on a revisit of timepoint 0 leaves the primary timepoint 0 `tab_conflict_detected=false`.
 
 ### Backup identity
 
@@ -313,10 +320,11 @@ None. Lease timing is a platform constant; backup identity comes from the DB.
 43. Unbound DB keeps the legacy name and placement.
 44. Backup never writes a keyfile.
 45. Shutdown backup in study mode uses the study path.
+45a. An unbound SQLite file without `schema_migrations` is refused.
 
 ### Browser
 
-46. e2e: a second page of the same case shows the conflict notice, its answer controls stay disabled, and the owner's answers still save.
+46. e2e: a second page of the same case shows the conflict notice, its answer inputs and advance button are `disabled`, the owner's answers still save, and after the owner closes and Retry the controls are enabled again.
 
 ### Regression
 
