@@ -724,7 +724,7 @@ Implement:
 First use case configuration:
 
 * viewport threshold = 5%
-* viewed threshold = 2 cumulative seconds
+* viewed threshold = 0.5 cumulative seconds (gate amendment 2026-10-01; was 2)
 
 Reading without interacting must still count.
 
@@ -774,7 +774,7 @@ derive:
 
 For first use case:
 
-`ai_viewed = cumulative qualifying AI exposure >= 2 seconds`
+`ai_viewed = cumulative qualifying AI exposure >= 0.5 seconds`
 
 AI assigned PP compliance requires:
 

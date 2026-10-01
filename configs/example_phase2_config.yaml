@@ -110,11 +110,11 @@ study_behaviour:
 # after the last click/touch/scroll/key/answer; a panel is exposed while
 # >= panel_viewport_threshold of its expanded content is on screen in a
 # visible, focused tab, and "viewed" after panel_viewed_threshold_seconds
-# of cumulative exposure per timepoint. First use case: 60 s, 5 %, 2 s.
+# of cumulative exposure per timepoint. First use case: 60 s, 5 %, 0.5 s.
 telemetry:
   inactivity_threshold_seconds: 60
   panel_viewport_threshold: 0.05
-  panel_viewed_threshold_seconds: 2.0
+  panel_viewed_threshold_seconds: 0.5
 
 # S11p clinician characteristics, collected once before the first measured
 # case (Start case refuses until complete; locked afterwards). Role is fixed

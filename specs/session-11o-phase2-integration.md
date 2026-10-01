@@ -67,7 +67,7 @@ The fixture must exercise existing configuration capabilities rather than add ne
 - feedback all false
 - practice disabled for the primary integration study
 - free text disabled or excluded from routine export
-- S11j telemetry thresholds including 60 second inactivity, 5 percent panel viewport threshold, 2 second viewed threshold
+- S11j telemetry thresholds including 60 second inactivity, 5 percent panel viewport threshold, 0.5 second viewed threshold (gate amendment 2026-10-01; was 2 seconds)
 
 Use a second configuration version that changes only `case_lifecycle.study_target_completed_cases` (display only), preserving `study_id` and dataset. No new scientific parameter is invented to force a hash change.
 

@@ -2,6 +2,8 @@
 
 Status: **Phase 2 framework decisions locked**
 
+Amendment 2026-10-01: the first use case panel viewed threshold (§14.2, §15) is 0.5 cumulative seconds per timepoint instead of 2 seconds.
+
 Purpose: define the scientific, operational, behavioural telemetry, privacy, and study configuration decisions required before implementation of Phase 2 functionality.
 
 This document intentionally does not prescribe the implementation details of Session 11. Engineering requirements derived from these decisions are tracked separately.
@@ -493,7 +495,7 @@ The panel header itself does not count as panel content exposure.
 For the first use case:
 
 - viewport intersection threshold is **5 percent**
-- cumulative panel viewed threshold is **2 seconds per timepoint**
+- cumulative panel viewed threshold is **0.5 seconds per timepoint** (amended 2026-10-01, was 2 seconds)
 
 The same thresholds apply to all instrumented panels.
 
@@ -563,7 +565,7 @@ AI exposure is evaluated independently for every:
 
 For the first use case:
 
-**AI viewed = at least 2 cumulative seconds during which at least 5 percent of the expanded AI panel content intersects the viewport while the document is visible and the browser window is focused.**
+**AI viewed = at least 0.5 cumulative seconds during which at least 5 percent of the expanded AI panel content intersects the viewport while the document is visible and the browser window is focused.**
 
 The cumulative exposure counter resets for every new timepoint.
 

@@ -325,7 +325,7 @@ Support a study wide panel viewport threshold.
 For the first use case:
 
 - [x] viewport threshold = 5 percent
-- [x] cumulative viewed threshold = 2 seconds
+- [x] cumulative viewed threshold = 0.5 seconds (gate amendment 2026-10-01; was 2 seconds)
 
 Apply the same threshold to all instrumented panels.
 
@@ -389,7 +389,7 @@ For every AI assigned clinician, patient, and timepoint:
 
 For the first use case:
 
-`ai_viewed = cumulative qualifying AI exposure >= 2 seconds`
+`ai_viewed = cumulative qualifying AI exposure >= 0.5 seconds`
 
 Keep continuous duration in addition to the binary classification.
 
