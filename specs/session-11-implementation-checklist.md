@@ -24,7 +24,7 @@ If implementation exceeds the normal one to two day session budget, split work r
 - [x] Use the study ID in the default database filename.
 - [x] Persist study identity inside the database.
 - [x] Refuse startup when configured study ID conflicts with database study ID.
-- [ ] Include `study_id` in Phase 2 exports. (S11n)
+- [x] Include `study_id` in Phase 2 exports. (S11n)
 - [x] Add regression tests preventing cross study database reuse.
 
 ---
@@ -41,9 +41,9 @@ If implementation exceeds the normal one to two day session budget, split work r
 - [x] Associate every newly activated case with its active configuration version.
 - [x] Do not change the configuration identity of an already activated case.
 - [x] Permit new configuration versions within the same `study_id`.
-- [ ] Update export behaviour so mixed valid configuration versions are allowed. (S11n)
+- [x] Update export behaviour so mixed valid configuration versions are allowed. (S11n `export-phase2`)
 - [x] Continue refusing missing or inconsistent configuration identities.
-- [ ] Produce a summary of cases and observations by configuration version. (S11n)
+- [x] Produce a summary of cases and observations by configuration version. (S11n `configuration_counts.csv`)
 
 ---
 
@@ -97,7 +97,7 @@ Also:
 - [x] Draw replacement only from patients not previously seen by the clinician.
 - [x] Never overwrite the original incomplete case.
 - [x] Record replacement relationship.
-- [ ] Include both original and replacement in audit exports. (S11f persists; S11n exports.)
+- [x] Include both original and replacement in audit exports. (S11f persists; S11n exports.)
 - [x] Preserve AI versus no AI balance as closely as possible.
 - [x] Preserve patient level balance as closely as possible.
 - [x] Respect study specific block constraints.
@@ -325,7 +325,7 @@ Support a study wide panel viewport threshold.
 For the first use case:
 
 - [x] viewport threshold = 5 percent
-- [x] cumulative viewed threshold = 2 seconds
+- [x] cumulative viewed threshold = 0.5 seconds (gate amendment 2026-10-01; was 2 seconds)
 
 Apply the same threshold to all instrumented panels.
 
@@ -389,7 +389,7 @@ For every AI assigned clinician, patient, and timepoint:
 
 For the first use case:
 
-`ai_viewed = cumulative qualifying AI exposure >= 2 seconds`
+`ai_viewed = cumulative qualifying AI exposure >= 0.5 seconds`
 
 Keep continuous duration in addition to the binary classification.
 
@@ -506,12 +506,14 @@ First use case:
 
 # 28. Clinician identity privacy
 
-- [ ] Remove `name_normalized` from new behavioural event payloads.
-- [ ] Keep clinician name only where operationally required.
-- [ ] Continue using `clinician_id` in routine events.
-- [ ] Preserve existing optional name mapping keyfile support.
-- [ ] Keep keyfile separate from routine research exports.
-- [ ] Retain existing keyfile filesystem protection.
+- [x] Remove `name_normalized` from new behavioural event payloads.
+- [x] Keep clinician name only where operationally required.
+- [x] Continue using `clinician_id` in routine events.
+- [x] Preserve existing optional name mapping keyfile support.
+- [x] Keep keyfile separate from routine research exports.
+- [x] Retain existing keyfile filesystem protection.
+
+(S11m: login payload `{}`; `events.append` refuses `name_normalized` at any depth.)
 
 Historical data do not require migration solely to remove names from old event payloads.
 
@@ -532,11 +534,11 @@ Historical data do not require migration solely to remove names from old event p
 
 Ensure backups remain attributable to:
 
-- [ ] `study_id`
-- [ ] schema/database version
-- [ ] backup timestamp
+- [x] `study_id`
+- [x] schema/database version
+- [x] backup timestamp
 
-Do not merge backups across studies.
+Do not merge backups across studies. (S11m: `<root>/<study_id>/study_<study_id>_schema_<N>_<UTC>.db`, verified read only, never overwritten.)
 
 Retention remains an operational policy rather than an automatic simulator rule.
 
@@ -548,45 +550,47 @@ Do not put all Phase 2 information into one answers CSV.
 
 Provide linked outputs for at least:
 
+(S11n: `export-phase2` bundle — `timepoints.csv`, `answers.csv`, `panel_summaries.csv`, `behavioral_events.csv`, `randomisation_audit.csv`, `configuration_history.csv`, `configuration_counts.csv`, `manifest.json`.)
+
 ## Answers and timepoints
 
-- [ ] clinician responses
-- [ ] arm
-- [ ] timing summaries
-- [ ] completion status
-- [ ] configuration version
+- [x] clinician responses
+- [x] arm
+- [x] timing summaries
+- [x] completion status
+- [x] configuration version
 
 ## Panel summaries
 
-- [ ] panel viewed
-- [ ] cumulative duration
-- [ ] episode count
-- [ ] first view latency
-- [ ] first and last view timestamps
-- [ ] panel open counts
+- [x] panel viewed
+- [x] cumulative duration
+- [x] episode count
+- [x] first view latency
+- [x] first and last view timestamps
+- [x] panel open counts
 
 ## Raw events
 
-- [ ] behavioural source events
-- [ ] tab identity
-- [ ] configuration identity
+- [x] behavioural source events
+- [x] tab identity
+- [x] configuration identity
 
 ## Randomisation audit
 
-- [ ] planned schedule
-- [ ] generated arm
-- [ ] activated status
-- [ ] activation timestamp
-- [ ] lifecycle outcome
-- [ ] replacement links
+- [x] planned schedule
+- [x] generated arm
+- [x] activated status
+- [x] activation timestamp
+- [x] lifecycle outcome
+- [x] replacement links
 
 ## Configuration history
 
-- [ ] `config_version`
-- [ ] `config_hash`
-- [ ] activation timestamp
-- [ ] description
-- [ ] reason where present
+- [x] `config_version`
+- [x] `config_hash`
+- [x] activation timestamp
+- [x] description
+- [x] reason where present
 
 ---
 
@@ -594,13 +598,13 @@ Provide linked outputs for at least:
 
 Ensure linked outputs expose stable join keys including:
 
-- [ ] `study_id`
-- [ ] `clinician_id`
-- [ ] `patient_id`
-- [ ] timepoint
-- [ ] case/session identity
-- [ ] `config_version`
-- [ ] `config_hash`
+- [x] `study_id`
+- [x] `clinician_id`
+- [x] `patient_id`
+- [x] timepoint
+- [x] case/session identity
+- [x] `config_version`
+- [x] `config_hash`
 
 ---
 
@@ -608,12 +612,12 @@ Ensure linked outputs expose stable join keys including:
 
 Replace the current blanket mixed generation refusal.
 
-- [ ] Permit multiple valid configuration versions inside one study export.
-- [ ] Keep every observation attributable to one version.
-- [ ] Refuse missing configuration identity.
-- [ ] Refuse unknown configuration identity.
-- [ ] Refuse internal inconsistencies.
-- [ ] Produce counts by configuration version.
+- [x] Permit multiple valid configuration versions inside one study export.
+- [x] Keep every observation attributable to one version.
+- [x] Refuse missing configuration identity.
+- [x] Refuse unknown configuration identity.
+- [x] Refuse internal inconsistencies.
+- [x] Produce counts by configuration version.
 
 ---
 
@@ -621,11 +625,11 @@ Replace the current blanket mixed generation refusal.
 
 Add explicit browser tab identity.
 
-- [ ] Generate per tab identifier.
-- [ ] Include it in behavioural events.
-- [ ] Detect simultaneous active views of the same measured case.
-- [ ] Prefer preventing conflicting active case views.
-- [ ] If prevention cannot be guaranteed, make the conflict auditable.
+- [x] Generate per tab identifier.
+- [x] Include it in behavioural events.
+- [x] Detect simultaneous active views of the same measured case.
+- [x] Prefer preventing conflicting active case views.
+- [x] If prevention cannot be guaranteed, make the conflict auditable. (S11j tab id; S11m `case_tab_leases` + `tab.*` events.)
 
 ---
 
@@ -635,40 +639,42 @@ The eventual S11 specification should contain a complete numbered test inventory
 
 At minimum include regression coverage for:
 
-- [ ] GET does not consume randomisation.
-- [ ] Start case activates exactly once.
-- [ ] Activated assignment is immutable.
-- [ ] Patient is never repeated for the same clinician.
-- [ ] Adaptive scheduling improves or preserves configured balance.
-- [ ] Existing activated assignments survive later scheduling.
-- [ ] Starting arm balancing works.
-- [ ] Randomisation reproduces from stored inputs.
-- [ ] Study ID mismatch refuses startup.
-- [ ] Configuration change does not mutate active cases.
-- [ ] Mixed valid configuration versions export successfully.
-- [ ] Invalid configuration provenance still refuses export.
-- [ ] No AI condition contains no AI panel.
-- [ ] AI condition displays only the frozen intervention artifact.
-- [ ] Conditional cause question gating works.
-- [ ] Three month outcome dependency works.
-- [ ] Background tab time does not count toward panel exposure.
-- [ ] Unfocused browser time does not count toward panel exposure.
-- [ ] Separate exposure episodes accumulate correctly.
-- [ ] Exposure resets at the next timepoint.
-- [ ] Collapsed panel does not accumulate exposure.
-- [ ] AI viewing does not require recent interaction.
-- [ ] Active time excludes inactivity beyond threshold.
-- [ ] Passive mouse movement does not reset inactivity.
-- [ ] Panel open does not automatically imply viewed.
-- [ ] Intervention failure preserves ITT arm.
-- [ ] AI leakage preserves no AI ITT arm.
-- [ ] PP compliance is observation specific.
-- [ ] Missing responses remain missing.
-- [ ] Replacement case never repeats a patient.
-- [ ] Pause/resume within configured grace period works.
-- [ ] Timeout produces an incomplete activated case.
-- [ ] Behavioural events contain clinician ID but not clinician name.
-- [ ] Tab conflicts are prevented or recorded.
+(Each item is covered by its owning S11x test file; the cross component path by `tests/test_phase2_integration.py`, `tests/e2e/test_phase2_walk.py` and `tests/e2e/test_multitab_walk.py` — S11o.)
+
+- [x] GET does not consume randomisation.
+- [x] Start case activates exactly once.
+- [x] Activated assignment is immutable.
+- [x] Patient is never repeated for the same clinician.
+- [x] Adaptive scheduling improves or preserves configured balance.
+- [x] Existing activated assignments survive later scheduling.
+- [x] Starting arm balancing works.
+- [x] Randomisation reproduces from stored inputs.
+- [x] Study ID mismatch refuses startup.
+- [x] Configuration change does not mutate active cases.
+- [x] Mixed valid configuration versions export successfully.
+- [x] Invalid configuration provenance still refuses export.
+- [x] No AI condition contains no AI panel.
+- [x] AI condition displays only the frozen intervention artifact.
+- [x] Conditional cause question gating works.
+- [x] Three month outcome dependency works.
+- [x] Background tab time does not count toward panel exposure.
+- [x] Unfocused browser time does not count toward panel exposure.
+- [x] Separate exposure episodes accumulate correctly.
+- [x] Exposure resets at the next timepoint.
+- [x] Collapsed panel does not accumulate exposure.
+- [x] AI viewing does not require recent interaction.
+- [x] Active time excludes inactivity beyond threshold.
+- [x] Passive mouse movement does not reset inactivity.
+- [x] Panel open does not automatically imply viewed.
+- [x] Intervention failure preserves ITT arm.
+- [x] AI leakage preserves no AI ITT arm.
+- [x] PP compliance is observation specific.
+- [x] Missing responses remain missing.
+- [x] Replacement case never repeats a patient.
+- [x] Pause/resume within configured grace period works.
+- [x] Timeout produces an incomplete activated case.
+- [x] Behavioural events contain clinician ID but not clinician name.
+- [x] Tab conflicts are prevented or recorded.
 
 ---
 
@@ -716,3 +722,14 @@ Phase 2 software implementation is complete only when the simulator can:
 14. Preserve configuration provenance for every research observation.
 15. Avoid introducing scientific decisions that belong to the study protocol.
 
+
+Status (S11o, 2026-09-28): 1–14 are implemented and exercised end to end by `tests/test_phase2_integration.py` (A–G, I, J scenarios) and the Phase 2 e2e walks. 15 holds as far as code goes: study specific parameters stay configuration (section 36); the `primary_cause` options in `configs/example_phase2_questions.yaml` remain labelled placeholders (gate §26 item 11 open), and the `technical_failure` missing reason stays reserved (section 24).
+
+---
+
+# 38. Clinician characteristics (S11p)
+
+- [x] Collect role, years of practice, country and physician specialty before the first measured case.
+- [x] Keep them out of randomisation inputs and event payloads.
+- [x] Lock them once the first measured case exists.
+- [x] Export them pseudonymously in `clinicians.csv`.

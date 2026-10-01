@@ -3,7 +3,7 @@
 -- "s11b_config_version_history", 006 "s11c_randomisation_schedules", 007
 -- "s11d_case_activation", 008 "s11e_case_lifecycle", 009
 -- "s11f_case_replacements", 010 "s11h_answer_source", 011 "s11i_practice", 012
--- "s11j_browser_telemetry"); the
+-- "s11j_browser_telemetry", 013 "s11m_case_tab_leases", 014 "s11p_clinician_profiles"); the
 -- filename predates 002. The
 -- drift-check test in tests/test_db.py reads sqlite_master.sql (the exact
 -- DDL text SQLite stored) sorted by name, joins with ";\n\n", and asserts
@@ -77,6 +77,30 @@ CREATE TABLE case_replacements (
         REFERENCES arm_assignments(clinician_id, patient_id),
     FOREIGN KEY (replacement_schedule_id, replacement_case_position)
         REFERENCES randomisation_schedule_items(schedule_id, case_position)
+);
+
+CREATE TABLE case_tab_leases (
+    clinician_id  TEXT NOT NULL,
+    patient_id    TEXT NOT NULL,
+    session_id    TEXT NOT NULL REFERENCES sessions(session_id),
+    tab_id        TEXT NOT NULL,
+    render_id     TEXT NOT NULL,
+    claimed_at    TIMESTAMP NOT NULL,
+    last_seen_at  TIMESTAMP NOT NULL,
+    PRIMARY KEY (clinician_id, patient_id),
+    FOREIGN KEY (clinician_id, patient_id)
+        REFERENCES arm_assignments(clinician_id, patient_id)
+);
+
+CREATE TABLE clinician_profiles (
+    clinician_id         TEXT PRIMARY KEY REFERENCES clinicians(clinician_id),
+    professional_role    TEXT NOT NULL CHECK (professional_role IN ('physician', 'nurse')),
+    years_of_practice    REAL NOT NULL CHECK (years_of_practice >= 0),
+    country_of_practice  TEXT NOT NULL,
+    primary_specialty    TEXT,
+    recorded_at          TIMESTAMP NOT NULL,
+    updated_at           TIMESTAMP NOT NULL,
+    CHECK ((professional_role = 'physician') = (primary_specialty IS NOT NULL))
 );
 
 CREATE TABLE clinicians (
@@ -274,6 +298,22 @@ CREATE TRIGGER trg_case_replacements_no_delete
 BEFORE DELETE ON case_replacements
 BEGIN
     SELECT RAISE(ABORT, 'replacement plans are permanent');
+END;
+
+CREATE TRIGGER trg_clinician_profiles_locked
+BEFORE UPDATE ON clinician_profiles
+WHEN EXISTS (
+    SELECT 1 FROM arm_assignments
+    WHERE clinician_id = OLD.clinician_id AND arm_source = 'phase2_randomized'
+)
+BEGIN
+    SELECT RAISE(ABORT, 'clinician profile is locked once a measured case exists');
+END;
+
+CREATE TRIGGER trg_clinician_profiles_no_delete
+BEFORE DELETE ON clinician_profiles
+BEGIN
+    SELECT RAISE(ABORT, 'clinician profiles are never deleted');
 END;
 
 CREATE TRIGGER trg_practice_cases_complete_once

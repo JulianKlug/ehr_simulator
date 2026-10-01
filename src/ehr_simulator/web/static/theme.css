@@ -425,7 +425,11 @@ body.chrome-epic [role="tabpanel"][hidden] {
 }
 
 @media (min-width: 900px) {
-    #patient-view:not(.pane-collapsed) .patient-layout.has-questions .patient-chrome {
+    /* Everything left of the open drawer: the summary card (jumper, Prev/Next)
+       and the practice banner sit outside .patient-layout, so they need it too. */
+    #patient-view:not(.pane-collapsed) .patient-layout.has-questions .patient-chrome,
+    #patient-view.has-questions:not(.pane-collapsed) > .summary-card,
+    #patient-view.has-questions:not(.pane-collapsed) > .practice-banner {
         margin-right: var(--pane-w);
     }
 }
@@ -741,4 +745,37 @@ body.chrome-epic [role="tabpanel"][hidden] {
     padding: 0.35rem 0.6rem;
     border-left: 3px solid var(--color-focus-ring);
     color: var(--color-muted);
+}
+
+/* S11m: another tab owns this case. The notice blocks; the pane is inert
+   to the pointer (case_tab_guard.js also cancels every write). */
+.tab-conflict {
+    margin: 0 0 0.75rem 0;
+    padding: 0.6rem 0.8rem;
+    border: 1px solid var(--color-error);
+    color: var(--color-error);
+}
+
+.tab-conflict button {
+    margin-left: 0.75rem;
+}
+
+/* Dim the pane's content, not the pane: an opaque pane keeps covering
+   the page beneath it. The notice itself stays sharp and clickable. */
+#patient-view[data-tab-state="refused"] .questions-pane > :not(.tab-conflict) {
+    opacity: 0.5;
+    pointer-events: none;
+}
+
+/* S11p: clinician profile form. */
+.profile-form fieldset {
+    border: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.35rem;
+}
+
+.field-error {
+    margin: 0 0 0.4rem 0;
+    color: var(--color-error);
 }

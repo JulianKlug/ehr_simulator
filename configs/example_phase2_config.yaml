@@ -12,6 +12,9 @@
 #   uv run ehr-simulator activate-config configs/example_phase2_config.yaml configs/example_phase2_questions.yaml \
 #       --version v1 --description "Phase 2 example"
 #   uv run ehr-simulator serve --config  configs/example_phase2_config.yaml --questions configs/example_phase2_questions.yaml
+#   uv run ehr-simulator expire-cases configs/example_phase2_config.yaml   # when clinicians left
+#   uv run ehr-simulator backup --db-path data/study_example_phase2.db
+#   uv run ehr-simulator export-phase2 configs/example_phase2_config.yaml
 #
 # Editing this file changes config_hash: stop the server, activate a new
 # --version, restart.
@@ -85,7 +88,7 @@ clinician_facing:
 # timepoint). Feedback flags must stay false (no feedback is implemented).
 # Practice cases (enabled: true) need their own patient_ids, disjoint from
 # patient_ids in every version. Free text is off; enabling it makes
-# `routine_export` decide whether export-answers includes those columns.
+# `routine_export` decide whether export-answers and export-phase2 include their values.
 # First use case: allow_readonly (gate §10.1).
 study_behaviour:
   backward_navigation: allow_readonly
@@ -107,8 +110,18 @@ study_behaviour:
 # after the last click/touch/scroll/key/answer; a panel is exposed while
 # >= panel_viewport_threshold of its expanded content is on screen in a
 # visible, focused tab, and "viewed" after panel_viewed_threshold_seconds
-# of cumulative exposure per timepoint. First use case: 60 s, 5 %, 2 s.
+# of cumulative exposure per timepoint. First use case: 60 s, 5 %, 0.5 s.
 telemetry:
   inactivity_threshold_seconds: 60
   panel_viewport_threshold: 0.05
-  panel_viewed_threshold_seconds: 2.0
+  panel_viewed_threshold_seconds: 0.5
+
+# S11p clinician characteristics, collected once before the first measured
+# case (Start case refuses until complete; locked afterwards). Role is fixed
+# (physician | nurse); physicians pick a specialty, nurses none. Countries
+# are ISO 3166-1 alpha-2 codes.
+# PLACEHOLDER: both lists are study decisions; replace them before
+# measured data collection.
+clinician_profile:
+  specialties: [neurology, emergency_medicine, internal_medicine, intensive_care, other]
+  countries: [CH, FR, DE, IT, AT]

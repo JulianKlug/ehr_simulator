@@ -211,26 +211,30 @@ Scope (historical draft):
 
 **Note (TODOS.md):** chart library may be re-evaluated for the divergence view specifically (plotnine + JS scrubber overlay vs small D3 island). Decision deferred to S10 spec authoring time. → Plotnine (SVG) shipped; the polished v1.0 view remains S12.
 
-### Phase-2 policy gate (not a code session)
+### Phase-2 policy gate (not a code session) — locked
 
-Before Session 11 (randomization) ships, the following must be filed/locked:
-- OSF pre-registration of primary endpoints + "AI-viewed = panel in viewport ≥3s" operational definition (D8).
-- IRB data-handling paragraph + clinician_name pseudonym policy (D9).
-- Competitive survey (3-4 hours): 6-10 closest analogues catalogued (D3).
+Decided in `specs/policy/phase2-gate.md` (§2), which supersedes the earlier draft of this gate (OSF preregistration, an IRB data-handling paragraph and a competitive survey before Session 11; "AI viewed = viewport ≥3 s"):
+- OSF preregistration is **not** a prerequisite; individual studies may preregister later, so study parameters stay configuration.
+- No dedicated IRB data-handling document is required; the pseudonymous `clinician_id` scheme stays, under the gate's privacy rules (S11m).
+- No systematic competitive review is required; a short record of reviewed systems is kept for later documentation.
+- **AI viewed** = at least 0.5 cumulative seconds (gate amendment 2026-10-01; was 2 s) with ≥5 % of the expanded AI panel content in the viewport while the document is visible and the window focused (gate §15; configured in the study `telemetry` block, S11k/S11l).
 
 Backup cadence (D10) is **not** in this gate — it lives in S6 per /plan-eng-review (TODOS.md).
 
-### Session 11 — Phase 2 randomization
+### Session 11 — Phase 2 (S11a–S11o, shipped)
 
-Goal: randomize AI-visible vs not per `(clinician_id, patient_id)` pair, the actual study endpoint.
+> **Superseded:** the original draft here (an independent `assign_arm(clinician_id, patient_id, seed)` coin flip per pair, `arm` added to the S9c wide CSV) was replaced by the Phase 2 gate. Plan: `specs/session11_roadmap.md`; one spec per subsession `specs/session-11{a..o}-*.md`; checklist `specs/session-11-implementation-checklist.md`.
 
-Scope:
-- `assign_arm(clinician_id, patient_id, seed) -> Literal["ai", "no_ai"]` — deterministic given inputs.
-- `arm_source` flips from `phase1_stub` to `phase2_randomized` on first assignment.
-- AI panel hidden vs visible based on assignment.
-- `arm` round-trips through CSV (column added to wide-pivot export from S9c).
+What shipped:
 
-**Test inventory:** ≥5 tests. `assign_arm` determinism (same inputs → same output across Python sessions); `arm_source` enum boundary; AI panel visibility iff `arm == "ai"`; **[REGRESSION]** `arm` column round-trips through CSV; switching stub → randomized does not rewrite existing arm_assignments.
+- **Study identity and configuration history (S11a, S11b):** one database per `study_id`; configurations are registered and activated explicitly (`activate-config`), and every case is pinned to the version it started under.
+- **Planned vs realised allocation (S11c, S11d):** one immutable adaptive block schedule per clinician (HMAC seeded, balanced against realised activations); an arm is realised only by the explicit **Start case**, never by a GET.
+- **Lifecycle and replacements (S11e, S11f):** active / paused / completed / incomplete with lazy timeouts; an incomplete case is kept and gets a deterministic, non duplicating replacement.
+- **Intervention and questions (S11g, S11h, S11i):** AI cases see only the frozen artifact row of the current timepoint, no AI cases see no AI surface; conditional first use case questions; pinned study behaviour policies and practice cases.
+- **Behavioural telemetry and PP (S11j, S11k, S11l):** browser foreground/active time, panel exposure episodes, AI viewed, delivery failure, leakage and PP derived per observation from raw events; ITT is never rewritten.
+- **Privacy, tabs, backups (S11m):** no clinician name in new events; one tab lease per active measured case (`tab.*` audit); study isolated, verified backups.
+- **Linked export (S11n):** `export-phase2` writes a pseudonymised bundle (timepoints, answers, panel summaries, raw events, randomisation audit, configuration history and counts, manifest) across every configuration version.
+- **Integration gate (S11o):** end to end scenarios in `tests/test_phase2_integration.py`, `tests/e2e/test_phase2_walk.py`, `tests/e2e/test_multitab_walk.py`.
 
 ### Session 12 — Phase 2.5 polished divergence + v1.0 release
 

@@ -1,4 +1,4 @@
-<div id="patient-view"
+<div id="patient-view"{% if questions_html %} class="has-questions"{% endif %}
      data-patient-id="{{ patient_slice.patient_id }}"
      data-t-index="{{ patient_slice.timepoint_index }}"
      data-t-count="{{ timepoint_count }}"
@@ -12,6 +12,12 @@
      data-render-id="{{ render_id }}"
      data-telemetry-url="{{ telemetry_url }}"
      data-viewport-threshold="{{ viewport_threshold }}"
+     {%- endif %}
+     {#- S11m: a guarded render must claim the case lease (static/case_tab_guard.js). -#}
+     {%- if tab_guard %}
+     data-tab-claim-url="/case/{{ patient_slice.patient_id }}/tab/claim"
+     data-tab-release-url="/case/{{ patient_slice.patient_id }}/tab/release"
+     data-tab-state="pending"
      {%- endif %}>
     {{ summary_html | safe }}
     {#- S11i: practice is always labelled; it never counts toward the study. -#}

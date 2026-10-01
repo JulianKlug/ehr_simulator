@@ -70,6 +70,7 @@ __all__ = [
     "BlockEntry",
     "CaseLifecycleConfig",
     "ClinicianFacingConfig",
+    "ClinicianProfileConfig",
     "FeedbackConfig",
     "FreeTextConfig",
     "FreeTextExport",
@@ -108,6 +109,12 @@ _INTERVENTION_ID_MAX_CHARS = 128
 #: S11g: ``<source>:<name>`` — the clinician facing source a field is shown
 #: from, then its canonical name. Example: ``admission:mrs_3mo``.
 PROHIBITED_FIELD_PATTERN = re.compile(r"^(admission|scalar|imaging|ai):[^\s:]+$")
+
+#: S11p: a configured specialty code, e.g. ``emergency_medicine``.
+_SPECIALTY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
+
+#: S11p: ISO 3166-1 alpha-2 country code, e.g. ``CH``.
+_COUNTRY_PATTERN = re.compile(r"^[A-Z]{2}$")
 
 
 class RandomisationConfig(BaseModel):
@@ -351,6 +358,40 @@ class TelemetryConfig(BaseModel):
         return v
 
 
+class ClinicianProfileConfig(BaseModel):
+    """S11p: collect clinician characteristics before the first measured case.
+
+    The vocabularies are study decisions; ``professional_role`` is the fixed
+    ``physician | nurse`` enum in ``clinician_profile.py``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    specialties: list[str]
+    countries: list[str]
+
+    @field_validator("specialties")
+    @classmethod
+    def _specialty_codes(cls, v: list[str]) -> list[str]:
+        return _vocabulary(v, _SPECIALTY_PATTERN, "specialties")
+
+    @field_validator("countries")
+    @classmethod
+    def _country_codes(cls, v: list[str]) -> list[str]:
+        return _vocabulary(v, _COUNTRY_PATTERN, "countries")
+
+
+def _vocabulary(values: list[str], pattern: re.Pattern[str], name: str) -> list[str]:
+    if not values:
+        raise ValueError(f"clinician_profile.{name} must not be empty")
+    bad = [v for v in values if not pattern.fullmatch(v)]
+    if bad:
+        raise ValueError(f"clinician_profile.{name} must match {pattern.pattern!r}; got {bad}")
+    if len(set(values)) != len(values):
+        raise ValueError(f"clinician_profile.{name} must be unique")
+    return values
+
+
 class BackwardNavigation(StrEnum):
     ALLOW_READONLY = "allow_readonly"
     PROHIBIT = "prohibit"
@@ -439,6 +480,7 @@ class StudyConfig(BaseModel):
     clinician_facing: ClinicianFacingConfig | None = None
     study_behaviour: StudyBehaviourConfig | None = None
     telemetry: TelemetryConfig | None = None
+    clinician_profile: ClinicianProfileConfig | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_randomisation(self, handler: SerializerFunctionWrapHandler) -> Any:
@@ -460,6 +502,8 @@ class StudyConfig(BaseModel):
             data.pop("study_behaviour", None)
         if self.telemetry is None:
             data.pop("telemetry", None)
+        if self.clinician_profile is None:
+            data.pop("clinician_profile", None)
         return data
 
     @model_validator(mode="before")

@@ -198,6 +198,16 @@ def list_for_clinician(
     return tuple(ActivatedAssignment(*row) for row in rows)
 
 
+def list_phase2(conn: sqlite3.Connection) -> tuple[ActivatedAssignment, ...]:
+    """S11n: every realised Phase 2 case, by clinician then activation order."""
+    rows = conn.execute(
+        f"SELECT {_ACTIVATED_COLUMNS} FROM arm_assignments WHERE arm_source = ? "
+        "ORDER BY clinician_id, activated_at, patient_id",
+        (ARM_SOURCE_PHASE2,),
+    ).fetchall()
+    return tuple(ActivatedAssignment(*row) for row in rows)
+
+
 def activated_positions(conn: sqlite3.Connection, schedule_id: str) -> frozenset[int]:
     """Schedule positions already consumed by an activation."""
     rows = conn.execute(

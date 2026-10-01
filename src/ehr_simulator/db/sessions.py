@@ -55,6 +55,15 @@ def fetch_for_pair(
     return SessionRow(*row)
 
 
+def list_all(conn: sqlite3.Connection) -> tuple[SessionRow, ...]:
+    """S11n: every session with its provenance."""
+    rows = conn.execute(
+        "SELECT session_id, clinician_id, patient_id, arm, config_hash, config_version, "
+        "ended_at, observation_mode FROM sessions ORDER BY started_at, rowid"
+    ).fetchall()
+    return tuple(SessionRow(*row) for row in rows)
+
+
 def find_open(conn: sqlite3.Connection, clinician_id: str, patient_id: str) -> str | None:
     """Return the open ``session_id`` for the pair, or ``None``."""
     row = conn.execute(

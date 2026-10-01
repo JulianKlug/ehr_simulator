@@ -344,3 +344,42 @@ def live_branching_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[
             "e2e branching",
         ],
     )
+
+
+_EXAMPLE_PHASE2_STUDY = Path(__file__).parents[2] / "configs" / "example_phase2_config.yaml"
+_EXAMPLE_PHASE2_QUESTIONS = Path(__file__).parents[2] / "configs" / "example_phase2_questions.yaml"
+
+
+@pytest.fixture(scope="session")
+def phase2_work_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Work dir (and so DB) of ``live_phase2_server``."""
+    return tmp_path_factory.mktemp("e2e-phase2-work")
+
+
+@pytest.fixture(scope="session")
+def live_phase2_server(
+    tmp_path_factory: pytest.TempPathFactory, phase2_work_dir: Path
+) -> Iterator[str]:
+    """S11o: the shipped Phase 2 example (first use case questions, guard on)."""
+    study_yaml, questions_yaml = str(_EXAMPLE_PHASE2_STUDY), str(_EXAMPLE_PHASE2_QUESTIONS)
+    yield from _boot_server(
+        tmp_path_factory,
+        label="e2e-phase2",
+        extra_args=["--config", study_yaml, "--questions", questions_yaml],
+        activation=[
+            "activate-config",
+            study_yaml,
+            questions_yaml,
+            "--version",
+            "e2e",
+            "--description",
+            "e2e phase 2 example",
+        ],
+        work_dir=phase2_work_dir,
+    )
+
+
+@pytest.fixture
+def phase2_db(phase2_work_dir: Path) -> Path:
+    """Path of ``live_phase2_server``'s live DB (read it, never write)."""
+    return phase2_work_dir / _DB_FILENAME

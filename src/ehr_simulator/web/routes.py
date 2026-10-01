@@ -53,6 +53,11 @@ S11j: a render whose case pins ``telemetry`` carries a ``render_id``,
 recorded as ``timepoint.render`` after the response is built;
 ``POST /telemetry/events`` binds browser batches to those renders
 (``web/telemetry.py``).
+
+S11m: an active measured case pinned to ``telemetry`` is guarded — its
+answer, advance, heartbeat and pause need the tab lease
+(``web/tab_guard.py``; ``POST /case/{pid}/tab/claim|release``). A refusal
+is 409 + ``X-Ehrsim-Tab: conflict`` and writes nothing else.
 """
 
 from __future__ import annotations
@@ -62,14 +67,17 @@ from collections.abc import Callable
 from dataclasses import dataclass, replace
 from enum import StrEnum
 from functools import partial
-from typing import Literal
+from typing import Any, Literal
 
 from fastapi import APIRouter, Form, Request, Response, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 
+from ehr_simulator.clinician_profile import FIELDS as PROFILE_FIELDS
+from ehr_simulator.clinician_profile import MAX_YEARS_OF_PRACTICE, ProfileValidationError
 from ehr_simulator.config.questions import Questions
 from ehr_simulator.config.study import BackwardNavigation
 from ehr_simulator.db import arm_assignments, clinicians, cookies, events, practice
+from ehr_simulator.db.clinician_profiles import ProfileLockedError
 from ehr_simulator.db.exceptions import (
     CaseLifecycleError,
     ConfigurationProvenanceError,
@@ -80,7 +88,7 @@ from ehr_simulator.db.observation import ObservationMode
 from ehr_simulator.logging import get_logger, update_request_context
 from ehr_simulator.question_branching import evaluate
 from ehr_simulator.randomisation import ScheduleIncompatibleError
-from ehr_simulator.web import case_contact
+from ehr_simulator.web import case_contact, tab_guard
 from ehr_simulator.web.answer_capture import (
     FREE_TEXT_AUTOSAVE_DELAY_MS,
     FREE_TEXT_MAX_CHARS,
@@ -97,8 +105,15 @@ from ehr_simulator.web.case_start import (
     case_patient_ids,
     case_states,
     index_state,
+    profile_missing,
     replacement_markers,
     start_next_case,
+)
+from ehr_simulator.web.clinician_profile_page import (
+    ProfileContext,
+    profile_config,
+    profile_context,
+    save_profile,
 )
 from ehr_simulator.web.gating import (
     AdvanceResult,
@@ -136,10 +151,13 @@ from ehr_simulator.web.study_session import (
     resolve_case_configuration,
     resolve_intervention,
 )
+from ehr_simulator.web.tab_guard import ReleaseReason, TabGuardError
 from ehr_simulator.web.telemetry import (
     TelemetryValidationError,
+    UnclaimedRenderError,
     UnknownRenderError,
     parse_batch,
+    parse_tab_request,
     record_batch,
 )
 from ehr_simulator.web.timing_events import (
@@ -165,6 +183,9 @@ _PAUSE_DISABLED_MSG = "Pausing is not enabled for this study"
 _HX_REQUEST_HEADER = "hx-request"
 _HX_HISTORY_RESTORE_HEADER = "hx-history-restore-request"
 _INDEX_URL = "/"
+_PROFILE_URL = "/profile"
+_NO_PROFILE_MSG = "This study does not collect clinician profiles"
+_HTTP_UNPROCESSABLE = status.HTTP_422_UNPROCESSABLE_CONTENT
 _TELEMETRY_URL = "/telemetry/events"
 
 Chrome = Literal["dense", "epic"]
@@ -189,6 +210,7 @@ class RenderedView:
     visit_kind: VisitKind
     render_id: str | None
     ai_delivery: dict[str, str]
+    tab_guard: bool = False  # S11m: its tab must hold the case lease
 
 
 def _is_htmx(request: Request) -> bool:
@@ -299,6 +321,44 @@ def _form_refusal(request: Request, response: Response) -> Response:
     if redirect is not None:
         page.headers["HX-Redirect"] = redirect
     return page
+
+
+def _tab_refusal(
+    request: Request,
+    *,
+    clinician_id: str,
+    patient_id: str,
+    case: CaseConfiguration | None,
+    contact: ContactResult | None,
+    form: Any = None,
+) -> str | None:
+    """S11m: ``None`` when the request may write, else the refusal message.
+
+    Unguarded cases pass untouched; a guarded one needs the lease holder's
+    ``(tab_id, render_id)`` from the headers or, for plain forms, ``form``.
+    """
+    if not tab_guard.is_guarded(case, contact):
+        return None
+
+    tab_id, render_id = tab_guard.owner_identity(request.headers, form)
+    try:
+        tab_guard.require_owner(
+            request.app.state.db,
+            request.app.state,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            tab_id=tab_id,
+            render_id=render_id,
+        )
+    except TabGuardError as exc:
+        get_logger().warning("tab guard refused", event_kind="tab.refused", error=str(exc))
+        return str(exc)
+    return None
+
+
+def _mark_tab_conflict(response: Response) -> Response:
+    response.headers[tab_guard.CONFLICT_HEADER] = tab_guard.CONFLICT_VALUE
+    return response
 
 
 def _check_contact(
@@ -676,6 +736,7 @@ def _render_patient_view(
     telemetry = case.study.telemetry if case is not None and ctx is not None else None
     tracked = telemetry is not None and render_tracking is RenderTracking.TRACKED
     render_id = new_render_id() if tracked else None
+    guarded = tracked and tab_guard.is_guarded(case, contact)
     logged_in_name = _logged_in_name(request)
     template_name = "_chrome_dense.html" if chrome == "dense" else "_chrome_epic.html"
     chrome_html = templates.get_template(template_name).render(
@@ -700,6 +761,7 @@ def _render_patient_view(
         render_id=render_id,
         telemetry_url=_TELEMETRY_URL,
         viewport_threshold=telemetry.panel_viewport_threshold if telemetry else None,
+        tab_guard=guarded,
     )
     return RenderedView(
         html=html,
@@ -708,6 +770,7 @@ def _render_patient_view(
         visit_kind=visit_kind,
         render_id=render_id,
         ai_delivery=ai_delivery(patient_slice, intervention),
+        tab_guard=guarded,
     )
 
 
@@ -729,6 +792,7 @@ def _record_render(
         render_id=view.render_id,
         visit_kind=view.visit_kind,
         ai_delivery=view.ai_delivery,
+        tab_guard=view.tab_guard,
     )
 
 
@@ -786,12 +850,86 @@ async def login_post(
         patient_id=None,
         timepoint=None,
         kind="clinician.login",
-        payload={"name_normalized": " ".join(raw_name.casefold().split())},
+        payload={},  # S11m: the row's clinician_id is the only identity
         app_state=request.app.state,
     )
-    response: Response = RedirectResponse("/", status_code=303)
+    # S11p: a clinician without the required profile fills it in first.
+    state = request.app.state
+    target = _PROFILE_URL if profile_missing(state.db, state, clinician_id) else _INDEX_URL
+    response: Response = RedirectResponse(target, status_code=303)
     cookies.set_clinician_cookie(response, clinician_id)
     return response
+
+
+def _profile_page(
+    request: Request,
+    ctx: ProfileContext,
+    *,
+    form: dict[str, str] | None = None,
+    errors: dict[str, str] | None = None,
+    status_code: int = status.HTTP_200_OK,
+) -> Response:
+    """The form prefilled from the submission, else the stored profile."""
+    stored = ctx.stored
+    values = dict.fromkeys(PROFILE_FIELDS, "")
+    if stored is not None:
+        values.update(
+            professional_role=stored.professional_role,
+            years_of_practice=f"{stored.years_of_practice:g}",
+            country_of_practice=stored.country_of_practice,
+            primary_specialty=stored.primary_specialty or "",
+        )
+    values.update(form or {})
+    return request.app.state.templates.TemplateResponse(
+        request,
+        "profile.html",
+        {
+            "ctx": ctx,
+            "values": values,
+            "errors": errors or {},
+            "max_years": f"{MAX_YEARS_OF_PRACTICE:g}",
+        },
+        status_code=status_code,
+    )
+
+
+@router.get(_PROFILE_URL, response_class=HTMLResponse)
+async def profile_get(request: Request) -> Response:
+    """S11p: the clinician characteristics form (404 when not collected)."""
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect
+    config = profile_config(request.app.state)
+    if config is None:
+        return HTMLResponse(content=_error_flash(_NO_PROFILE_MSG), status_code=404)
+    return _profile_page(request, profile_context(request.app.state.db, config, clinician_id or ""))
+
+
+@router.post(_PROFILE_URL)
+async def profile_post(request: Request) -> Response:
+    """S11p: store the characteristics; 422 invalid, 409 locked, 303 saved."""
+    clinician_id, redirect = _require_clinician(request)
+    if redirect is not None:
+        return redirect
+    update_request_context(clinician_id=clinician_id)
+    state = request.app.state
+    config = profile_config(state)
+    if config is None:
+        return HTMLResponse(content=_error_flash(_NO_PROFILE_MSG), status_code=404)
+
+    raw = await request.form()
+    form = {name: str(raw.get(name) or "") for name in PROFILE_FIELDS}
+    try:
+        save_profile(state.db, state, clinician_id=clinician_id or "", config=config, form=form)
+    except ProfileValidationError as exc:
+        ctx = profile_context(state.db, config, clinician_id or "")
+        return _profile_page(
+            request, ctx, form=form, errors=exc.errors, status_code=_HTTP_UNPROCESSABLE
+        )
+    except ProfileLockedError:
+        ctx = profile_context(state.db, config, clinician_id or "")
+        return _profile_page(request, ctx, status_code=status.HTTP_409_CONFLICT)
+    return RedirectResponse(_INDEX_URL, status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.post("/logout")
@@ -800,6 +938,7 @@ async def logout_post(request: Request) -> Response:
     if clinician_id is not None and clinician_id in getattr(
         request.app.state, "known_clinicians", set()
     ):
+        tab_guard.release_all(request.app.state.db, request.app.state, clinician_id=clinician_id)
         events.append(
             request.app.state.db,
             session_id=None,
@@ -968,13 +1107,86 @@ async def case_heartbeat(request: Request, patient_id: str) -> Response:
     if redirect is not None:
         return redirect
 
-    contact, _case, refusal = _lifecycle_request(request, clinician_id or "", patient_id)
+    contact, case, refusal = _lifecycle_request(request, clinician_id or "", patient_id)
     if refusal is not None:
         return refusal
     if contact.access is not CaseAccess.ACTIVE:  # type: ignore[union-attr]
         return _back_to_index(_conflict(_CASE_NOT_ACTIVE_MSG))
 
+    tab_error = _tab_refusal(
+        request, clinician_id=clinician_id or "", patient_id=patient_id, case=case, contact=contact
+    )
+    if tab_error is not None:
+        return _mark_tab_conflict(_conflict(tab_error))
+
     _touch_contact(request, contact)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+def _known_clinician(request: Request) -> str | None:
+    """Cookie clinician for fetch/beacon endpoints (they answer 401, never
+    the login redirect a ``fetch()`` would follow)."""
+    clinician_id = cookies.read_clinician_id(request)
+    if clinician_id is None or clinician_id not in request.app.state.known_clinicians:
+        return None
+    return clinician_id
+
+
+@router.post("/case/{patient_id}/tab/claim")
+async def case_tab_claim(request: Request, patient_id: str) -> Response:
+    """S11m: grant the case lease to the posting tab's render (204) or 409."""
+    clinician_id = _known_clinician(request)
+    if clinician_id is None:
+        return Response(status_code=status.HTTP_401_UNAUTHORIZED)
+    update_request_context(clinician_id=clinician_id, patient_id=patient_id)
+
+    try:
+        body = parse_tab_request(await request.body())
+    except TelemetryValidationError:
+        return Response(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
+
+    contact, _case, refusal = _lifecycle_request(request, clinician_id, patient_id)
+    if refusal is not None:
+        return refusal
+    if contact.access is not CaseAccess.ACTIVE:  # type: ignore[union-attr]
+        return _conflict(_CASE_NOT_ACTIVE_MSG)
+
+    try:
+        tab_guard.claim(
+            request.app.state.db,
+            request.app.state,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            tab_id=body.tab_id,
+            render_id=body.render_id,
+        )
+    except TabGuardError as exc:
+        get_logger().warning("tab claim refused", event_kind="tab.refused", error=str(exc))
+        return _mark_tab_conflict(_conflict(str(exc)))
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
+@router.post("/case/{patient_id}/tab/release")
+async def case_tab_release(request: Request, patient_id: str) -> Response:
+    """S11m: drop the lease if the posting render holds it (sendBeacon, 204)."""
+    clinician_id = _known_clinician(request)
+    if clinician_id is None:
+        return Response(status_code=status.HTTP_401_UNAUTHORIZED)
+
+    try:
+        body = parse_tab_request(await request.body())
+    except TelemetryValidationError:
+        return Response(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
+
+    tab_guard.release(
+        request.app.state.db,
+        request.app.state,
+        clinician_id=clinician_id,
+        patient_id=patient_id,
+        tab_id=body.tab_id,
+        render_id=body.render_id,
+        reason=ReleaseReason.PAGEHIDE,
+    )
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -1001,7 +1213,7 @@ async def telemetry_events(request: Request) -> Response:
             "telemetry batch refused", event_kind="telemetry.refused", error=str(exc)
         )
         return Response(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
-    except UnknownRenderError as exc:
+    except (UnknownRenderError, UnclaimedRenderError) as exc:
         get_logger().warning(
             "telemetry batch refused", event_kind="telemetry.unknown_render", error=str(exc)
         )
@@ -1024,6 +1236,17 @@ async def case_pause(request: Request, patient_id: str, chrome: Chrome = "epic")
         return _form_refusal(request, _conflict(_PAUSE_DISABLED_MSG))
     if contact.access is not CaseAccess.ACTIVE:  # type: ignore[union-attr]
         return _form_refusal(request, _conflict(_CASE_NOT_ACTIVE_MSG))
+
+    tab_error = _tab_refusal(
+        request,
+        clinician_id=clinician_id or "",
+        patient_id=patient_id,
+        case=case,
+        contact=contact,
+        form=await request.form(),
+    )
+    if tab_error is not None:
+        return _mark_tab_conflict(_form_refusal(request, _conflict(tab_error)))
 
     try:
         case_contact.pause_case(request.app.state.db, request.app.state, contact)  # type: ignore[arg-type]
@@ -1236,6 +1459,16 @@ async def patient_answer(
                     status_code=status.HTTP_409_CONFLICT,
                 )
             )
+
+    tab_error = _tab_refusal(
+        request, clinician_id=clinician_id or "", patient_id=patient_id, case=case, contact=contact
+    )
+    if tab_error is not None:
+        return _mark_tab_conflict(
+            _answer_status(
+                request, state="error", error=tab_error, status_code=status.HTTP_409_CONFLICT
+            )
+        )
 
     questions = case.questions if case is not None else state.questions
     resolved, message = _resolve_timepoint(
@@ -1453,6 +1686,12 @@ async def patient_advance(
     if contact.access is CaseAccess.INCOMPLETE:
         return _back_to_index(_conflict(_CASE_CLOSED_MSG))
 
+    tab_error = _tab_refusal(
+        request, clinician_id=clinician_id or "", patient_id=patient_id, case=case, contact=contact
+    )
+    if tab_error is not None:
+        return _mark_tab_conflict(_conflict(tab_error))
+
     questions = case.questions if case is not None else state.questions
     resolved, message = _resolve_timepoint(
         request,
@@ -1513,6 +1752,7 @@ async def patient_advance(
         timepoint_count=len(resolved.timepoints),
         case=case,
         contact=contact,
+        tab_id=request.headers.get(tab_guard.TAB_ID_HEADER),
     )
 
 
@@ -1528,8 +1768,13 @@ def _advance_response(
     timepoint_count: int,
     case: CaseConfiguration | None = None,
     contact: ContactResult | None = None,
+    tab_id: str | None = None,
 ) -> Response:
-    """Map an :class:`AdvanceResult` onto the HTMX / plain-browser contract (spec §5.1)."""
+    """Map an :class:`AdvanceResult` onto the HTMX / plain-browser contract (spec §5.1).
+
+    S11m: the owner's lease follows the advanced-into render, so the swapped
+    view writes without waiting for its own claim.
+    """
     if result.outcome == "finished":
         return _htmx_aware_redirect(request, _INDEX_URL)
 
@@ -1605,6 +1850,15 @@ def _advance_response(
         _record_render(
             request, view=view, ctx=target_ctx, clinician_id=clinician_id, patient_id=patient_id
         )
+        if view.tab_guard and view.render_id is not None and tab_id:
+            tab_guard.move_to_render(
+                request.app.state.db,
+                request.app.state,
+                clinician_id=clinician_id,
+                patient_id=patient_id,
+                tab_id=tab_id,
+                render_id=view.render_id,
+            )
     return HTMLResponse(
         content=view.html, status_code=status_code, headers={"HX-Push-Url": target_url}
     )

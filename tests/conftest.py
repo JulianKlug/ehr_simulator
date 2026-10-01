@@ -29,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import sqlite3
 from collections.abc import Iterator
+from enum import StrEnum
 from pathlib import Path
 
 import pytest
@@ -278,6 +279,7 @@ def answer_all_required(client: object, patient_id: str, t_index: int) -> list[s
     """
     from ehr_simulator.question_branching import evaluate
 
+    ensure_tab_owner(client, patient_id, t_index)
     questions = client.app.state.questions  # type: ignore[attr-defined]
     answered: list[str] = []
     values: dict[str, str] = {}
@@ -342,3 +344,99 @@ def seed_progress(
                 patient_id=patient_id,
                 now=now(client.app.state),  # type: ignore[attr-defined]
             )
+
+
+# ---------------------------------------------------------------------------
+# S11m: guarded case views
+# ---------------------------------------------------------------------------
+
+#: The tab every test client claims as (a lowercase UUID v4).
+TEST_TAB_ID = "0b6f7c1e-3f5a-4c2d-9e8b-7a6d5c4b3a21"
+
+
+def _claim_view(client: object, response: object) -> None:
+    """Response hook: claim a guarded ``#patient-view`` like case_tab_guard.js."""
+    from bs4 import BeautifulSoup
+
+    from ehr_simulator.web.tab_guard import RENDER_ID_HEADER, TAB_ID_HEADER
+
+    if "text/html" not in response.headers.get("content-type", ""):  # type: ignore[attr-defined]
+        return
+    response.read()  # type: ignore[attr-defined]
+    view = BeautifulSoup(response.text, "html.parser").select_one(  # type: ignore[attr-defined]
+        "#patient-view[data-tab-claim-url]"
+    )
+    if view is None:
+        return
+
+    client.headers[TAB_ID_HEADER] = TEST_TAB_ID  # type: ignore[attr-defined]
+    client.headers[RENDER_ID_HEADER] = view["data-render-id"]  # type: ignore[attr-defined]
+    client.tab_views[view["data-patient-id"]] = view["data-render-id"]  # type: ignore[attr-defined]
+    client.post(  # type: ignore[attr-defined]
+        view["data-tab-claim-url"],
+        json={"tab_id": TEST_TAB_ID, "render_id": view["data-render-id"]},
+    )
+
+
+def adopt_tab_views(client: object) -> None:
+    """S11m: make ``client`` act as one browser tab that claims every guarded
+    view it receives and sends the owner headers on every later request.
+
+    Tab guard tests that need a second tab use a client without this hook.
+    """
+    client.tab_views = {}  # type: ignore[attr-defined]  # patient_id -> claimed render_id
+    client.event_hooks["response"].append(  # type: ignore[attr-defined]
+        lambda response: _claim_view(client, response)
+    )
+
+
+def ensure_tab_owner(client: object, patient_id: str, t_index: int) -> None:
+    """A guarded write needs a claimed view: fetch one when none was claimed
+    yet (tests that seed progress instead of browsing)."""
+    from ehr_simulator.web.tab_guard import RENDER_ID_HEADER
+
+    views = getattr(client, "tab_views", None)
+    study = getattr(client.app.state, "study", None)  # type: ignore[attr-defined]
+    if views is None or study is None or study.telemetry is None:
+        return
+    if patient_id in views:
+        client.headers[RENDER_ID_HEADER] = views[patient_id]  # type: ignore[attr-defined]
+        return
+    client.get(f"/patient/{patient_id}/timepoint/{t_index}")  # type: ignore[attr-defined]
+
+
+# ---------------------------------------------------------------------------
+# S11p: clinician profiles
+# ---------------------------------------------------------------------------
+
+
+class ProfileSetup(StrEnum):
+    AUTO = "auto"  # save a valid profile at boot when the study collects one
+    NONE = "none"
+
+
+def valid_profile_form(config: object) -> dict[str, str]:
+    """A physician profile drawn from the configured vocabulary."""
+    return {
+        "professional_role": "physician",
+        "years_of_practice": "7.5",
+        "country_of_practice": config.countries[0],  # type: ignore[attr-defined]
+        "primary_specialty": config.specialties[0],  # type: ignore[attr-defined]
+    }
+
+
+def ensure_profile(client: object) -> None:
+    """Save a valid profile once, unless one exists or none is collected."""
+    study = getattr(client.app.state, "study", None)  # type: ignore[attr-defined]
+    config = getattr(study, "clinician_profile", None)
+    if config is None:
+        return
+    from ehr_simulator.db import clinician_profiles
+
+    clinician_id = client.cookies.get("ehrsim_clinician_id")  # type: ignore[attr-defined]
+    if clinician_profiles.fetch(client.app.state.db, clinician_id) is not None:  # type: ignore[attr-defined]
+        return
+    response = client.post(  # type: ignore[attr-defined]
+        "/profile", data=valid_profile_form(config), follow_redirects=False
+    )
+    assert response.status_code == 303, response.text

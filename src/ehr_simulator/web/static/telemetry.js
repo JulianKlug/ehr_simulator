@@ -21,6 +21,11 @@
 // windows is unchanged. A state change flushes the pending sample first,
 // so one window never spans two foreground states.
 //
+// S11m: a guarded render's events wait until case_tab_guard.js reports its
+// claim granted (window.ehrsim.tabState); a refused render's events are
+// dropped unreported — the server would refuse them anyway. When a refused
+// render is granted later (ehrsim:tabregranted), its timeline restarts.
+//
 // Never recorded: key values, text, answer values, coordinates.
 // No inline JS anywhere (CSP script-src 'self').
 
@@ -29,7 +34,6 @@
 
     const VIEW_ID = "patient-view";
     const PANE_ID = "questions-pane";
-    const TAB_ID_KEY = "ehrsim:tab-id";
     const PANEL_SELECTOR = "section[data-panel]";
     const CONTENT_SELECTOR = "[data-panel-content]";
     const TABPANEL_SELECTOR = '[role="tabpanel"]';
@@ -44,8 +48,10 @@
     const HTTP_CLIENT_ERROR_MIN = 400;
     const HTTP_SERVER_ERROR_MIN = 500;
     const FULL_RATIO = 1;
+    const TAB_PENDING = "pending";
+    const TAB_REFUSED = "refused";
+    const TAB_UNGUARDED = "unguarded";
 
-    let tabId = null;
     let queue = [];
     let dropped = {}; // render_id -> count of discarded events
     let sending = false;
@@ -53,41 +59,13 @@
 
     // --- identity -------------------------------------------------------
 
-    function uuid4() {
-        if (window.crypto && typeof window.crypto.randomUUID === "function") {
-            return window.crypto.randomUUID();
-        }
-        const bytes = new Uint8Array(16);
-        window.crypto.getRandomValues(bytes);
-        bytes[6] = (bytes[6] & 0x0f) | 0x40; // version 4
-        bytes[8] = (bytes[8] & 0x3f) | 0x80; // RFC 4122 variant
-        const hex = Array.prototype.map
-            .call(bytes, function (b) {
-                return (b + 0x100).toString(16).slice(1);
-            })
-            .join("");
-        return (
-            hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" + hex.slice(12, 16) + "-" +
-            hex.slice(16, 20) + "-" + hex.slice(20)
-        );
+    function readTabId() {
+        return window.ehrsim.tabId(); // client_seq.js: one id per tab
     }
 
-    function readTabId() {
-        if (tabId) return tabId;
-        try {
-            tabId = sessionStorage.getItem(TAB_ID_KEY);
-        } catch (err) {
-            tabId = null; // storage blocked: the id lives in memory
-        }
-        if (!tabId) {
-            tabId = uuid4();
-            try {
-                sessionStorage.setItem(TAB_ID_KEY, tabId);
-            } catch (err) {
-                // soft-fail; memory already holds the id.
-            }
-        }
-        return tabId;
+    function tabState(renderId) {
+        const lookup = window.ehrsim && window.ehrsim.tabState;
+        return lookup ? lookup(renderId) : TAB_UNGUARDED;
     }
 
     // --- queue + delivery -----------------------------------------------
@@ -129,10 +107,33 @@
         return gaps;
     }
 
+    function dropRefused() {
+        queue = queue.filter(function (e) {
+            return tabState(e.render_id) !== TAB_REFUSED;
+        });
+        Object.keys(dropped).forEach(function (renderId) {
+            if (tabState(renderId) === TAB_REFUSED) delete dropped[renderId];
+        });
+    }
+
     function takeBatch() {
-        const batch = gapEvents().concat(queue.splice(0, MAX_BATCH));
+        // Pending renders (claim in flight) stay queued, in order.
+        dropRefused();
+        const waitingGaps = {};
+        Object.keys(dropped).forEach(function (renderId) {
+            if (tabState(renderId) !== TAB_PENDING) return;
+            waitingGaps[renderId] = dropped[renderId];
+            delete dropped[renderId];
+        });
+        const ready = [];
+        const waiting = [];
+        queue.forEach(function (e) {
+            (tabState(e.render_id) === TAB_PENDING ? waiting : ready).push(e);
+        });
+        const batch = gapEvents().concat(ready.splice(0, MAX_BATCH));
         const overflow = batch.splice(MAX_BATCH);
-        queue = overflow.concat(queue);
+        queue = overflow.concat(ready, waiting);
+        Object.assign(dropped, waitingGaps);
         return batch;
     }
 
@@ -151,6 +152,7 @@
         const target = url();
         if (!target) return;
         const batch = takeBatch();
+        if (!batch.length) return; // everything waits for a tab claim
         sending = true;
         fetch(target, {
             method: "POST",
@@ -192,6 +194,7 @@
         }
         while (queue.length || Object.keys(dropped).length) {
             const batch = takeBatch();
+            if (!batch.length) return; // unclaimed renders: nothing may go
             const blob = new Blob([body(batch)], { type: "application/json" });
             if (!navigator.sendBeacon(target, blob)) {
                 discard(batch);
@@ -338,6 +341,20 @@
         current = null;
     }
 
+    function restart(e) {
+        // Granted after a refusal: nothing from the refused period counts.
+        const renderId = e.detail && e.detail.renderId;
+        if (!current || current.renderId !== renderId) return;
+        queue = queue.filter(function (q) {
+            return q.render_id !== renderId;
+        });
+        delete dropped[renderId];
+        if (current.observer) current.observer.disconnect();
+        clearTimeout(current.trailingTimer);
+        current = null;
+        attach();
+    }
+
     function isViewSwap(e) {
         const target = e.detail && e.detail.target;
         return !!(target && target.id === VIEW_ID);
@@ -417,6 +434,7 @@
         );
     });
     document.addEventListener(TABCHANGE_EVENT, onTabChange);
+    document.addEventListener("ehrsim:tabregranted", restart);
 
     window.setInterval(onPeriodic, PERIODIC_STATE_MS);
     window.setInterval(flush, FLUSH_INTERVAL_MS);

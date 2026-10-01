@@ -77,6 +77,9 @@ METADATA_COLUMNS: tuple[str, ...] = (
 
 _KEYFILE_HEADER: tuple[str, str] = ("clinician_id", "name_normalized")
 
+#: S11n: where a mixed configuration Phase 2 database is exported instead.
+_PHASE2_HINT = "Use export-phase2 for mixed configuration Phase 2 databases."
+
 
 class ExportError(ValueError):
     """Research export cannot be produced faithfully.
@@ -306,6 +309,7 @@ def _build_under_snapshot(
         lines.append(
             "Refusing interpreted CSV export. Re-export under the config that recorded these rows."
         )
+        lines.append(_PHASE2_HINT)
         raise ExportError("\n".join(lines))
 
     # -- 3) Group cells per pair; validate progress (spec §6.4) ----------
@@ -510,6 +514,7 @@ def _refuse_hash_drift(live_hash: str, *tables: tuple[str, tuple[Any, ...]]) -> 
     lines.append(
         "Refusing interpreted CSV export. Re-export under the config that recorded these rows."
     )
+    lines.append(_PHASE2_HINT)
     raise ExportError("\n".join(lines))
 
 

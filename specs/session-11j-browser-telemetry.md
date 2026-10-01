@@ -55,7 +55,7 @@ Validation (all required, `extra="forbid"`):
 - `panel_viewport_threshold`: finite, `0 < x <= 1`
 - `panel_viewed_threshold_seconds`: finite, `> 0`
 
-First use case: 60 s, 0.05, 2.0 s (`configs/example_phase2_config.yaml`). The panel values are consumed from S11k.
+First use case: 60 s, 0.05, 0.5 s (`configs/example_phase2_config.yaml`; viewed threshold amended from 2.0 s on 2026-10-01). The panel values are consumed from S11k.
 
 Telemetry for a render is enabled iff study mode and the **case pinned** snapshot has the block.
 

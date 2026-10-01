@@ -66,6 +66,7 @@ from ehr_simulator.logging import (
 from ehr_simulator.web.case_contact import Clock, system_clock
 from ehr_simulator.web.middleware import CSPMiddleware, NoStoreMiddleware
 from ehr_simulator.web.panels import DatasetLike, provenance_mismatches
+from ehr_simulator.web.tab_guard import clear_leases as clear_tab_leases
 
 _THIS_DIR = Path(__file__).resolve().parent
 _TEMPLATES_DIR = _THIS_DIR / "templates"
@@ -164,6 +165,11 @@ def create_app(
                     app.state.db.close()
                 raise SystemExit(1) from exc
 
+        # S11m: a tab lease of a previous process proves no live tab.
+        cleared = clear_tab_leases(app.state.db)
+        if cleared:
+            log.info("tab leases cleared", event_kind="tab.leases_cleared", leases=cleared)
+
         app.state.known_clinicians = {
             row[0] for row in app.state.db.execute("SELECT clinician_id FROM clinicians")
         }
@@ -189,7 +195,12 @@ def create_app(
         finally:
             try:
                 if app.state.write_counter > 0:
-                    dest = create_backup(db_path_resolved, app.state.backup_dir)
+                    # S11m: study mode refuses to copy a DB of another study.
+                    dest = create_backup(
+                        db_path_resolved,
+                        app.state.backup_dir,
+                        expected_study_id=getattr(app.state, "study_id", None),
+                    )
                     log.info(
                         "backup ok",
                         event_kind="db.backup.ok",

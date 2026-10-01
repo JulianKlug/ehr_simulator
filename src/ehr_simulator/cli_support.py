@@ -249,12 +249,23 @@ def _study_level_rows(
         )
     if study.randomisation is not None and study.telemetry is None:
         messages.append("Phase 2 study declares no telemetry block (AI viewing cannot be measured)")
-    return [
+    rows = [
         PreflightRow(
             patient_id=_STUDY_LEVEL_PATIENT, t_minutes=_STUDY_LEVEL_T, status="FAIL", message=m
         )
         for m in messages
     ]
+    # S11p: not a hard requirement — a study may choose not to collect them.
+    if study.randomisation is not None and study.clinician_profile is None:
+        rows.append(
+            PreflightRow(
+                patient_id=_STUDY_LEVEL_PATIENT,
+                t_minutes=_STUDY_LEVEL_T,
+                status="WARN",
+                message="Phase 2 study collects no clinician characteristics (clinician_profile)",
+            )
+        )
+    return rows
 
 
 def _cell_failures(study: StudyConfig, sliced: PatientSlice) -> list[str]:

@@ -46,6 +46,15 @@ def load_case_inputs(
     timepoints = tuple(float(t) for t in study.timepoints_minutes)
     t_index_of = {t: i for i, t in enumerate(timepoints)}
 
+    # S11m: a render whose tab was refused the lease reported nothing and
+    # never displayed as the owner's view; it stays out of the observation.
+    renders = telemetry.load_render_rows(conn, clinician_id, patient_id)
+    conflicts = telemetry.load_tab_render_ids(
+        conn, clinician_id, patient_id, telemetry.CONFLICT_KIND
+    )
+    claimed = telemetry.load_tab_render_ids(conn, clinician_id, patient_id, telemetry.CLAIMED_KIND)
+    refused = conflicts - claimed
+
     lifecycle = lifecycle_dao.fetch(conn, clinician_id, patient_id)
     walk = progress.fetch(conn, clinician_id=clinician_id, patient_id=patient_id)
     cells = {
@@ -76,9 +85,11 @@ def load_case_inputs(
         completed=walk is not None and walk.completed_at is not None,
         enter_t_indices=telemetry.enter_t_indices(conn, clinician_id, patient_id),
         answers=cells,
-        renders=tuple(telemetry.load_render_rows(conn, clinician_id, patient_id)),
+        renders=tuple(r for r in renders if r.render_id not in refused),
         telemetry_rows=tuple(telemetry.load_telemetry_rows(conn, clinician_id, patient_id)),
         session_hashes=telemetry.session_config_hashes(conn, clinician_id, patient_id),
+        conflict_renders=tuple(r for r in renders if r.render_id in conflicts),
+        tab_audit=tuple(telemetry.load_tab_audit(conn, clinician_id, patient_id)),
     )
 
 

@@ -1,5 +1,7 @@
 # Session 11 — Phase 2 Implementation Roadmap
 
+> **Status (2026-09-28):** S11a–S11o implemented. The per subsession specs (`specs/session-11{a..o}-*.md`) are authoritative where they refine this plan; S11m–o carry review revisions against the implemented code.
+
 ## 1. Purpose
 
 Session 11 implements the Phase 2 study framework defined by the locked Phase 2 gate.
@@ -722,7 +724,7 @@ Implement:
 First use case configuration:
 
 * viewport threshold = 5%
-* viewed threshold = 2 cumulative seconds
+* viewed threshold = 0.5 cumulative seconds (gate amendment 2026-10-01; was 2)
 
 Reading without interacting must still count.
 
@@ -772,7 +774,7 @@ derive:
 
 For first use case:
 
-`ai_viewed = cumulative qualifying AI exposure >= 2 seconds`
+`ai_viewed = cumulative qualifying AI exposure >= 0.5 seconds`
 
 AI assigned PP compliance requires:
 

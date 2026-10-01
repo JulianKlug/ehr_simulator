@@ -19,7 +19,7 @@ from ehr_simulator.behavioral_timing import (
     measure,
     union,
 )
-from ehr_simulator.db.telemetry import RenderRow, TelemetryRow
+from ehr_simulator.db.telemetry import RenderRow, TabAuditRow, TelemetryRow
 
 TAB = "tab-a"
 OTHER_TAB = "tab-b"
@@ -30,16 +30,19 @@ S = 1000.0  # milliseconds per second
 class Stream:
     """Builds one render's rows in the order the browser would send them."""
 
-    def __init__(self, render_id: str = "r1", tab_id: str = TAB, seq_start: int = 1) -> None:
+    def __init__(
+        self, render_id: str = "r1", tab_id: str = TAB, seq_start: int = 1, event_base: int = 0
+    ) -> None:
         self.render_id = render_id
         self.tab_id = tab_id
         self.seq = seq_start
+        self.event_base = event_base  # server event_id offset (cross-tab ordering)
         self.rows: list[TelemetryRow] = []
 
     def _add(self, kind: str, mono_s: float, payload: dict, seq: int | None = None) -> Stream:
         self.rows.append(
             TelemetryRow(
-                event_id=len(self.rows) + 1,
+                event_id=self.event_base + len(self.rows) + 1,
                 render_id=self.render_id,
                 tab_id=self.tab_id,
                 kind=kind,
@@ -382,3 +385,75 @@ def test_gapped_tab_has_no_per_tab_seconds() -> None:
     ]
 
     assert result.per_tab == {TAB: None, OTHER_TAB: (10, 10)}
+
+
+# ---------------------------------------------------------------------------
+# Tab hand-over (S11m review fix): tabs that took turns are summed
+# ---------------------------------------------------------------------------
+
+CLAIMED, RELEASED, EXPIRED = "tab.claimed", "tab.released", "tab.lease_expired"
+
+
+def _handover(audit: list[TabAuditRow], *extra: Stream):
+    """Tab A reports r1 (event ids 101-102), tab B reports r2 (301-302)."""
+    a = Stream("r1", event_base=100).enter(0).exit(20, "pagehide")
+    b = Stream("r2", tab_id=OTHER_TAB, seq_start=10, event_base=300).enter(0).exit(15)
+    rows = [row for stream in (a, b, *extra) for row in stream.rows]
+    return derive_observation_timings(
+        [_render("r1"), _render("r2", event_id=2)],
+        rows,
+        inactivity_threshold_seconds=THRESHOLD_S,
+        tab_audit=audit,
+    )[(0, "primary")]
+
+
+def test_release_before_the_next_grant_sums_the_tabs() -> None:
+    result = _handover(
+        [
+            TabAuditRow(50, CLAIMED, TAB, "r1"),
+            TabAuditRow(200, RELEASED, TAB, "r1"),
+            TabAuditRow(250, CLAIMED, OTHER_TAB, "r2"),
+        ]
+    )
+
+    assert result.status is TelemetryStatus.COMPLETE
+    assert result.foreground_seconds == 35 and result.active_seconds == 35
+
+
+def test_expired_lease_counts_as_giving_up() -> None:
+    result = _handover(
+        [
+            TabAuditRow(50, CLAIMED, TAB, "r1"),
+            TabAuditRow(249, EXPIRED, TAB, "r1"),
+            TabAuditRow(250, CLAIMED, OTHER_TAB, "r2"),
+        ]
+    )
+
+    assert result.status is TelemetryStatus.COMPLETE
+
+
+def test_no_release_before_the_next_grant_stays_multi_tab() -> None:
+    result = _handover(
+        [TabAuditRow(50, CLAIMED, TAB, "r1"), TabAuditRow(250, CLAIMED, OTHER_TAB, "r2")]
+    )
+
+    assert result.status is TelemetryStatus.MULTI_TAB
+    assert result.foreground_seconds is None
+
+
+def test_first_tab_reporting_after_the_next_grant_stays_multi_tab() -> None:
+    late = Stream("r1", seq_start=50, event_base=400).state(25, visible=True, focused=True)
+    result = _handover(
+        [
+            TabAuditRow(50, CLAIMED, TAB, "r1"),
+            TabAuditRow(200, RELEASED, TAB, "r1"),
+            TabAuditRow(250, CLAIMED, OTHER_TAB, "r2"),
+        ],
+        late,
+    )
+
+    assert result.status is TelemetryStatus.MULTI_TAB
+
+
+def test_unclaimed_legacy_tabs_stay_multi_tab() -> None:
+    assert _handover([]).status is TelemetryStatus.MULTI_TAB
