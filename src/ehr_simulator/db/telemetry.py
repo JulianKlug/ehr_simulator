@@ -20,11 +20,13 @@ __all__ = [
     "CONFLICT_KIND",
     "RENDER_KIND",
     "RenderRow",
+    "TabAuditRow",
     "TelemetryRow",
     "claimed_tabs",
     "enter_t_indices",
     "fetch_renders",
     "load_render_rows",
+    "load_tab_audit",
     "load_tab_render_ids",
     "load_telemetry_rows",
     "session_config_hashes",
@@ -98,6 +100,17 @@ class TelemetryRow:
     client_mono_ms: float
     client_ts: str | None
     payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TabAuditRow:
+    """One S11m ``tab.*`` audit row: who held (or gave up) a render's lease,
+    in server ``event_id`` order."""
+
+    event_id: int
+    kind: str
+    tab_id: str
+    render_id: str | None
 
 
 def _render(row: tuple[Any, ...]) -> RenderRow:
@@ -188,6 +201,18 @@ def claimed_tabs(conn: sqlite3.Connection, render_ids: Iterable[str]) -> dict[st
     for render_id, tab_id in rows:
         out.setdefault(render_id, set()).add(tab_id)
     return {k: frozenset(v) for k, v in out.items()}
+
+
+def load_tab_audit(
+    conn: sqlite3.Connection, clinician_id: str, patient_id: str
+) -> list[TabAuditRow]:
+    """Every ``tab.*`` row of one clinician × patient, in event order."""
+    rows = conn.execute(
+        "SELECT event_id, kind, tab_id, render_id FROM events "
+        "WHERE kind LIKE 'tab.%' AND clinician_id = ? AND patient_id = ? ORDER BY event_id",
+        (clinician_id, patient_id),
+    ).fetchall()
+    return [TabAuditRow(*row) for row in rows]
 
 
 def load_tab_render_ids(

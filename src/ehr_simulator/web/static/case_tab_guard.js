@@ -13,6 +13,9 @@
 //   pagehide ──► sendBeacon release (the server ignores a stale render's)
 //
 // telemetry.js asks tabState(renderId) and holds pending renders' events.
+// A render granted after being refused fires ehrsim:tabregranted: telemetry
+// discards what it queued while refused and starts a fresh timeline, so the
+// server sees the tabs take turns instead of overlapping.
 // A second tab can briefly show the case before its claim is refused; it
 // never writes and never reports. No inline JS (CSP script-src 'self').
 
@@ -31,6 +34,7 @@
     const RENDER_FIELD = "ehrsim_render_id";
     const CONFLICT_HEADER = "X-Ehrsim-Tab";
     const CONFLICT_EVENT = "ehrsim:tabconflict";
+    const REGRANTED_EVENT = "ehrsim:tabregranted";
     const HTTP_NO_CONTENT = 204;
     const HTTP_CONFLICT = 409;
     const RETRY_MS = 5000;
@@ -111,7 +115,13 @@
     }
 
     function setState(renderId, state) {
+        const wasRefused = states[renderId] === REFUSED;
         states[renderId] = state;
+        if (wasRefused && state === GRANTED) {
+            document.dispatchEvent(
+                new CustomEvent(REGRANTED_EVENT, { detail: { renderId: renderId } })
+            );
+        }
         const view = guardedView();
         if (view && view.dataset.renderId === renderId) apply(view);
     }
@@ -129,7 +139,10 @@
 
     function claim(view) {
         const renderId = view.dataset.renderId;
-        if (tabState(renderId) !== GRANTED) setState(renderId, PENDING);
+        // A refused render stays refused until the answer: telemetry keeps
+        // dropping its events, and a grant is then seen as a re-grant.
+        const state = tabState(renderId);
+        if (state !== GRANTED && state !== REFUSED) setState(renderId, PENDING);
         fetch(view.dataset.tabClaimUrl, {
             method: "POST",
             credentials: "same-origin",

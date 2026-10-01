@@ -22,7 +22,11 @@ seconds are a lower bound); a reported loss or a lost enter is ``gapped``
 (no seconds: the lost event may have ended foreground); missing telemetry
 is ``missing`` (no seconds), never zero. Renders of one
 observation (clinician × patient × timepoint × visit kind) in one tab are
-sequential and sum; more than one tab is ``multi_tab`` (S11m decides).
+sequential and sum. More than one tab is ``multi_tab`` unless the tabs
+provably took turns (S11m, :func:`took_turns`), then they sum too::
+
+    tab A  claimed ── reports ── released / lease expired
+    tab B                                         claimed ── reports
 """
 
 from __future__ import annotations
@@ -31,10 +35,10 @@ import bisect
 import itertools
 from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 
-from ehr_simulator.db.telemetry import RenderRow, TelemetryRow
+from ehr_simulator.db.telemetry import RenderRow, TabAuditRow, TelemetryRow
 
 __all__ = [
     "Interval",
@@ -52,6 +56,7 @@ __all__ = [
     "intersect",
     "measure",
     "rows_by_render",
+    "took_turns",
     "union",
     "worst_status",
 ]
@@ -166,6 +171,9 @@ class RenderTimeline:
     exit_reason: str | None
     states: tuple[StateChange, ...]
     events: tuple[TelemetryRow, ...]
+    #: S11m: server arrival (event_id) of each tab's last row, in or out of
+    #: the interval — a row after another tab's grant means the tabs overlapped.
+    last_arrival: Mapping[str, int] = field(default_factory=dict)
 
     @property
     def foreground(self) -> tuple[Interval, ...]:
@@ -197,13 +205,22 @@ def _runs_backwards(rows: Sequence[TelemetryRow]) -> bool:
     return any(b.client_mono_ms < a.client_mono_ms for a, b in itertools.pairwise(ordered))
 
 
+def _last_arrival(rows: Sequence[TelemetryRow]) -> dict[str, int]:
+    last: dict[str, int] = {}
+    for row in rows:
+        last[row.tab_id] = max(last.get(row.tab_id, row.event_id), row.event_id)
+    return last
+
+
 def build_timeline(render: RenderRow, rows: Sequence[TelemetryRow]) -> RenderTimeline:
     """Order one render's rows and fix its interval, states and status."""
     tab_ids = frozenset(r.tab_id for r in rows)
     ordered = sorted(rows, key=_sort_key)
     timed = [r for r in ordered if r.kind != GAP]
     if not timed:
-        return RenderTimeline(render, TelemetryStatus.MISSING, tab_ids, None, None, None, (), ())
+        return RenderTimeline(
+            render, TelemetryStatus.MISSING, tab_ids, None, None, None, (), (), _last_arrival(rows)
+        )
 
     status = TelemetryStatus.COMPLETE
     enter = next((r for r in timed if r.kind == ENTER), None)
@@ -237,6 +254,7 @@ def build_timeline(render: RenderRow, rows: Sequence[TelemetryRow]) -> RenderTim
         exit_reason=str(exit_row.payload["reason"]) if exit_row is not None else None,
         states=tuple(states),
         events=inside,
+        last_arrival=_last_arrival(rows),
     )
 
 
@@ -324,13 +342,57 @@ def group_observations(
     return groups
 
 
-def aggregate_status(timelines: Sequence[RenderTimeline]) -> TelemetryStatus:
-    """One observation's status from its renders (S11j rules; S11k reuses it)."""
+_CLAIMED = "tab.claimed"
+_GAVE_UP = frozenset({"tab.released", "tab.lease_expired"})
+
+
+def took_turns(timelines: Sequence[RenderTimeline], audit: Sequence[TabAuditRow]) -> bool:
+    """True when every tab of an observation held the lease alone, in turn.
+
+    Tabs are ordered by their first grant of one of the observation's
+    renders. For each tab A followed by tab B, A must have released its
+    lease (or had it expired) before B's grant, and none of A's rows may
+    arrive after that grant — a tab that kept reporting overlapped. Event
+    ids are the server's arrival order; client clocks are never compared.
+    A tab without a grant (legacy S11j data) never took turns.
+    """
+    render_ids = {t.render.render_id for t in timelines}
+    grants: dict[str, int] = {}
+    for row in audit:
+        if row.kind == _CLAIMED and row.render_id in render_ids:
+            grants.setdefault(row.tab_id, row.event_id)
+
+    tabs = frozenset().union(*(t.tab_ids for t in timelines))
+    if not tabs <= grants.keys():
+        return False
+
+    last_row = {
+        tab: max(t.last_arrival[tab] for t in timelines if tab in t.last_arrival) for tab in tabs
+    }
+    order = sorted(tabs, key=grants.__getitem__)
+    for first, second in itertools.pairwise(order):
+        handed_over = any(
+            row.kind in _GAVE_UP and row.tab_id == first and grants[first] < row.event_id
+            for row in audit
+            if row.event_id < grants[second]
+        )
+        if not handed_over or last_row[first] > grants[second]:
+            return False
+    return True
+
+
+def aggregate_status(
+    timelines: Sequence[RenderTimeline], tab_audit: Sequence[TabAuditRow] = ()
+) -> TelemetryStatus:
+    """One observation's status from its renders (S11j rules; S11k reuses it).
+
+    S11m: several tabs are ``multi_tab`` unless they :func:`took_turns`.
+    """
     reported = [t for t in timelines if t.status is not TelemetryStatus.MISSING]
     tabs = frozenset().union(*(t.tab_ids for t in reported))
     if any(t.status is TelemetryStatus.INVALID for t in reported):
         return TelemetryStatus.INVALID
-    if len(tabs) > 1 or _has_seq_collision(reported):
+    if (len(tabs) > 1 and not took_turns(reported, tab_audit)) or _has_seq_collision(reported):
         return TelemetryStatus.MULTI_TAB
     if not reported:
         return TelemetryStatus.MISSING
@@ -345,9 +407,11 @@ def derive_observation_timings(
     rows: Iterable[TelemetryRow],
     *,
     inactivity_threshold_seconds: float,
+    tab_audit: Sequence[TabAuditRow] = (),
 ) -> dict[tuple[int, str], ObservationTiming]:
     """Every observation of one clinician × patient keyed by
-    ``(t_index, visit_kind)``. Revisit renders never extend primary ones."""
+    ``(t_index, visit_kind)``. Revisit renders never extend primary ones;
+    ``tab_audit`` (S11m ``tab.*`` rows) lets tabs that took turns sum."""
     by_render = rows_by_render(rows)
     out: dict[tuple[int, str], ObservationTiming] = {}
     for (t_index, visit_kind), group in group_observations(renders).items():
@@ -359,7 +423,7 @@ def derive_observation_timings(
             for r in group
         ]
         timelines = [t.timeline for t in timings]
-        status = aggregate_status(timelines)
+        status = aggregate_status(timelines, tab_audit)
 
         # Per tab diagnostics follow the observation rule: one unmeasurable
         # render makes its tab's value None, never a partial sum.

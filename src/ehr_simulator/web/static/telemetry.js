@@ -23,7 +23,8 @@
 //
 // S11m: a guarded render's events wait until case_tab_guard.js reports its
 // claim granted (window.ehrsim.tabState); a refused render's events are
-// dropped unreported — the server would refuse them anyway.
+// dropped unreported — the server would refuse them anyway. When a refused
+// render is granted later (ehrsim:tabregranted), its timeline restarts.
 //
 // Never recorded: key values, text, answer values, coordinates.
 // No inline JS anywhere (CSP script-src 'self').
@@ -340,6 +341,20 @@
         current = null;
     }
 
+    function restart(e) {
+        // Granted after a refusal: nothing from the refused period counts.
+        const renderId = e.detail && e.detail.renderId;
+        if (!current || current.renderId !== renderId) return;
+        queue = queue.filter(function (q) {
+            return q.render_id !== renderId;
+        });
+        delete dropped[renderId];
+        if (current.observer) current.observer.disconnect();
+        clearTimeout(current.trailingTimer);
+        current = null;
+        attach();
+    }
+
     function isViewSwap(e) {
         const target = e.detail && e.detail.target;
         return !!(target && target.id === VIEW_ID);
@@ -419,6 +434,7 @@
         );
     });
     document.addEventListener(TABCHANGE_EVENT, onTabChange);
+    document.addEventListener("ehrsim:tabregranted", restart);
 
     window.setInterval(onPeriodic, PERIODIC_STATE_MS);
     window.setInterval(flush, FLUSH_INTERVAL_MS);

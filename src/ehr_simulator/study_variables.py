@@ -27,7 +27,7 @@ from ehr_simulator.config.questions import Questions
 from ehr_simulator.config.study import TelemetryConfig
 from ehr_simulator.db.arm_assignments import ARM_AI
 from ehr_simulator.db.case_lifecycle import CaseState
-from ehr_simulator.db.telemetry import RenderRow, TelemetryRow
+from ehr_simulator.db.telemetry import RenderRow, TabAuditRow, TelemetryRow
 from ehr_simulator.panel_exposure import PanelSummary, derive_panel_summaries
 from ehr_simulator.question_branching import AnswerSource, QuestionState, evaluate
 
@@ -127,6 +127,7 @@ class CaseInputs:
     telemetry_rows: Sequence[TelemetryRow]
     session_hashes: Mapping[str, str]
     conflict_renders: Sequence[RenderRow] = ()
+    tab_audit: Sequence[TabAuditRow] = ()  # S11m tab.* rows (tabs that took turns sum)
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +281,7 @@ def _panel_summaries(inputs: CaseInputs) -> dict[tuple[int, str, str], PanelSumm
         inputs.telemetry_rows,
         viewport_threshold=inputs.telemetry.panel_viewport_threshold,
         viewed_threshold_seconds=inputs.telemetry.panel_viewed_threshold_seconds,
+        tab_audit=inputs.tab_audit,
     )
 
 

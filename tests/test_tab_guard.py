@@ -635,7 +635,36 @@ def test_refused_second_tab_flags_conflict_only(th: LifecycleHarness) -> None:  
     assert [r.render_id for r in inputs.renders] == [render_a]
 
 
-def test_sequential_owners_stay_multi_tab(th: LifecycleHarness) -> None:  # 37
+def _primary_timing(th: LifecycleHarness, patient_id: str) -> Any:
+    with th.conn() as conn:
+        inputs = load_case_inputs(conn, th.clinician_id, patient_id)
+    assert inputs is not None
+    return derive_observation_timings(
+        inputs.renders,
+        inputs.telemetry_rows,
+        inactivity_threshold_seconds=60,
+        tab_audit=inputs.tab_audit,
+    )[(0, "primary")]
+
+
+def test_release_then_claim_hands_over_cleanly(th: LifecycleHarness) -> None:  # 37b
+    """Close the owner, Retry in the other tab: the tabs took turns, so sum."""
+    with _tab(th) as client:
+        patient_id, render_a = _open(client)
+        _post(client, TAB_A, _complete_render(render_a))
+        render_b = _page(client, patient_id)
+        assert _claim(client, patient_id, TAB_B, render_b).status_code == HTTP_CONFLICT
+        _release(client, patient_id, TAB_A, render_a)
+        assert _claim(client, patient_id, TAB_B, render_b).status_code == HTTP_NO_CONTENT
+        _post(client, TAB_B, _complete_render(render_b))
+
+    timing = _primary_timing(th, patient_id)
+    assert timing.status is TelemetryStatus.COMPLETE
+    assert timing.foreground_seconds == pytest.approx(0.2)  # 0.1 s per tab
+    assert timing.tab_ids == frozenset({TAB_A, TAB_B})
+
+
+def test_stale_handover_without_late_reports_takes_turns(th: LifecycleHarness) -> None:  # 37
     with _tab(th) as client:
         patient_id, render_a = _open(client)
         _post(client, TAB_A, [_event(render_a, 1, "browser.timepoint_enter")])
@@ -644,12 +673,21 @@ def test_sequential_owners_stay_multi_tab(th: LifecycleHarness) -> None:  # 37
         assert _claim(client, patient_id, TAB_B, render_b).status_code == HTTP_NO_CONTENT
         _post(client, TAB_B, _complete_render(render_b))
 
-    with th.conn() as conn:
-        inputs = load_case_inputs(conn, th.clinician_id, patient_id)
-    assert inputs is not None
-    timing = derive_observation_timings(
-        inputs.renders, inputs.telemetry_rows, inactivity_threshold_seconds=60
-    )[(0, "primary")]
+    # Tab A never exited: its seconds are a lower bound, so the sum is too.
+    assert _primary_timing(th, patient_id).status is TelemetryStatus.INCOMPLETE
+
+
+def test_owner_reporting_after_losing_the_lease_stays_multi_tab(th: LifecycleHarness) -> None:
+    with _tab(th) as client:
+        patient_id, render_a = _open(client)
+        _post(client, TAB_A, [_event(render_a, 1, "browser.timepoint_enter")])
+        th.clock.advance(TAB_LEASE_TTL_SECONDS + 1)
+        render_b = _page(client, patient_id)
+        _claim(client, patient_id, TAB_B, render_b)
+        _post(client, TAB_B, _complete_render(render_b))
+        _post(client, TAB_A, [_event(render_a, 2, "browser.timepoint_exit")])  # A was alive
+
+    timing = _primary_timing(th, patient_id)
     assert timing.status is TelemetryStatus.MULTI_TAB
     assert timing.foreground_seconds is None
 

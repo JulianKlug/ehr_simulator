@@ -570,12 +570,14 @@ def _case_record(
             inputs.renders,
             inputs.telemetry_rows,
             inactivity_threshold_seconds=config.inactivity_threshold_seconds,
+            tab_audit=inputs.tab_audit,
         )
         panels = derive_panel_summaries(
             inputs.renders,
             inputs.telemetry_rows,
             viewport_threshold=config.panel_viewport_threshold,
             viewed_threshold_seconds=config.panel_viewed_threshold_seconds,
+            tab_audit=inputs.tab_audit,
         )
 
     try:

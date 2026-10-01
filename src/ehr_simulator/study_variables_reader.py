@@ -89,6 +89,7 @@ def load_case_inputs(
         telemetry_rows=tuple(telemetry.load_telemetry_rows(conn, clinician_id, patient_id)),
         session_hashes=telemetry.session_config_hashes(conn, clinician_id, patient_id),
         conflict_renders=tuple(r for r in renders if r.render_id in conflicts),
+        tab_audit=tuple(telemetry.load_tab_audit(conn, clinician_id, patient_id)),
     )
 
 

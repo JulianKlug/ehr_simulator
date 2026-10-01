@@ -36,6 +36,11 @@ The first draft was written before S11j–l landed. Changes against the implemen
 15. **Locked controls are really disabled.** While pending or refused the guard sets `disabled` on the answer fieldsets, `#advance-btn` and the pause button (request cancellation stays as a second line), and on `granted` re-enables only the controls it disabled itself, so a server-locked timepoint stays locked.
 16. **No schema version, no backup — bound or not.** An unmigrated SQLite file is refused instead of receiving a legacy backup.
 
+## Review revisions (2026-10-01, manual acceptance)
+
+17. **Tabs that took turns are summed.** The recommended recovery (close the owner, press Retry) left that timepoint `multi_tab` with no foreground or active seconds. Several tabs of one observation now derive normally when, for each tab A followed by tab B (ordered by first grant of one of the observation's renders): A's lease was released or expired after A's grant and before B's grant, and none of A's rows arrived after B's grant (server `event_id` order; client clocks are never compared). Otherwise — overlap, a missing hand-over, or legacy tabs without a grant — the observation stays `multi_tab`. `behavioral_timing.took_turns`, fed by `db.telemetry.load_tab_audit`; `aggregate_status`, `derive_observation_timings` and `derive_panel_summaries` take `tab_audit`.
+18. **A re-granted tab starts a fresh timeline.** A refused tab's queued events (its page-load enter included) would otherwise be sent once Retry succeeds, reporting the refused period. A refused render stays refused until the claim answer; on refused → granted the guard fires `ehrsim:tabregranted` and `telemetry.js` discards that render's queued events and re-attaches (new enter, panel mounts, viewport observer).
+
 ## Core invariants
 
 1. `clinician_id` remains the routine research identifier for clinicians.
@@ -196,7 +201,7 @@ No clinician name, answer, AI or clinical value, user agent or fingerprint data.
 For each observation (clinician × patient × `t_index` × `visit_kind`):
 
 - accepted telemetry from one tab → derive normally (S11j/S11k/S11l unchanged)
-- accepted telemetry from more than one tab (legacy S11j data, or sequential owners after a stale handover) → `multi_tab`, never summed (unchanged)
+- accepted telemetry from more than one tab → summed when the tabs took turns (revision 17), otherwise `multi_tab`, never summed (legacy S11j data, overlap)
 - `tab_conflict_detected = true` when any `tab.conflict` event names a render of the observation's `(t_index, visit_kind)`; the owner's telemetry keeps its own status. The primary observation (`ObservationVariables`, `timepoints.csv`) counts primary renders only; a conflict on a revisit never flags it
 
 `behavioral_timing.ObservationTiming` and `panel_exposure.PanelSummary` are unchanged; `tab_conflict_detected` is added to `study_variables.ObservationVariables` (read from `tab.conflict` rows via `db.telemetry.load_tab_render_ids`). A conflict event alone is not proof that the owner's telemetry is unusable, and it does not change PP.
@@ -307,7 +312,9 @@ None. Lease timing is a platform constant; backup identity comes from the DB.
 
 35. One owner tab derives normally.
 36. A refused second claim sets `tab_conflict_detected` without changing the owner's status or PP.
-37. Accepted telemetry from two tabs stays `multi_tab`, never summed, distinct from complete zero.
+37. Accepted telemetry from two overlapping tabs (the first still reporting after the second's grant, or no hand-over) stays `multi_tab`, never summed, distinct from complete zero.
+37b. Release then claim by another tab (close + Retry), and an expired lease with no later report from the old tab, sum both tabs' seconds.
+37c. e2e: after Retry the granted tab reports a fresh enter and nothing stamped before the Retry.
 37a. A tab refused only on a revisit of timepoint 0 leaves the primary timepoint 0 `tab_conflict_detected=false`.
 
 ### Backup identity

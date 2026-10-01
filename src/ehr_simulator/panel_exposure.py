@@ -22,7 +22,7 @@ never summed into attention time.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -38,7 +38,7 @@ from ehr_simulator.behavioral_timing import (
     group_observations,
     rows_by_render,
 )
-from ehr_simulator.db.telemetry import RenderRow, TelemetryRow
+from ehr_simulator.db.telemetry import RenderRow, TabAuditRow, TelemetryRow
 
 __all__ = [
     "PANEL_IDS",
@@ -227,6 +227,7 @@ def derive_panel_summaries(
     *,
     viewport_threshold: float,
     viewed_threshold_seconds: float,
+    tab_audit: Sequence[TabAuditRow] = (),
 ) -> dict[tuple[int, str, str], PanelSummary]:
     """Every panel summary of one clinician × patient, keyed by
     ``(t_index, visit_kind, panel_id)``. Revisits never extend primaries."""
@@ -234,7 +235,7 @@ def derive_panel_summaries(
     out: dict[tuple[int, str, str], PanelSummary] = {}
     for (t_index, visit_kind), group in group_observations(renders).items():
         timelines = [build_timeline(r, by_render.get(r.render_id, [])) for r in group]
-        status = aggregate_status(timelines)
+        status = aggregate_status(timelines, tab_audit)
         for panel_id in PANEL_IDS:
             exposures = [
                 render_panel_exposure(t, panel_id, viewport_threshold=viewport_threshold)
