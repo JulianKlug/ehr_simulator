@@ -392,7 +392,14 @@ Timestep index `i` of the predictions and SHAP is the same hourly bin index: the
 
 **Rule: index `i` → `t = 60i`.** The prediction at `t` uses bins `0..t/60` only, the same data the clinician sees at `t`.
 
-The source has no explicit statement of causality; the rule rests on the feature vocabulary and the split layout. A wrong rule shifts AI one hour, so it gets its own regression test (§12).
+Confirmed against the producing code (`JulianKlug/OPSUM`, `prediction/short_term_outcome_prediction/`):
+
+- `testing/test_xgb.py::test_final_model` concatenates per patient arrays from `aggregate_and_label_timeseries`, one row per timestep `0..71` → patient major, `y_prob = predict_proba(...)[:, 1].astype('float32')`, `pickle.dump((y_test, y_prob))`.
+- `timeseries_decomposition.py::aggregate_and_label_timeseries`: `y_true[t] = 1` iff an event's `relative_sample_date_hourly_cat` is in `(t, t + 6]`.
+- `prediction/utils/utils.py::aggregate_features_over_time`: every feature at `t` is causal (`cumsum`, `minimum/maximum.accumulate`, `diff` with `t-1`, `lag2`/`lag3`, trailing rolling windows of 6; `timestep_idx = t / 71`).
+- `testing/compute_shap_explanations_over_time.py::compute_shap_final_model`: `shap[t] = booster.predict(DMatrix(X[:, t, :]), pred_contribs=True)` on the same scaled matrix, so row sum = margin and the last column is the bias; feature names from `X_test_raw[0, 0, :, 2]`.
+
+A wrong rule shifts AI one hour, so it keeps its own regression test (§12).
 
 ## 8. Pickle trust boundary
 

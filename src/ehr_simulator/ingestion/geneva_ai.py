@@ -16,6 +16,10 @@ Neither artifact carries patient ids or timesteps; rows are positional::
 
 Each file is read into memory once; its SHA256 and its parse come from the
 same bytes. ``y_true`` is unpickled with the tuple and never used.
+
+Produced by ``JulianKlug/OPSUM`` ``prediction/short_term_outcome_prediction``
+(``testing/test_xgb.py``, ``testing/compute_shap_explanations_over_time.py``);
+its features at timestep ``t`` use bins ``0..t`` only (spec §7.1).
 """
 
 from __future__ import annotations
