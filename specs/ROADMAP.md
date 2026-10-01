@@ -89,7 +89,7 @@ Refactor: lift the four helpers declared in S3 to `_shared.py` only if MIMIC's s
 
 **Test inventory:** ≥10 tests. Mirror of Session 3 + 1 regression test asserting that lifted `_shared.py` helpers produce identical output for both datasets given equivalent inputs.
 
-### Session 5 — Study config + CLI [NEXT]
+### Session 5 — Study config + CLI [SHIPPED]
 
 Goal: nothing runs end-to-end against real data until the simulator knows which patients, timepoints, and questions to use. This session adds Pydantic-validated YAML configs and a Typer CLI surface.
 
@@ -102,7 +102,7 @@ Scope:
 
 **Test inventory:** ≥8 tests. 1 CliRunner test per command (5 commands → 5 tests). ≥2 unit (Pydantic config rejects bad shape; `schema_version` mismatch raises). ≥1 [→E2E] (`preflight` walks a synthetic patient set end-to-end, fails on a deliberately broken config).
 
-### Session 6 — SQLite persistence + full schema
+### Session 6 — SQLite persistence + full schema [SHIPPED]
 
 Goal: durable response store + full data model from the design doc.
 
@@ -124,7 +124,7 @@ Scope (reconciled to design-doc names — note: not `responses`, not `clinician_
 
 **Test inventory:** ≥10 tests. 7 unit (one per table CRUD, plus migrations runner forward + idempotent). ≥2 integration (WAL + synchronous PRAGMAs verified at boot; config_hash round-trip). 1 **[REGRESSION]** test: unique-constraint upsert on `answers(clinician_id, patient_id, timepoint, question_id)` — network-retry double-submit must produce 1 row, not 2. Backup-hook smoke test.
 
-### Session 7 — Geneva AI predictions adapter
+### Session 7 — Geneva AI predictions adapter [SHIPPED]
 
 Goal: load Geneva test-subset AI output into the canonical `AI_OUTPUT` shape so the AI panel renders real content from S8 onward.
 
@@ -138,7 +138,7 @@ Scope:
 
 Status: shipped 2026-10-01 (spec `specs/session-07.md`). The artifacts are positional, so patient ids come from a sidecar exported once by `scripts/export_geneva_test_ids.py`. Wired through the study config (`geneva_ai`) and `load_geneva(..., ai_source=...)`, and populates `GenevaDataset.ai_provenance` so the S11g boot and preflight gates verify the loaded artifact.
 
-### Session 8 — Real-data UI on Geneva (read-only)
+### Session 8 — Real-data UI on Geneva (read-only) [NEXT]
 
 Goal: the thin UI from Session 2 now renders Geneva data + AI panel from S7.
 
@@ -154,11 +154,11 @@ Scope:
 
 **Acceptance:** clinician can navigate a real Geneva patient end-to-end on a laptop in-person.
 
-### Session 9 — Question gating + answer capture + CSV export (split)
+### Session 9 — Question gating + answer capture + CSV export (split) [SHIPPED]
 
 Originally one session; split per /plan-eng-review (working agreement: scope balloons → split).
 
-#### Session 9a — Answer capture
+#### Session 9a — Answer capture [SHIPPED]
 
 Scope:
 - POST `/answer` upserts to `answers` table (uses unique constraint from S6). Shipped as `POST /patient/{pid}/timepoint/{t_index}/answer` — see `session-09a-answer-capture.md` §5.1 for why the route is nested.
@@ -168,7 +168,7 @@ Scope:
 
 **Test inventory:** ≥5 tests. POST upserts; auto-save-on-blur emits event; unique-constraint upsert (regression carried from S6); config_hash captured.
 
-#### Session 9b — Question gating
+#### Session 9b — Question gating [SHIPPED]
 
 Spec: `session-09b-question-gating.md` (reviewed 2026-09-16, 29 fixes folded).
 
@@ -223,9 +223,9 @@ Decided in `specs/policy/phase2-gate.md` (§2), which supersedes the earlier dra
 
 Backup cadence (D10) is **not** in this gate — it lives in S6 per /plan-eng-review (TODOS.md).
 
-### Session 11 — Phase 2 (S11a–S11o, shipped)
+### Session 11 — Phase 2 (S11a–S11p) [SHIPPED]
 
-> **Superseded:** the original draft here (an independent `assign_arm(clinician_id, patient_id, seed)` coin flip per pair, `arm` added to the S9c wide CSV) was replaced by the Phase 2 gate. Plan: `specs/session11_roadmap.md`; one spec per subsession `specs/session-11{a..o}-*.md`; checklist `specs/session-11-implementation-checklist.md`.
+> **Superseded:** the original draft here (an independent `assign_arm(clinician_id, patient_id, seed)` coin flip per pair, `arm` added to the S9c wide CSV) was replaced by the Phase 2 gate. Plan: `specs/session11_roadmap.md`; one spec per subsession `specs/session-11{a..p}-*.md`; checklist `specs/session-11-implementation-checklist.md`.
 
 What shipped:
 
@@ -237,6 +237,7 @@ What shipped:
 - **Privacy, tabs, backups (S11m):** no clinician name in new events; one tab lease per active measured case (`tab.*` audit); study isolated, verified backups.
 - **Linked export (S11n):** `export-phase2` writes a pseudonymised bundle (timepoints, answers, panel summaries, raw events, randomisation audit, configuration history and counts, manifest) across every configuration version.
 - **Integration gate (S11o):** end to end scenarios in `tests/test_phase2_integration.py`, `tests/e2e/test_phase2_walk.py`, `tests/e2e/test_multitab_walk.py`.
+- **Clinician characteristics (S11p):** role, years of practice, country and specialty collected before the first measured case, locked once it starts, exported as `clinicians.csv`.
 
 ### Session 12 — Phase 2.5 polished divergence + v1.0 release
 
