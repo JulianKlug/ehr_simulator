@@ -100,8 +100,12 @@ def patient_order(x: np.ndarray) -> list[str]:
     ids = [str(v) for v in x[:, 0, 0, ID_FIELD]]
     if not (x[:, :, :, ID_FIELD] == x[:, :1, :1, ID_FIELD]).all():
         raise ExportError("case_admission_id is not constant per patient")
-    timesteps = x[:, :, :, TIMESTEP_FIELD].astype(np.int64)
-    expected = np.arange(SOURCE_TIMESTEPS).reshape(1, -1, 1)
+    # Compare exact values: an int cast would truncate 0.7 to 0 and pass.
+    try:
+        timesteps = x[:, :, :, TIMESTEP_FIELD].astype(np.float64)
+    except (TypeError, ValueError) as exc:
+        raise ExportError("timestep field is not numeric") from exc
+    expected = np.arange(SOURCE_TIMESTEPS, dtype=np.float64).reshape(1, -1, 1)
     if not (timesteps == expected).all():
         raise ExportError(f"timestep field does not equal 0..{SOURCE_TIMESTEPS - 1}")
     if len(set(ids)) != len(ids):

@@ -83,6 +83,10 @@ test subset (preflight FAILs a missing AI row). The `geneva_ai` paths are part
 of the configuration hash: moving the files needs a new `--version`. Only point
 it at the trusted local artifact — the files are pickles.
 
+Not yet clinician ready: S7 delivers the data and its provenance only. The AI
+panel still expects the synthetic payload keys, so a Geneva row renders as
+"AI payload incomplete" with raw SHAP values until S8 adapts the presentation.
+
 - **One database per study.** The server refuses a database of another `study_id`.
 - **Configuration changes are explicit.** Editing the YAML changes its hash;
   activate a new `--version` and restart. Started cases keep their version.

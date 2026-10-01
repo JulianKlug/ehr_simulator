@@ -984,3 +984,15 @@ def test_export_script_unpickler_shims_int64index_and_refuses_other_globals() ->
     assert unpickler.find_class("pandas.core.indexes.numeric", "Int64Index") is pd.Index
     with pytest.raises(script.ExportError, match="not allowed"):
         unpickler.find_class("os", "system")
+
+
+@pytest.mark.parametrize("offset", [0.7, 1e-9])
+def test_export_script_refuses_non_integral_timesteps(offset: float) -> None:
+    # Truncating 0.7, 1.7, ... to int would pass a 0..71 check on wrong data.
+    script = _load_script()
+    x = np.empty((1, TIMESTEPS, 1, 4), dtype=object)
+    for t in range(TIMESTEPS):
+        x[0, t, 0] = [fx.TEST_IDS[0], t + offset, "NIHSS", 0.0]
+
+    with pytest.raises(script.ExportError, match="timestep field"):
+        script.patient_order(x)
