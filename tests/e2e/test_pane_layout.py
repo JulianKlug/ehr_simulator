@@ -114,3 +114,27 @@ def test_pane_is_a_toggleable_right_drawer(page: Page, live_study_server: str) -
     page.keyboard.type("q")
     assert page.input_value('form[data-question-id="free_notes"] textarea') == "q"
     assert page.query_selector("#patient-view.pane-collapsed") is None
+
+
+@pytest.mark.e2e
+@pytest.mark.parametrize("width", [1000, 1400], ids=["narrow", "wide"])
+def test_timepoint_navigation_is_not_under_the_pane(
+    page: Page, live_study_server: str, width: int
+) -> None:
+    """The summary card (patient jumper, Prev/Next) ends left of the open pane."""
+    page.set_viewport_size({"width": width, "height": 800})
+    _login(page, live_study_server, f"Dr Nav {width}")
+    page.goto(f"{live_study_server}/patient/{PID}/timepoint/0?chrome=epic")
+    page.wait_for_selector("#questions-pane")
+
+    pane_left = page.evaluate(
+        "document.querySelector('#questions-pane').getBoundingClientRect().left"
+    )
+    nav_right = page.evaluate(
+        "document.querySelector('.timepoint-nav').getBoundingClientRect().right"
+    )
+    card_right = page.evaluate(
+        "document.querySelector('.summary-card').getBoundingClientRect().right"
+    )
+    assert nav_right <= pane_left + 1
+    assert card_right <= pane_left + 1

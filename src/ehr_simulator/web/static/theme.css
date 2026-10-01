@@ -425,7 +425,11 @@ body.chrome-epic [role="tabpanel"][hidden] {
 }
 
 @media (min-width: 900px) {
-    #patient-view:not(.pane-collapsed) .patient-layout.has-questions .patient-chrome {
+    /* Everything left of the open drawer: the summary card (jumper, Prev/Next)
+       and the practice banner sit outside .patient-layout, so they need it too. */
+    #patient-view:not(.pane-collapsed) .patient-layout.has-questions .patient-chrome,
+    #patient-view.has-questions:not(.pane-collapsed) > .summary-card,
+    #patient-view.has-questions:not(.pane-collapsed) > .practice-banner {
         margin-right: var(--pane-w);
     }
 }

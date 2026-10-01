@@ -1,4 +1,4 @@
-<div id="patient-view"
+<div id="patient-view"{% if questions_html %} class="has-questions"{% endif %}
      data-patient-id="{{ patient_slice.patient_id }}"
      data-t-index="{{ patient_slice.timepoint_index }}"
      data-t-count="{{ timepoint_count }}"
