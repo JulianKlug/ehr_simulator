@@ -136,6 +136,8 @@ Scope:
 
 **Test inventory:** ≥6 tests. 4+ unit (pickle loader shape assertion, SHAP serialization, NumPy float32 cast, test-set patient-id intersection edge cases including the silent-empty failure mode). 1 integration (AI_OUTPUT validates strict). 1 regression (patient-id format mismatch is detected, not silent).
 
+Status: shipped 2026-10-01 (spec `specs/session-07.md`). The artifacts are positional, so patient ids come from a sidecar exported once by `scripts/export_geneva_test_ids.py`. Wired through the study config (`geneva_ai`) and `load_geneva(..., ai_source=...)`, and populates `GenevaDataset.ai_provenance` so the S11g boot and preflight gates verify the loaded artifact.
+
 ### Session 8 — Real-data UI on Geneva (read-only)
 
 Goal: the thin UI from Session 2 now renders Geneva data + AI panel from S7.

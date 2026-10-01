@@ -331,6 +331,7 @@ def validate_adapter(
     typer.echo(f"ADMISSION:  {len(dataset.admission)} rows")
     typer.echo(f"IMAGING:    {len(dataset.imaging)} rows")
     typer.echo(f"AI_OUTPUT:  {len(dataset.ai_output)} rows")
+    _echo_ai_provenance(dataset)
     issues = getattr(dataset, "issues", [])
     if issues:
         typer.echo(f"Issues:     {len(issues)}")
@@ -338,6 +339,20 @@ def validate_adapter(
             typer.echo(f"  {issue.dataset}: {issue.reason}")
     else:
         typer.echo("Issues:     0")
+
+
+def _echo_ai_provenance(dataset) -> None:  # type: ignore[no-untyped-def]
+    """S7: the loaded digests an operator copies into ``ai_intervention``; never payloads."""
+    from ehr_simulator.ingestion.provenance import ai_provenance_of
+
+    provenance = ai_provenance_of(dataset)
+    if provenance is None:
+        return
+    typer.echo(f"AI patients: {dataset.ai_output['patient_id'].nunique()}")
+    typer.echo("AI provenance:")
+    typer.echo(f"  prediction_artifact_sha256:  {provenance.prediction_sha256}")
+    typer.echo(f"  explanation_artifact_sha256: {provenance.explanation_sha256 or 'none'}")
+    typer.echo(f"  model_system_version:        {provenance.model_system_version}")
 
 
 def _strict_loader(study):  # type: ignore[no-untyped-def]
@@ -348,10 +363,13 @@ def _strict_loader(study):  # type: ignore[no-untyped-def]
     the failing-fast path the CLI exposes for CI gates.
     """
     if study.dataset == "geneva":
+        from ehr_simulator.cli_support import geneva_ai_source
         from ehr_simulator.ingestion.geneva import load_geneva
 
         def _go():  # type: ignore[no-untyped-def]
-            return load_geneva(study.csv_path, study.params_dir, strict=True)
+            return load_geneva(
+                study.csv_path, study.params_dir, strict=True, ai_source=geneva_ai_source(study)
+            )
 
         return _go
     if study.dataset == "mimic":

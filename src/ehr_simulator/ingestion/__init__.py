@@ -14,6 +14,11 @@ from ehr_simulator.ingestion.canonical import (
 )
 from ehr_simulator.ingestion.exceptions import AdapterError, IngestionIssue
 from ehr_simulator.ingestion.geneva import GenevaDataset, load_geneva
+from ehr_simulator.ingestion.geneva_ai import (
+    GenevaAIOutput,
+    GenevaAISource,
+    load_geneva_ai_predictions,
+)
 from ehr_simulator.ingestion.mimic import MimicDataset, load_mimic
 from ehr_simulator.ingestion.synthetic import SyntheticDataset, load_synthetic
 
@@ -22,6 +27,8 @@ __all__ = [
     "AI_OUTPUT_SCHEMA",
     "AdapterError",
     "CanonicalShape",
+    "GenevaAIOutput",
+    "GenevaAISource",
     "GenevaDataset",
     "IMAGING_SCHEMA",
     "IngestionIssue",
@@ -31,6 +38,7 @@ __all__ = [
     "SyntheticDataset",
     "empty_frame",
     "load_geneva",
+    "load_geneva_ai_predictions",
     "load_mimic",
     "load_synthetic",
     "validate",

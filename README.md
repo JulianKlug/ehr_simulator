@@ -64,6 +64,25 @@ uv run ehr-simulator backup --db-path data/study_<study_id>.db
 uv run ehr-simulator export-phase2 STUDY.yaml     # the research bundle
 ```
 
+**Geneva AI (S7).** A `dataset: geneva` study delivers real AI output through a
+`geneva_ai` block (`predictions_path`, `patient_ids_path`, `model_path`,
+`model_id`, optional `explanations_dir`; relative to the YAML). Before
+`activate-config`:
+
+```bash
+# once: the artifacts carry no patient ids; export the test split order
+uv run python scripts/export_geneva_test_ids.py SPLIT.pth test_predictions.pkl test_patient_ids.csv
+uv run ehr-simulator validate-adapter STUDY.yaml   # prints the loaded AI provenance
+```
+
+Copy the three printed values into `ai_intervention`
+(`prediction_artifact_sha256`, `explanation_artifact_sha256` (omit when no
+`explanations_dir`), `model_system_version`); its `model_id` must equal
+`geneva_ai.model_id`. Every Phase 2 `patient_ids` entry must be in the model
+test subset (preflight FAILs a missing AI row). The `geneva_ai` paths are part
+of the configuration hash: moving the files needs a new `--version`. Only point
+it at the trusted local artifact — the files are pickles.
+
 - **One database per study.** The server refuses a database of another `study_id`.
 - **Configuration changes are explicit.** Editing the YAML changes its hash;
   activate a new `--version` and restart. Started cases keep their version.

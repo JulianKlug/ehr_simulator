@@ -33,6 +33,8 @@ jobs:
         run: uv run python tests/fixtures/geneva/build_geneva_fixture.py --check
       - name: MIMIC fixture sidecar drift check
         run: uv run python tests/fixtures/mimic/build_mimic_fixture.py --check
+      - name: Geneva AI fixture drift check
+        run: uv run python tests/fixtures/geneva_ai/build_geneva_ai_fixture.py --check
       - name: CLI smoke
         run: |
           uv run ehr-simulator validate-config \

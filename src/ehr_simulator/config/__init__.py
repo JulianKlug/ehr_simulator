@@ -31,7 +31,7 @@ from ehr_simulator.config.snapshot import (
     validate_description,
     validate_reason,
 )
-from ehr_simulator.config.study import StudyConfig
+from ehr_simulator.config.study import GenevaAIArtifactConfig, StudyConfig
 
 __all__ = [
     "CategoricalQuestion",
@@ -39,6 +39,7 @@ __all__ = [
     "ConfigValidationError",
     "DESCRIPTION_MAX_CHARS",
     "FreeTextQuestion",
+    "GenevaAIArtifactConfig",
     "REASON_MAX_CHARS",
     "LikertQuestion",
     "MultiSelectQuestion",
