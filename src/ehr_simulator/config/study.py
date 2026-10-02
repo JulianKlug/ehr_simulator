@@ -35,6 +35,11 @@ behaviour: read-only revisits, no practice, free text allowed).
 S11j: optional ``telemetry`` (:class:`TelemetryConfig`) — inactivity and
 panel viewing thresholds. A case records browser telemetry only when its
 pinned snapshot has the block. Omitted from serialization when absent.
+
+S7: optional ``geneva_ai`` (:class:`GenevaAIArtifactConfig`) — which Geneva
+AI artifact files to load (``dataset: geneva`` only). Its paths resolve like
+``csv_path`` and, unlike them, are part of the hashed snapshot: moving the
+artifact needs a new configuration version. Omitted when absent.
 """
 
 from __future__ import annotations
@@ -74,6 +79,7 @@ __all__ = [
     "FeedbackConfig",
     "FreeTextConfig",
     "FreeTextExport",
+    "GenevaAIArtifactConfig",
     "PracticeConfig",
     "StudyBehaviourConfig",
     "RandomisationConfig",
@@ -296,6 +302,42 @@ class AIInterventionConfig(BaseModel):
         return v
 
 
+class GenevaAIArtifactConfig(BaseModel):
+    """S7: the Geneva AI artifact files to load and the ``model_id`` its rows get.
+
+    ``model_system_version`` is never configured: it is the model file's SHA256.
+    ``explanations_dir`` is omitted from serialization when null.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    predictions_path: Path
+    patient_ids_path: Path
+    model_path: Path
+    model_id: str
+    explanations_dir: Path | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_absent_explanations(self, handler: SerializerFunctionWrapHandler) -> Any:
+        data = handler(self)
+        if self.explanations_dir is None and isinstance(data, dict):
+            data.pop("explanations_dir", None)
+        return data
+
+    @field_validator("model_id")
+    @classmethod
+    def _model_id_shape(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("must be non-blank")
+        if len(v) > _INTERVENTION_ID_MAX_CHARS:
+            raise ValueError(f"must be at most {_INTERVENTION_ID_MAX_CHARS} characters")
+        return v
+
+
+#: S7: ``geneva_ai`` keys resolved against the YAML directory.
+_GENEVA_AI_PATH_KEYS = ("predictions_path", "patient_ids_path", "model_path", "explanations_dir")
+
+
 class ClinicianFacingConfig(BaseModel):
     """S11g: fields that directly encode the reference outcome and so must
     never be clinician facing. An explicit empty list is the study's
@@ -481,6 +523,7 @@ class StudyConfig(BaseModel):
     study_behaviour: StudyBehaviourConfig | None = None
     telemetry: TelemetryConfig | None = None
     clinician_profile: ClinicianProfileConfig | None = None
+    geneva_ai: GenevaAIArtifactConfig | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_randomisation(self, handler: SerializerFunctionWrapHandler) -> Any:
@@ -504,6 +547,8 @@ class StudyConfig(BaseModel):
             data.pop("telemetry", None)
         if self.clinician_profile is None:
             data.pop("clinician_profile", None)
+        if self.geneva_ai is None:
+            data.pop("geneva_ai", None)
         return data
 
     @model_validator(mode="before")
@@ -533,6 +578,15 @@ class StudyConfig(BaseModel):
             p = Path(raw)
             if not p.is_absolute():
                 out[key] = str((Path(yaml_dir) / p).resolve())
+
+        geneva_ai = out.get("geneva_ai")
+        if isinstance(geneva_ai, dict):
+            resolved = dict(geneva_ai)
+            for key in _GENEVA_AI_PATH_KEYS:
+                raw = resolved.get(key)
+                if raw is not None and not Path(raw).is_absolute():
+                    resolved[key] = str((Path(yaml_dir) / raw).resolve())
+            out["geneva_ai"] = resolved
         return out
 
     @model_validator(mode="after")
@@ -596,6 +650,12 @@ class StudyConfig(BaseModel):
             raise ValueError("csv_path and params_dir must both be set or both be unset")
         if self.dataset == "synthetic" and (csv_set or params_set):
             raise ValueError("csv_path and params_dir are forbidden when dataset='synthetic'")
+        return self
+
+    @model_validator(mode="after")
+    def _geneva_ai_dataset(self) -> StudyConfig:
+        if self.geneva_ai is not None and self.dataset != "geneva":
+            raise ValueError(f"geneva_ai requires dataset 'geneva'; got {self.dataset!r}")
         return self
 
     @model_validator(mode="after")

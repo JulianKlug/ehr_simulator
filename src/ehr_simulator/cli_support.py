@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from ehr_simulator.config import ConfigError, Questions, StudyConfig, validate_study_questions
+from ehr_simulator.ingestion.geneva_ai import GenevaAISource
 from ehr_simulator.ingestion.provenance import ai_provenance_of
 from ehr_simulator.web.panels import (
     DatasetLike,
@@ -91,8 +92,12 @@ def build_dataset_loader(
     if dataset_name == "geneva":
         from ehr_simulator.ingestion.geneva import load_geneva
 
+        ai_source = geneva_ai_source(study)
+
         def _load_geneva() -> DatasetLike:
-            return load_geneva(csv_path, params_dir, strict=False, patient_ids=_pids())
+            return load_geneva(
+                csv_path, params_dir, strict=False, patient_ids=_pids(), ai_source=ai_source
+            )
 
         return _load_geneva
 
@@ -105,6 +110,20 @@ def build_dataset_loader(
         return _load_mimic
 
     raise ConfigError(f"unsupported dataset: {dataset_name!r}")
+
+
+def geneva_ai_source(study: StudyConfig) -> GenevaAISource | None:
+    """S7: the study's ``geneva_ai`` block as the adapter's source; ``None`` when absent."""
+    block = study.geneva_ai
+    if block is None:
+        return None
+    return GenevaAISource(
+        predictions_path=block.predictions_path,
+        patient_ids_path=block.patient_ids_path,
+        model_path=block.model_path,
+        model_id=block.model_id,
+        explanations_dir=block.explanations_dir,
+    )
 
 
 # ---------------------------------------------------------------------------

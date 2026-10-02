@@ -30,10 +30,11 @@ contains ``"imputed"``          drop before validation (substring match)
                                 inverse-normalize and str-coerce
 ==============================  ==========================================
 
-``IMAGING`` and ``AI_OUTPUT`` are returned as empty-but-conforming
-DataFrames. Geneva imaging-derived scalars (``cbf_lt_30``, ``tmax_gt_6``,
-…) live in ``EHR`` rows and route through ``SCALAR_TS``; AI predictions
-land in S7. Empty frames keep downstream code special-case-free.
+``IMAGING`` is returned as an empty-but-conforming DataFrame. Geneva
+imaging-derived scalars (``cbf_lt_30``, ``tmax_gt_6``, …) live in ``EHR``
+rows and route through ``SCALAR_TS``. ``AI_OUTPUT`` is empty unless an
+``ai_source`` is given (S7, :mod:`ehr_simulator.ingestion.geneva_ai`).
+Empty frames keep downstream code special-case-free.
 
 The ``EHR_SIM_DATA_ROOT`` environment variable, when set to a non-empty
 value, scopes both ``csv_path`` and ``params_dir`` via
@@ -76,6 +77,7 @@ from ehr_simulator.ingestion._shared import (
 )
 from ehr_simulator.ingestion.canonical import CanonicalShape, empty_frame
 from ehr_simulator.ingestion.exceptions import AdapterError, IngestionIssue
+from ehr_simulator.ingestion.geneva_ai import GenevaAISource, load_geneva_ai_predictions
 from ehr_simulator.ingestion.provenance import AIArtifactProvenance
 
 __all__ = [
@@ -142,7 +144,7 @@ class GenevaDataset:
     imaging: pd.DataFrame
     ai_output: pd.DataFrame
     issues: list[IngestionIssue] = field(default_factory=list)
-    # S11g: no AI artifact is loaded for this dataset (S7 adds one).
+    # S11g/S7: identity of the loaded AI artifact; None without ``ai_source``.
     ai_provenance: AIArtifactProvenance | None = None
 
 
@@ -152,6 +154,7 @@ def load_geneva(
     *,
     strict: bool = True,
     patient_ids: tuple[str, ...] | None = None,
+    ai_source: GenevaAISource | None = None,
 ) -> GenevaDataset:
     """Load the Geneva preprocessed-features CSV into the four canonical shapes.
 
@@ -168,6 +171,10 @@ def load_geneva(
     ``GenevaDataset.issues`` and returns the surviving rows; ambiguous
     categorical decodes pick ``argmax`` and append an issue. Imaging and
     AI_OUTPUT frames are empty either way.
+
+    ``ai_source`` (S7): load the Geneva AI artifact, restricted to
+    ``patient_ids``, into ``ai_output`` + ``ai_provenance``. Always strict:
+    ``strict=False`` never relaxes AI checks.
     """
     csv_path = Path(csv_path)
     params_dir = Path(params_dir)
@@ -234,12 +241,21 @@ def load_geneva(
         ai_output, CanonicalShape.AI_OUTPUT, strict=strict, issues=issues, dataset=_DATASET_NAME
     )
 
+    # S7: an AI artifact problem is an intervention integrity failure, never
+    # a lenient issue, so it raises whatever ``strict`` says.
+    ai_provenance = None
+    if ai_source is not None:
+        loaded_ai = load_geneva_ai_predictions(ai_source, patient_ids=patient_ids)
+        ai_output = loaded_ai.ai_output
+        ai_provenance = loaded_ai.provenance
+
     return GenevaDataset(
         scalar_ts=scalar_ts,
         admission=admission,
         imaging=imaging,
         ai_output=ai_output,
         issues=issues,
+        ai_provenance=ai_provenance,
     )
 
 
