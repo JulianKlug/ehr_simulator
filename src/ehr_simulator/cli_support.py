@@ -23,7 +23,6 @@ be unit-tested without spinning up Typer. The three helpers:
 
 from __future__ import annotations
 
-import json
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime
@@ -34,6 +33,7 @@ from typing import Any, Literal
 from ehr_simulator.config import ConfigError, Questions, StudyConfig, validate_study_questions
 from ehr_simulator.ingestion.geneva_ai import GenevaAISource
 from ehr_simulator.ingestion.provenance import ai_provenance_of
+from ehr_simulator.web.ai_payload import decode as decode_ai_payload
 from ehr_simulator.web.panels import (
     DatasetLike,
     PatientSlice,
@@ -274,6 +274,20 @@ def _study_level_rows(
         )
         for m in messages
     ]
+    # S8: the AI heading then reads "Predicted probability" with no outcome.
+    if (
+        study.randomisation is not None
+        and study.ai_intervention is not None
+        and study.ai_intervention.outcome_label is None
+    ):
+        rows.append(
+            PreflightRow(
+                patient_id=_STUDY_LEVEL_PATIENT,
+                t_minutes=_STUDY_LEVEL_T,
+                status="WARN",
+                message="Phase 2 AI intervention declares no outcome_label",
+            )
+        )
     # S11p: not a hard requirement — a study may choose not to collect them.
     if study.randomisation is not None and study.clinician_profile is None:
         rows.append(
@@ -314,19 +328,18 @@ def _cell_failures(study: StudyConfig, sliced: PatientSlice) -> list[str]:
         if study.randomisation is not None and len(ai_rows) != 1:
             failures.append(f"{where}: no AI row for model {configured.model_id!r}")
 
-    payload_keys: set[str] = set()
-    for raw in ai_rows["output_json"]:
-        try:
-            payload = json.loads(raw)
-        except (TypeError, ValueError):
-            payload = None
-        if not isinstance(payload, dict):
+    # S8: the payloads on screen, time order (the renderer's own rule picks
+    # which fields of each are shown).
+    payloads: list[dict[str, Any]] = []
+    for raw in ai_rows.sort_values("t_minutes")["output_json"]:
+        payload = decode_ai_payload(raw)
+        if payload is None:
             failures.append(f"{where}: AI payload is not a JSON object")
             continue
-        payload_keys.update(str(k) for k in payload)
+        payloads.append(payload)
 
     if study.clinician_facing is not None:
-        exposed = exposed_field_ids(sliced, payload_keys)
+        exposed = exposed_field_ids(sliced, payloads)
         leaked = sorted(set(study.clinician_facing.prohibited_fields) & exposed)
         if leaked:
             failures.append(f"{where}: prohibited clinician facing field(s) shown: {leaked}")

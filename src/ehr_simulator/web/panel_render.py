@@ -7,11 +7,11 @@ stays in the log.
 
 from __future__ import annotations
 
-import json
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
+from typing import Any
 
 import pandas as pd
 from fastapi import Request
@@ -25,6 +25,14 @@ from ehr_simulator.ingestion.canonical import (
     VITAL_VAR_SET,
 )
 from ehr_simulator.logging import get_logger
+from ehr_simulator.web.ai_payload import (
+    PROBABILITY_KEY,
+    AIDetail,
+    CheckedPayload,
+    check_payload,
+    decode,
+    plan_display,
+)
 from ehr_simulator.web.clinical_fields import (
     DisplayGroup,
     SummaryFact,
@@ -579,34 +587,66 @@ def _render_imaging(patient_slice: PatientSlice, request: Request) -> str:
     )
 
 
+def _prediction_view(t_minutes: float, model_id: str, checked: CheckedPayload) -> dict[str, object]:
+    """One Geneva prediction: probability + bounded contributors (§6.1, §6.2)."""
+    contributors = checked.contributors
+    shown = contributors.all if contributors is not None else ()
+    return {
+        "t_minutes": t_minutes,
+        "model_id": model_id,
+        "probability": checked.probability,
+        "contributors": contributors,
+        "max_abs": max((abs(c.value) for c in shown), default=0.0),
+    }
+
+
+def _ai_template_args(
+    entries: list[tuple[float, str, dict[str, Any]]],
+) -> dict[str, object]:
+    """Split shown rows (time order) into the Geneva prediction, its
+    probability history and the generic key/value rows of other families."""
+    prediction: dict[str, object] | None = None
+    history: list[dict[str, object]] = []
+    rows: list[dict[str, object]] = []
+    details = plan_display([payload for _, _, payload in entries])
+    for (t_minutes, model_id, payload), detail in zip(entries, details, strict=True):
+        if PROBABILITY_KEY not in payload:
+            rows.append({"t_minutes": t_minutes, "model_id": model_id, "payload": payload})
+            continue
+        checked = check_payload(payload)
+        if detail is AIDetail.FULL:
+            prediction = _prediction_view(t_minutes, model_id, checked)
+        else:
+            history.append({"t_minutes": t_minutes, "probability": checked.probability})
+    return {"prediction": prediction, "history": history, "rows": rows}
+
+
 def _render_ai(patient_slice: PatientSlice, request: Request) -> str:
+    """Legacy cumulative AI panel. S8: a Geneva payload shows the latest
+    row in full and earlier rows as a probability history (§6.4)."""
     templates = request.app.state.templates
     state = patient_slice.panel_states["ai"]
-    rows: list[dict[str, object]] = []
-    for r in patient_slice.ai_output.itertuples(index=False):
-        try:
-            payload = json.loads(r.output_json)
-        except (TypeError, ValueError):
-            payload = {}
-        rows.append(
-            {
-                "t_minutes": float(r.t_minutes),
-                "model_id": r.model_id,
-                "payload": payload,
-            }
-        )
+    frame = patient_slice.ai_output.sort_values("t_minutes", kind="stable")
+    entries = [
+        (float(r.t_minutes), str(r.model_id), decode(r.output_json) or {})
+        for r in frame.itertuples(index=False)
+    ]
     return templates.get_template("_panel_ai.html").render(
         request=request,
         state=state,
         error=patient_slice.panel_errors.get("ai"),
-        rows=rows,
+        outcome_label=None,
+        **_ai_template_args(entries),
     )
 
 
 def _render_measured_ai(
     patient_slice: PatientSlice, request: Request, *, intervention: InterventionContext
 ) -> str:
-    """S11g AI arm: the pinned model's row at exactly t, or ``unavailable``."""
+    """S11g AI arm: the pinned model's row at exactly t, or ``unavailable``.
+
+    S8: the heading names the pinned ``outcome_label`` when configured.
+    """
     measured = select_measured_ai(patient_slice, intervention)
     state, payload = measured_ai_state(measured)
     if measured.unavailable is not None:
@@ -616,15 +656,15 @@ def _render_measured_ai(
             reason=str(measured.unavailable),
         )
 
-    rows = []
+    entries = []
     if measured.unavailable is None:
-        rows.append(
-            {"t_minutes": measured.t_minutes, "model_id": measured.model_id, "payload": payload}
-        )
+        entries.append((float(measured.t_minutes), str(measured.model_id), payload))  # type: ignore[arg-type]
+    configured = intervention.intervention
     return request.app.state.templates.get_template("_panel_ai.html").render(
         request=request,
         state=state,
         error=None,
-        rows=rows,
         measured=True,
+        outcome_label=configured.outcome_label if configured is not None else None,
+        **_ai_template_args(entries),
     )

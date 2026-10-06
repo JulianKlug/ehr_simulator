@@ -92,7 +92,15 @@ def test_blank_identifier_rejected(study_fixture_dir: Path, field: str) -> None:
 
 @pytest.mark.parametrize(
     "fields",
-    [["admission:x", "admission:x"], ["nope:x"], ["admission:"], ["admission:a b"], ["mrs"]],
+    [
+        ["admission:x", "admission:x"],
+        ["nope:x"],
+        ["admission:"],
+        ["admission: a"],
+        ["admission:a "],
+        ["admission:a:b"],
+        ["mrs"],
+    ],
 )
 def test_bad_prohibited_fields_rejected(study_fixture_dir: Path, fields: list[str]) -> None:
     with pytest.raises(ValueError, match="prohibited fields"):
@@ -362,7 +370,7 @@ def test_snapshot_without_intervention_is_unavailable() -> None:
 
 def test_exposed_field_ids_mirror_renderers() -> None:
     sliced = slice_to_timepoint(load_synthetic(), "synth_001", 0.0, FIRST_T)
-    exposed = exposed_field_ids(sliced, ["prob_deterioration_6h"])
+    exposed = exposed_field_ids(sliced, [{"prob_deterioration_6h": 0.1}])
 
     assert "admission:nihss_admission" in exposed
     assert "scalar:hr" in exposed
@@ -424,8 +432,10 @@ def test_future_row_in_slice_fails_guard(
 ) -> None:
     real_slice = panels.slice_to_timepoint
 
-    def leaky_slice(dataset: Any, patient_id: str, t_minutes: float, timepoint_index: int):
-        sliced = real_slice(dataset, patient_id, t_minutes, timepoint_index)
+    def leaky_slice(
+        dataset: Any, patient_id: str, t_minutes: float, timepoint_index: int, **kwargs: Any
+    ):
+        sliced = real_slice(dataset, patient_id, t_minutes, timepoint_index, **kwargs)
         full = dataset.scalar_ts.loc[dataset.scalar_ts.patient_id == patient_id]
         object.__setattr__(sliced, "scalar_ts", full.reset_index(drop=True))
         return sliced
@@ -476,3 +486,114 @@ def test_example_phase2_config_passes_preflight() -> None:
         study, load_questions(root / "example_phase2_questions.yaml"), load_synthetic()
     )
     assert not report.has_fail
+
+
+# ---------------------------------------------------------------------------
+# S8: field pattern, outcome label, Geneva contributors in preflight
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "admission:MedHist CHD",
+        "admission:Antihypert. drugs pre-stroke",
+        "ai:explanation.contributions.lag2_glucose",
+        # Every pre-S8 shape stays valid.
+        "admission:mrs_3mo",
+        "scalar:hr",
+        "imaging:report_text",
+        "ai:prob_deterioration_6h",
+        "admission:a",
+    ],
+)
+def test_prohibited_field_pattern_accepts(study_fixture_dir: Path, field: str) -> None:
+    _study(study_fixture_dir, clinician_facing={"prohibited_fields": [field]})
+
+
+def test_absent_outcome_label_keeps_snapshot_and_hash(study_fixture_dir: Path) -> None:
+    questions = load_questions(study_fixture_dir / "questions.yaml")
+    base = _study(study_fixture_dir)
+    rendered = render_study_snapshot(base)
+    assert "outcome_label" not in rendered
+
+    explicit_none = _study(
+        study_fixture_dir, ai_intervention=_intervention(study_fixture_dir, outcome_label=None)
+    )
+    labelled = _study(
+        study_fixture_dir,
+        ai_intervention=_intervention(study_fixture_dir, outcome_label="poor outcome at 3 months"),
+    )
+    assert render_study_snapshot(explicit_none) == rendered
+    assert compute_config_hash_from_models(labelled, questions) != (
+        compute_config_hash_from_models(base, questions)
+    )
+    assert parse_study_snapshot(render_study_snapshot(labelled)) == labelled
+
+
+def test_blank_outcome_label_rejected(study_fixture_dir: Path) -> None:
+    with pytest.raises(ValueError, match="outcome_label"):
+        _study(
+            study_fixture_dir, ai_intervention=_intervention(study_fixture_dir, outcome_label=" ")
+        )
+
+
+def _warnings(study: StudyConfig) -> list[str]:
+    questions_path = Path(__file__).parent / "fixtures" / "study" / "questions.yaml"
+    report = walk_preflight(study, load_questions(questions_path), load_synthetic())
+    return [r.message for r in report.rows if r.status == "WARN"]
+
+
+def test_phase2_without_outcome_label_warns(study_fixture_dir: Path) -> None:
+    assert any("outcome_label" in w for w in _warnings(_study(study_fixture_dir)))
+    labelled = _study(
+        study_fixture_dir, ai_intervention=_intervention(study_fixture_dir, outcome_label="x")
+    )
+    assert not any("outcome_label" in w for w in _warnings(labelled))
+
+
+def _geneva_study(study_fixture_dir: Path, prohibited: list[str]) -> StudyConfig:
+    from tests.support.geneva_ui import MODEL_ID, PATIENT
+
+    return _study(
+        study_fixture_dir,
+        patient_ids=[PATIENT],
+        ai_intervention=_intervention(
+            study_fixture_dir,
+            model_id=MODEL_ID,
+            prediction_artifact_sha256="a" * 64,
+            explanation_artifact_sha256="b" * 64,
+            model_system_version="c" * 64,
+        ),
+        clinician_facing={"prohibited_fields": prohibited},
+    )
+
+
+def _prohibited_failures(study: StudyConfig) -> list[str]:
+    from tests.support.geneva_ui import geneva_shaped_dataset
+
+    failures = _preflight(study, geneva_shaped_dataset())
+    return [f for f in failures if "prohibited" in f]
+
+
+def test_prohibited_contributor_fails_where_it_enters_top_ten(study_fixture_dir: Path) -> None:
+    from tests.support.geneva_ui import FUTURE_FEATURE, PATIENT
+
+    study = _geneva_study(study_fixture_dir, [f"ai:explanation.contributions.{FUTURE_FEATURE}"])
+    # Only rows after t=120 rank it in the top ten.
+    assert _prohibited_failures(study) == [
+        f"patient {PATIENT} t=180: prohibited clinician facing field(s) shown: "
+        f"['ai:explanation.contributions.{FUTURE_FEATURE}']"
+    ]
+
+
+def test_contributor_outside_top_ten_passes(study_fixture_dir: Path) -> None:
+    # ``weight`` is the sixth negative contribution: never displayed.
+    study = _geneva_study(study_fixture_dir, ["ai:explanation.contributions.weight"])
+    assert _prohibited_failures(study) == []
+
+
+def test_prohibited_admission_field_with_spaces_fails(study_fixture_dir: Path) -> None:
+    study = _geneva_study(study_fixture_dir, ["admission:MedHist CHD"])
+    failures = _prohibited_failures(study)
+    assert failures and all("admission:MedHist CHD" in f for f in failures)

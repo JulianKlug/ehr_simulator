@@ -223,3 +223,121 @@ def test_summary_card_shows_geneva_sex(geneva_client: TestClient) -> None:
 def test_synthetic_summary_sex_unchanged(client: TestClient) -> None:
     soup = BeautifulSoup(client.get("/patient/synth_001/timepoint/0").text, "html.parser")
     assert "sex ?" not in soup.select_one(".summary-meta").get_text(" ", strip=True)
+
+
+# ---------------------------------------------------------------------------
+# Geneva AI panel (§6) and the exposed field inventory (§15)
+# ---------------------------------------------------------------------------
+
+
+def test_legacy_geneva_ai_bounded_and_latest_row_only(geneva_client: TestClient) -> None:
+    ai = _panel(_soup(geneva_client, PATIENT, LEAK_T_INDEX), "ai")
+    assert ai["data-state"] == "loading"
+    text = ai.get_text(" ", strip=True)
+    assert "Predicted probability" in text and "32.0%" in text
+    assert "fixture_xgb" in text
+
+    # One contributors table (the latest row), ten rows, labelled effects.
+    tables = ai.select("table.ai-contributors")
+    assert len(tables) == 1
+    rows = tables[0].select("tbody tr")
+    assert len(rows) == 10
+    assert rows[0].th.get_text(strip=True) == "Glucose (2 h earlier)"
+    assert ai.select_one("tbody tr th code").get_text() == "unmapped_feature_x"
+    effects = {tr.select("td")[0].get_text(strip=True) for tr in rows}
+    assert effects == {"increases model output", "decreases model output"}
+
+    # Earlier rows: probability history only.
+    history = [
+        [c.get_text(strip=True) for c in tr.select("th, td")]
+        for tr in ai.select("table.ai-history tbody tr")
+    ]
+    assert history == [["0", "20.0%"], ["60", "26.0%"]]
+
+
+def test_geneva_ai_html_is_not_the_shap_dictionary(geneva_client: TestClient) -> None:
+    html = str(_panel(_soup(geneva_client, PATIENT, LEAK_T_INDEX), "ai"))
+    for absent in ("base_value", "contributions", "std_glucose", "timestep_idx", "{'", "-0.64"):
+        assert absent not in html, absent
+    assert "Weight" not in html  # sixth negative contributor
+
+
+def _stub_request():
+    from types import SimpleNamespace
+
+    from fastapi.templating import Jinja2Templates
+
+    from ehr_simulator.web.app import _TEMPLATES_DIR
+
+    templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(templates=templates)))
+
+
+@pytest.mark.parametrize(
+    ("label", "heading"),
+    [(None, "Predicted probability"), ("poor outcome", "Predicted probability of poor outcome")],
+)
+def test_measured_heading_uses_pinned_outcome_label(label: str | None, heading: str) -> None:
+    from ehr_simulator.config.study import AIInterventionConfig
+    from ehr_simulator.web.panel_render import _render_measured_ai
+    from ehr_simulator.web.panels import InterventionContext, InterventionMode, slice_to_timepoint
+    from tests.support.geneva_ui import MODEL_ID
+
+    dataset = geneva_shaped_dataset()
+    configured = AIInterventionConfig(
+        model_id=MODEL_ID,
+        model_system_version="c" * 64,
+        prediction_artifact_sha256="a" * 64,
+        explanation_artifact_sha256="b" * 64,
+        presentation_version="ai_panel_v2",
+        intervention_build_id="test",
+        outcome_label=label,
+    )
+    ctx = InterventionContext(InterventionMode.AI, configured, dataset.ai_provenance)
+    sliced = slice_to_timepoint(dataset, PATIENT, 60.0, 1)
+    soup = BeautifulSoup(
+        _render_measured_ai(sliced, _stub_request(), intervention=ctx), "html.parser"
+    )
+
+    assert soup.h3.get_text(strip=True) == heading
+    assert "26.0%" in soup.get_text()
+    assert soup.select_one("table.ai-history") is None
+    assert len(soup.select("table.ai-contributors tbody tr")) == 10
+
+
+def test_exposed_field_ids_match_new_panels() -> None:
+    from ehr_simulator.web.ai_payload import decode
+    from ehr_simulator.web.panels import exposed_field_ids, slice_to_timepoint
+
+    dataset = geneva_shaped_dataset()
+    sliced = slice_to_timepoint(dataset, PATIENT, 0.0, 0)
+    payload = decode(sliced.ai_output["output_json"].iloc[0])
+    exposed = exposed_field_ids(sliced, [payload])
+
+    for field in (
+        "scalar:hr",
+        "scalar:hr_min",
+        "scalar:sbp_max",
+        "scalar:map",
+        "scalar:nihss_max",
+        "scalar:gcs",
+        "scalar:fio2",
+        "scalar:hct",
+        "scalar:tmax_gt_6",
+        "admission:MedHist CHD",
+        "admission:vascular_occlusion",
+        "admission:zz_unregistered",
+        "ai:probability",
+        "ai:explanation.contributions.lag2_glucose",
+        "ai:explanation.contributions.rolling_mean_FIO2",
+    ):
+        assert field in exposed, field
+    for field in (
+        "scalar:mystery_score",  # never rendered
+        "ai:explanation.contributions.timestep_idx",
+        "ai:explanation.contributions.weight",
+        "ai:explanation.contributions.std_glucose",
+        "ai:explanation.base_value",
+        "scalar:crp",  # first measured after t
+    ):
+        assert field not in exposed, field

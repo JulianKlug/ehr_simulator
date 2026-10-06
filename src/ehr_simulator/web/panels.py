@@ -24,8 +24,7 @@ renderers display.
 
 from __future__ import annotations
 
-import json
-from collections.abc import Iterable
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -42,6 +41,7 @@ from ehr_simulator.ingestion.canonical import (
     VITAL_VAR_SET,
 )
 from ehr_simulator.ingestion.provenance import AIArtifactProvenance
+from ehr_simulator.web.ai_payload import check_payload, decode, exposed_ai_field_ids, plan_display
 from ehr_simulator.web.clinical_fields import displayed_scalar_ids
 
 PanelState = Literal[
@@ -69,9 +69,6 @@ class DatasetLike(Protocol):
     admission: pd.DataFrame
     imaging: pd.DataFrame
     ai_output: pd.DataFrame
-
-
-_AI_REQUIRED_KEYS = frozenset({"prob_deterioration_6h", "prob_mrs_0_2_90d"})
 
 
 @dataclass(frozen=True)
@@ -257,16 +254,14 @@ def _ai_panel_state(sliced: pd.DataFrame, full: pd.DataFrame, *, t: float) -> Pa
         return "empty-expected"
     if sliced.empty:
         return "empty-unexpected"
+    state: PanelState = "loading"
     for raw in sliced["output_json"]:
-        try:
-            payload = json.loads(raw)
-        except (TypeError, ValueError):
+        payload = decode(raw)
+        if payload is None:
             return "error"
-        if not isinstance(payload, dict):
-            return "error"
-        if not _AI_REQUIRED_KEYS.issubset(payload.keys()):
-            return "partial"
-    return "loading"
+        if check_payload(payload).state == "partial":
+            state = "partial"
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -354,15 +349,10 @@ def measured_ai_state(measured: MeasuredAI) -> tuple[PanelState, dict[str, Any]]
     """Panel state + decoded payload of a measured AI row."""
     if measured.unavailable is not None:
         return "unavailable", {}
-    try:
-        payload = json.loads(measured.output_json or "")
-    except (TypeError, ValueError):
+    payload = decode(measured.output_json)
+    if payload is None:
         return "error", {}
-    if not isinstance(payload, dict):
-        return "error", {}
-    if not _AI_REQUIRED_KEYS.issubset(payload.keys()):
-        return "partial", payload
-    return "loading", payload
+    return check_payload(payload).state, payload
 
 
 class AIDelivery(StrEnum):
@@ -400,15 +390,16 @@ def ai_delivery(patient_slice: PatientSlice, ctx: InterventionContext) -> dict[s
 
 
 def exposed_field_ids(
-    patient_slice: PatientSlice, ai_payload_keys: Iterable[str] = ()
+    patient_slice: PatientSlice, ai_payloads: Sequence[Mapping[str, Any]] = ()
 ) -> frozenset[str]:
     """Clinician facing ``<source>:<name>`` ids for one slice.
 
     Mirrors the renderers: every admission field; only the scalar ids a
     panel shows, aggregate bounds included (other variables are counted,
-    never shown); the imaging columns the imaging panel shows; the keys of
-    the AI payload on screen.
-    Example: ``{"admission:age", "scalar:hr_max", "ai:prob_deterioration_6h"}``.
+    never shown); the imaging columns the imaging panel shows; the AI
+    fields the renderer shows of ``ai_payloads`` (the decoded payloads on
+    screen, time order; legacy Geneva history rows show probability only).
+    Example: ``{"admission:age", "scalar:hr_max", "ai:probability"}``.
     """
     ids = {f"admission:{field}" for field in patient_slice.admission["field"].astype(str)}
 
@@ -419,5 +410,6 @@ def exposed_field_ids(
     if not patient_slice.imaging.empty:
         ids.update(f"imaging:{column}" for column in _IMAGING_SHOWN_COLUMNS)
 
-    ids.update(f"ai:{key}" for key in ai_payload_keys)
+    for payload, detail in zip(ai_payloads, plan_display(ai_payloads), strict=True):
+        ids.update(exposed_ai_field_ids(payload, detail))
     return frozenset(ids)

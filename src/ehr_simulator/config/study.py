@@ -113,8 +113,9 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _INTERVENTION_ID_MAX_CHARS = 128
 
 #: S11g: ``<source>:<name>`` — the clinician facing source a field is shown
-#: from, then its canonical name. Example: ``admission:mrs_3mo``.
-PROHIBITED_FIELD_PATTERN = re.compile(r"^(admission|scalar|imaging|ai):[^\s:]+$")
+#: from, then its canonical name. Example: ``admission:mrs_3mo``. S8: inner
+#: spaces allowed (``admission:MedHist CHD``); no colon, no outer whitespace.
+PROHIBITED_FIELD_PATTERN = re.compile(r"^(admission|scalar|imaging|ai):[^\s:](?:[^:]*[^\s:])?$")
 
 #: S11p: a configured specialty code, e.g. ``emergency_medicine``.
 _SPECIALTY_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
@@ -275,13 +276,26 @@ class AIInterventionConfig(BaseModel):
     explanation_artifact_sha256: str | None = None
     presentation_version: str
     intervention_build_id: str
+    # S8: names the predicted outcome in the AI panel heading; never inferred.
+    outcome_label: str | None = None
 
     @model_serializer(mode="wrap")
     def _omit_absent_explanation(self, handler: SerializerFunctionWrapHandler) -> Any:
         data = handler(self)
-        if self.explanation_artifact_sha256 is None and isinstance(data, dict):
+        if not isinstance(data, dict):
+            return data
+        if self.explanation_artifact_sha256 is None:
             data.pop("explanation_artifact_sha256", None)
+        if self.outcome_label is None:
+            data.pop("outcome_label", None)
         return data
+
+    @field_validator("outcome_label")
+    @classmethod
+    def _outcome_label_shape(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("outcome_label must be non-blank")
+        return v
 
     @field_validator("prediction_artifact_sha256", "explanation_artifact_sha256")
     @classmethod

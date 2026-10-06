@@ -44,6 +44,7 @@ from tests.support.telemetry import TAB_ID
 # e2e / real_data tests keep their own markers and get no stage.
 UNIT_MODULES = frozenset(
     {
+        "test_ai_payload",
         "test_answer_capture",
         "test_answer_codec",
         "test_behavioral_timing",
