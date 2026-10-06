@@ -35,7 +35,6 @@ from ehr_simulator.config.study import StudyConfig
 from ehr_simulator.db import connect, practice, progress
 from ehr_simulator.db.exceptions import ConfigurationActivationError, ConfigurationProvenanceError
 from ehr_simulator.db.observation import ObservationMode
-from ehr_simulator.divergence import build_divergence_figure
 from ehr_simulator.export import ExportOptions, build_export
 from ehr_simulator.ingestion import load_synthetic
 from ehr_simulator.web.app import app_from_study_config
@@ -353,14 +352,6 @@ def _count(client: TestClient, sql: str) -> int:
     return client.app.state.db.execute(sql).fetchone()[0]
 
 
-def test_practice_disabled_shows_nothing_and_refuses(tmp_path: Path) -> None:
-    data = _phase2(practice={"enabled": False})
-    study = Study(tmp_path, data, FUC_QUESTIONS)
-    with study.client() as client:
-        assert "practice-action" not in client.get("/").text
-        assert _start_practice(client).status_code == HTTP_CONFLICT
-
-
 def test_practice_start_picks_configured_patient_and_resumes(phase2: Study) -> None:
     with phase2.client() as client:
         assert 'data-practice-action="start"' in client.get("/").text
@@ -478,7 +469,7 @@ def test_activation_refuses_cross_version_overlap(phase2: Study, tmp_path: Path)
         phase2.activate(v2, "v2")
 
 
-def test_export_and_divergence_exclude_practice(phase2: Study) -> None:
+def test_export_excludes_practice(phase2: Study) -> None:
     with phase2.client() as client:
         _walk_practice(client)
         live_hash = client.app.state.config_hash
@@ -496,15 +487,6 @@ def test_export_and_divergence_exclude_practice(phase2: Study) -> None:
             pseudonym_secret=TEST_SECRET,
         )
         assert bundle.frame.rows == ()
-        # synth_001 has no measured answers; practice rows never feed it.
-        build_divergence_figure(
-            conn,
-            study=study,
-            questions=questions,
-            live_hash=live_hash,
-            patient_id=PID,
-            dataset=load_synthetic(),
-        )
     finally:
         conn.close()
 

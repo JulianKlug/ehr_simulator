@@ -22,9 +22,7 @@ import yaml
 from fastapi.testclient import TestClient
 
 from ehr_simulator.cli_support import walk_preflight_report
-from ehr_simulator.clinician_profile import YEARS, ProfileValidationError, parse_profile
 from ehr_simulator.config import load_questions, load_study_config
-from ehr_simulator.config.study import ClinicianProfileConfig
 from ehr_simulator.db import clinician_profiles, connect
 from ehr_simulator.db.connection import AccessMode
 from ehr_simulator.export_phase2 import build_phase2_bundle
@@ -35,10 +33,8 @@ from tests.support.lifecycle import LifecycleHarness, _harness
 from tests.support.pseudonym import TEST_SECRET
 
 PROFILE = {"specialties": ["neurology", "emergency_medicine"], "countries": ["CH", "FR"]}
-HTTP_OK = 200
 HTTP_NOT_FOUND = 404
 HTTP_UNPROCESSABLE = 422
-COOKIE = "ehrsim_clinician_id"
 NURSE = {"professional_role": "nurse", "years_of_practice": "3", "country_of_practice": "FR"}
 
 
@@ -96,7 +92,9 @@ def test_nurse_profile_has_no_specialty(ph: LifecycleHarness) -> None:  # 2
     assert _stored(ph).primary_specialty is None
 
 
-@pytest.mark.parametrize("years", ["-1", "abc", "", "inf", "nan", "80.5"])
+@pytest.mark.parametrize(
+    "years", ["-1", "abc", "", "inf", "nan", "80.5", "7_5", "1e1", "1.", ".5", "+3"]
+)
 def test_invalid_years_are_refused(ph: LifecycleHarness, years: str) -> None:  # 4
     with ph.client() as client:
         response = _save(client, {**_physician(), "years_of_practice": years})
@@ -316,11 +314,3 @@ def test_preflight_warns_phase2_without_the_block(study_fixture_dir: Path) -> No
 
     warnings = [r.message for r in report.rows if r.status == "WARN"]
     assert any("clinician characteristics" in m for m in warnings)
-
-
-@pytest.mark.parametrize("years", ["7_5", "1e1", "1.", ".5", "+3"])
-def test_years_refuse_non_decimal_notation(years: str) -> None:
-    form = {**NURSE, "years_of_practice": years}
-    with pytest.raises(ProfileValidationError) as excinfo:
-        parse_profile(form, ClinicianProfileConfig(**PROFILE))
-    assert YEARS in excinfo.value.errors

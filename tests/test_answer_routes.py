@@ -158,6 +158,7 @@ def test_post_answer_invalid_value_422_no_row(
     assert r.status_code == 422
     assert _state(r.text) == "error"
     assert BeautifulSoup(r.text, "html.parser").get_text(strip=True)
+    assert _cta(r.text) is None
     assert _count(study_client, "answers") == 0
 
 
@@ -448,13 +449,6 @@ def test_post_answer_locked_timepoint_409(
     assert _cta(r.text) is None
     assert _count(study_client, "answers") == 0
     assert _count(study_client, "events", "kind LIKE 'answer.%'") == 0
-
-
-def test_post_answer_422_has_no_oob_cta(study_client: TestClient) -> None:
-    r = study_client.post(_url(), data={"question_id": "confidence", "value": "9"})
-    assert r.status_code == 422
-    assert _state(r.text) == "error"
-    assert _cta(r.text) is None
 
 
 def test_get_patient_pane_open_has_advance_cta_with_remaining(study_client: TestClient) -> None:

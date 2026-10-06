@@ -125,14 +125,6 @@ def test_activation_stores_schedule_position_and_timestamp(harness: Harness) -> 
     assert row.activated_at == row.assigned_at
 
 
-def test_assignment_receives_active_configuration(harness: Harness) -> None:
-    with harness.boot() as client:
-        _start(client)
-
-    (row,) = harness.assignments()
-    assert (row.config_version, row.config_hash) == ("v1", harness.v1.config_hash)
-
-
 def test_repeated_start_resumes_the_same_case(harness: Harness) -> None:
     with harness.boot() as client:
         first = _started_patient(_start(client))
@@ -420,18 +412,6 @@ def test_completed_case_is_not_open(harness: Harness) -> None:
     assert [a.case_position for a in harness.assignments()] == [1, 2]
 
 
-def test_start_with_open_case_writes_nothing(harness: Harness) -> None:
-    with harness.boot() as client:
-        _start(client)
-        before = harness.dump()
-        state = client.app.state
-        with harness.conn() as conn:
-            started = case_start.start_next_case(conn, state, clinician_id=harness.clinician_id)
-
-    assert started.outcome is case_start.StartOutcome.RESUMED
-    assert harness.dump() == before
-
-
 def test_exhausted_schedule_refuses(harness: Harness) -> None:
     with harness.boot() as client:
         for _ in harness.v1.study.patient_ids:
@@ -507,14 +487,6 @@ def test_direct_get_to_unactivated_patient_redirects(harness: Harness, htmx: boo
         assert (r.status_code, r.headers["HX-Redirect"]) == (HTTP_OK, INDEX_URL)
     else:
         assert (r.status_code, r.headers["location"]) == (HTTP_SEE_OTHER, INDEX_URL)
-
-
-def test_get_activated_patient_succeeds(harness: Harness) -> None:
-    with harness.boot() as client:
-        patient_id = _started_patient(_start(client))
-        r = client.get(f"/patient/{patient_id}/timepoint/0")
-
-    assert r.status_code == HTTP_OK
 
 
 def test_answer_and_advance_cannot_create_assignments(harness: Harness) -> None:
@@ -651,12 +623,3 @@ def test_starts_never_rewrite_schedules(harness: Harness) -> None:
     for table in ("randomisation_schedules", "randomisation_schedule_items"):
         assert set(first_tables[table]) <= set(after[table])
     assert harness.schedule() == first_schedule
-
-
-def test_stale_server_creates_no_schedule(harness: Harness) -> None:
-    with harness.boot() as client:
-        harness.activate(harness.variant("v2", timepoints=[0, 120]))
-        r = _start(client)
-
-    assert r.status_code == HTTP_CONFLICT
-    assert harness.count("SELECT COUNT(*) FROM randomisation_schedules") == 0

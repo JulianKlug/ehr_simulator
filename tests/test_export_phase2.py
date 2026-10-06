@@ -282,6 +282,7 @@ def test_legacy_export_refuses_mixed_and_names_export_phase2(xh: LifecycleHarnes
         ("UPDATE randomisation_schedules SET config_hash = 'bad'", "registered as"),  # 7
         ("UPDATE configuration_history SET study_json = '{'", "no longer parses"),  # 8
         ("UPDATE progress SET config_hash = 'bad'", "activated under"),
+        ("UPDATE configuration_history SET config_hash = 'forged'", "registered as forged"),
     ],
 )
 def test_provenance_failures_refuse(
@@ -381,6 +382,8 @@ def test_answer_statuses(xh: LifecycleHarness, walked: dict) -> None:  # 17, 18,
     assert answered_t0 and all(r["response_value"] for r in answered_t0)
     later = [r for r in lost if r["t_index"] != "0" and r["response_status"] == "missing"]
     assert later and {r["missing_reason"] for r in later} == {"case_abandoned"}
+    reached = [r for r in lost if r["t_index"] == "0" and r["response_status"] == "missing"]
+    assert reached and {r["missing_reason"] for r in reached} == {"reached_unanswered"}
     assert {r["branch_state"] for r in rows} <= {"editable", "derived", "hidden"}
     hidden = [r for r in rows if r["branch_state"] == "hidden"]
     assert all(r["response_status"] == "not_applicable" and not r["missing_reason"] for r in hidden)
@@ -837,26 +840,6 @@ def test_validation_failure_leaves_nothing(xh: LifecycleHarness, walked: dict) -
     assert not out.exists()
 
 
-def test_write_failure_restores_previous_bundle(
-    xh: LifecycleHarness, walked: dict, monkeypatch: pytest.MonkeyPatch
-) -> None:  # 54
-    bundle = _bundle(xh)
-    out = xh.tmp_path / "bundle"
-    write_bundle(bundle, out)
-    before = sorted(p.name for p in out.iterdir())
-
-    from ehr_simulator import export_bundle
-
-    def boom(_bundle: Any, _files: Any) -> bytes:
-        raise OSError("disk full")
-
-    monkeypatch.setattr(export_bundle, "_manifest", boom)
-    with pytest.raises(OSError, match="disk full"):
-        write_bundle(bundle, out, overwrite=Overwrite.REPLACE)
-    assert sorted(p.name for p in out.iterdir()) == before
-    assert not [p for p in xh.tmp_path.iterdir() if p.name.startswith(".bundle.")]
-
-
 def test_exports_are_byte_stable(xh: LifecycleHarness, walked: dict) -> None:  # 58
     first, second = _bundle(xh), _bundle(xh)
     assert first.tables == second.tables
@@ -1151,6 +1134,7 @@ def test_replace_keeps_old_keyfile_when_the_bundle_fails(
     out, key = xh.tmp_path / "bundle", xh.tmp_path / "key.csv"
     write_bundle(bundle, out, keyfile=key)
     key.write_text("old keyfile")
+    before = sorted(p.name for p in out.iterdir())
 
     from ehr_simulator import export_bundle
 
@@ -1163,6 +1147,7 @@ def test_replace_keeps_old_keyfile_when_the_bundle_fails(
 
     assert key.read_text() == "old keyfile"
     assert (out / MANIFEST_NAME).exists()
+    assert sorted(p.name for p in out.iterdir()) == before
     assert not _leftovers(xh)
 
 

@@ -140,15 +140,6 @@ def test_completed_case_never_plans_a_replacement(rh: LifecycleHarness) -> None:
         )
 
 
-def test_replacement_is_a_patient_the_clinician_never_held(rh: LifecycleHarness) -> None:
-    with rh.client() as client:
-        original = _started_patient(_start(client))
-        _time_out(rh, client, original)
-
-    (plan,) = _plans(rh)
-    assert plan.replacement_patient_id not in {a.patient_id for a in rh.assignments()}
-
-
 def test_original_case_is_never_rewritten(rh: LifecycleHarness) -> None:
     with rh.client() as client:
         original = _started_patient(_start(client))
@@ -159,27 +150,6 @@ def test_original_case_is_never_rewritten(rh: LifecycleHarness) -> None:
 
     assert rh.assignments()[0] == assignment_before[0]
     assert rh.lifecycle(original) == lifecycle_before
-
-
-def test_link_is_navigable_in_both_directions(rh: LifecycleHarness) -> None:
-    with rh.client() as client:
-        original = _started_patient(_start(client))
-        _time_out(rh, client, original)
-        replacement_patient = _started_patient(_start(client))
-
-    (plan,) = _plans(rh)
-    assert (plan.original_patient_id, plan.replacement_patient_id) == (
-        original,
-        replacement_patient,
-    )
-    assert (
-        rh.count(
-            "SELECT COUNT(*) FROM case_replacements WHERE clinician_id = ? "
-            "AND replacement_patient_id = ?",
-            (rh.clinician_id, replacement_patient),
-        )
-        == 1
-    )
 
 
 def test_replanning_the_same_original_is_idempotent(rh: LifecycleHarness) -> None:

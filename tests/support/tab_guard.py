@@ -13,9 +13,11 @@ from ehr_simulator.web.tab_guard import RENDER_ID_HEADER, TAB_ID_HEADER
 from tests.conftest import _valid_value
 from tests.support.cases import HTTP_OK
 from tests.support.lifecycle import LifecycleHarness
+from tests.support.telemetry import OTHER_TAB_ID, TAB_ID
+from tests.support.telemetry import _post as _post_telemetry
 
-TAB_A = "0b6f7c1e-3f5a-4c2d-9e8b-7a6d5c4b3a21"
-TAB_B = "5d1c9a0e-8b7f-4e6d-a5c4-3b2a1f0e9d8c"
+TAB_A = TAB_ID
+TAB_B = OTHER_TAB_ID
 
 
 @contextmanager
@@ -64,4 +66,4 @@ def _answer_all(client: TestClient, patient_id: str, t_index: int, headers: dict
 
 
 def _post(client: TestClient, tab_id: str, events_: list[dict]) -> Any:
-    return client.post("/telemetry/events", json={"tab_id": tab_id, "events": events_})
+    return _post_telemetry(client, events_, tab_id)

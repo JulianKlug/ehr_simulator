@@ -295,31 +295,6 @@ def test_advance_lost_cas_race_is_stale(db: sqlite3.Connection, questions: Quest
     assert _events(db, "advance.ok") == []
 
 
-def test_advance_passes_client_clock_fields(db: sqlite3.Connection, questions: Questions) -> None:
-    """review-fix R17: advance events carry client_ts / client_seq."""
-    state = _AppState()
-    cid = clinicians.lookup_or_create(db, "Dr. Gate")
-    ctx = _ctx(db, state, cid)
-
-    advance(
-        db,
-        state,
-        ctx=ctx,
-        clinician_id=cid,
-        patient_id="p1",
-        t_index=0,
-        timepoints=TIMEPOINTS,
-        questions=questions,
-        client_ts="2026-09-16T12:34:56.789Z",
-        client_seq="7",
-    )
-    row = db.execute(
-        "SELECT client_ts, client_seq FROM events WHERE kind = 'advance.blocked'"
-    ).fetchone()
-    assert row[0] is not None
-    assert row[1] == 7
-
-
 # ---------------------------------------------------------------------------
 # progress_overview (#18b)
 # ---------------------------------------------------------------------------

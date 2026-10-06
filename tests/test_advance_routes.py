@@ -238,6 +238,7 @@ def test_advance_events_carry_client_ts_and_client_seq(study_client: TestClient)
 
 
 def test_advance_stale_412_renders_frontier_view(study_client: TestClient) -> None:
+    """REGRESSION: two clicks, one unlock."""
     answer_all_required(study_client, PID, 0)
     assert _advance(study_client, 0).status_code == 200
 
@@ -263,16 +264,6 @@ def test_advance_concurrent_frontier_move_is_stale(study_client: TestClient) -> 
     assert r.status_code == 412
     assert _progress(study_client).unlocked_t_index == 1
     assert _payloads(study_client, "advance.ok") == []
-
-
-def test_advance_double_submit_second_is_stale(study_client: TestClient) -> None:
-    """REGRESSION: two clicks, one unlock."""
-    answer_all_required(study_client, PID, 0)
-    first = _advance(study_client, 0)
-    second = _advance(study_client, 0)
-    assert (first.status_code, second.status_code) == (200, 412)
-    assert _progress(study_client).unlocked_t_index == 1
-    assert len(_payloads(study_client, "advance.ok")) == 1
 
 
 def _walk_to_last(client: TestClient) -> None:

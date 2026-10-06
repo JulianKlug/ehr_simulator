@@ -35,6 +35,7 @@ import pytest
 
 from ehr_simulator.ingestion.synthetic import SyntheticDataset, load_synthetic
 from ehr_simulator.logging import reset_request_context
+from tests.support.telemetry import TAB_ID
 
 
 @pytest.fixture(scope="session")
@@ -353,7 +354,7 @@ def seed_progress(
 # ---------------------------------------------------------------------------
 
 #: The tab every test client claims as (a lowercase UUID v4).
-TEST_TAB_ID = "0b6f7c1e-3f5a-4c2d-9e8b-7a6d5c4b3a21"
+TEST_TAB_ID = TAB_ID
 
 
 def _claim_view(client: object, response: object) -> None:

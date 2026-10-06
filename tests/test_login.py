@@ -36,8 +36,6 @@ def test_post_login_creates_clinician_and_sets_cookie_and_redirects(
     assert "path=/" in set_cookie_lower
 
     # Verify the row landed AND a clinician.login event with NULL session_id.
-    from ehr_simulator.db import connect
-
     app = anonymous_client.app
     db = app.state.db
     rows = db.execute(
@@ -50,9 +48,6 @@ def test_post_login_creates_clinician_and_sets_cookie_and_redirects(
     ).fetchall()
     assert len(login_events) == 1
     assert login_events[0][0] is None
-
-    # Connect helper is exercised elsewhere; this is just a smoke import.
-    _ = connect
 
 
 def test_post_login_normalizes_name(anonymous_client: TestClient) -> None:

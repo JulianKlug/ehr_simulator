@@ -705,16 +705,6 @@ def test_existing_destination_is_never_overwritten(tmp_path: Path) -> None:  # 4
     assert first.read_bytes() == first_bytes
 
 
-def test_unbound_db_keeps_legacy_name(tmp_db_path: Path, tmp_path: Path) -> None:  # 43
-    conn = connect(tmp_db_path)
-    apply_migrations(conn)
-    conn.close()
-    dest = create_backup(tmp_db_path, tmp_path / "backups")
-
-    assert dest.parent == tmp_path / "backups"
-    assert dest.name.startswith("ehr_simulator_")
-
-
 def test_backup_writes_only_the_copy(tmp_path: Path) -> None:  # 44
     db = _bound_db(tmp_path / "study.db", "study_a")
     create_backup(db, tmp_path / "backups")

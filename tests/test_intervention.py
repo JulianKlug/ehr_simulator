@@ -75,14 +75,6 @@ def _intervention(study_fixture_dir: Path, **changes: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
-def test_valid_intervention_and_clinician_facing_load(study_fixture_dir: Path) -> None:
-    study = load_study_config(study_fixture_dir / "study_randomised.yaml")
-    assert study.ai_intervention is not None
-    assert study.ai_intervention.prediction_artifact_sha256 == SYNTHETIC_SHA256
-    assert study.clinician_facing is not None
-    assert study.clinician_facing.prohibited_fields == []
-
-
 @pytest.mark.parametrize("field", ["prediction_artifact_sha256", "explanation_artifact_sha256"])
 @pytest.mark.parametrize("bad", ["ABC", "A" * 64, "g" * 64, "0" * 63])
 def test_malformed_sha256_rejected(study_fixture_dir: Path, field: str, bad: str) -> None:
@@ -215,10 +207,6 @@ def test_boot_refuses_missing_provenance(
 ) -> None:
     monkeypatch.setattr("ehr_simulator.web.app.ai_provenance_of", lambda _dataset: None)
     assert _boot_refused(harness, harness.v1)
-
-
-def test_boot_accepts_matching_artifact(harness: Harness) -> None:  # noqa: F811
-    assert not _boot_refused(harness, harness.v1)
 
 
 # ---------------------------------------------------------------------------

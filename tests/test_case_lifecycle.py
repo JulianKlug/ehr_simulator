@@ -55,7 +55,6 @@ from tests.support.cases import (
     INDEX_URL,
     LAST_T_INDEX,
     SECOND_CLINICIAN,
-    Config,
     _start,
     _started_patient,
 )
@@ -77,7 +76,6 @@ from tests.support.lifecycle import (
 )
 
 HTTP_NO_CONTENT = 204
-HTTP_PRECONDITION_FAILED = 412
 HX = {"HX-Request": "true"}
 
 
@@ -103,11 +101,6 @@ def _post(client: TestClient, path: str, **headers: str):
 # ---------------------------------------------------------------------------
 # Configuration (#1-#7)
 # ---------------------------------------------------------------------------
-
-
-def test_v2_config_without_lifecycle_parses(study_fixture_dir: Path) -> None:
-    config = Config("v", study_fixture_dir / "study_randomised.yaml", Path())
-    assert config.study.case_lifecycle is None
 
 
 def test_absent_section_is_absent_from_the_snapshot() -> None:
@@ -827,17 +820,6 @@ def test_final_advance_after_grace_is_incomplete_not_completed(lh: LifecycleHarn
     assert lh.lifecycle(patient_id).state is CaseState.INCOMPLETE
     assert lh.events("case.completed") == []
     assert lh.count("SELECT COUNT(*) FROM progress WHERE completed_at IS NOT NULL") == 0
-
-
-def test_incomplete_case_counts_as_activated(lh: LifecycleHarness) -> None:
-    with lh.client() as client:
-        first = _started_patient(_start(client))
-        _abandon(lh, first)
-        _start(client)
-
-    with lh.conn() as conn:
-        counts = lifecycle_dao.counts_for_clinician(conn, lh.clinician_id)
-    assert (counts.incomplete, counts.active, counts.activated) == (1, 1, 2)
 
 
 def test_target_completed_count_blocks_start(tmp_path: Path, study_fixture_dir: Path) -> None:

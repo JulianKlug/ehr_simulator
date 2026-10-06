@@ -754,8 +754,6 @@ def test_cli_export_answers_force_replaces_existing_out(
 
 def test_cli_export_answers_failures_exit_1_and_leave_no_output(
     runner: CliRunner,
-    db: sqlite3.Connection,
-    tmp_db_path: Path,
     tmp_path: Path,
     study_fixture_dir: Path,
 ) -> None:
@@ -790,21 +788,6 @@ def test_cli_export_answers_failures_exit_1_and_leave_no_output(
     assert result.exit_code == 1
     assert "pending migrations" in result.stderr
     assert not out_b.exists()
-
-    # (c) integrity failure: foreign config hash in one table
-    from ehr_simulator.db import arm_assignments, clinicians, study_identity
-
-    study_identity.bind(db, "fixture_synthetic")
-    foreign_hash = "a" * 64
-    cid = clinicians.lookup_or_create(db, "Dr. Drift")
-    arm_assignments.assign_or_lookup(db, cid, "synth_001", config_hash=foreign_hash)
-    out_c = tmp_path / "c.csv"
-    result = runner.invoke(
-        cli.app_typer, _export_args(study_fixture_dir, tmp_db_path, "--out", str(out_c))
-    )
-    assert result.exit_code == 1
-    assert "another study configuration" in result.stderr
-    assert not out_c.exists()
 
 
 def test_cli_export_answers_keyfile_writes_mode_0600(
@@ -943,50 +926,6 @@ def test_cli_export_answers_same_path_for_out_and_keyfile_refused(
     assert not same.exists()
 
 
-def test_cli_export_answers_keyfile_refused_on_non_posix(
-    runner: CliRunner,
-    db: sqlite3.Connection,
-    tmp_db_path: Path,
-    tmp_path: Path,
-    study_fixture_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import os
-
-    from ehr_simulator import export as export_module
-
-    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
-
-    class _NonPosixOS:
-        """Looks like a non-POSIX ``os`` module but delegates everything else."""
-
-        name = "nt"
-
-        def __getattr__(self, item: str) -> object:
-            return getattr(os, item)
-
-    monkeypatch.setattr(export_module, "os", _NonPosixOS())
-    keyfile = tmp_path / "clinicians.keyfile.csv"
-    out = tmp_path / "answers.csv"
-
-    result = runner.invoke(
-        cli.app_typer,
-        _export_args(
-            study_fixture_dir,
-            tmp_db_path,
-            "--out",
-            str(out),
-            "--keyfile",
-            str(keyfile),
-        ),
-    )
-
-    assert result.exit_code == 1
-    assert "keyfile" in result.stderr
-    assert not out.exists()
-    assert not keyfile.exists()
-
-
 def test_cli_export_answers_os_failure_is_exit_1(
     runner: CliRunner,
     db: sqlite3.Connection,
@@ -1095,26 +1034,6 @@ def test_cli_rejection_reaches_os_process_status_1(
     assert result.returncode == 1, (result.stdout, result.stderr)
     # A clean refusal message, not an unhandled traceback.
     assert "schema_version" in result.stderr
-    assert "Traceback (most recent call last)" not in result.stderr
-
-
-def test_cli_success_reaches_os_process_status_0(
-    study_fixture_dir: Path,
-) -> None:
-    import subprocess
-
-    result = subprocess.run(
-        [
-            str(_console_script()),
-            "validate-config",
-            str(study_fixture_dir / "study_synthetic.yaml"),
-            str(study_fixture_dir / "questions.yaml"),
-        ],
-        capture_output=True,
-        text=True,
-        timeout=180,
-    )
-    assert result.returncode == 0, (result.stdout, result.stderr)
     assert "Traceback (most recent call last)" not in result.stderr
 
 

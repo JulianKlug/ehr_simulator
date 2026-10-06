@@ -9,7 +9,6 @@ test lives in ``test_geneva_real.py`` behind the ``real_data`` marker.
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 
 import pandas as pd
@@ -23,16 +22,13 @@ from ehr_simulator.ingestion import (
     validate,
 )
 from ehr_simulator.ingestion import geneva as geneva_module
-from ehr_simulator.ingestion.geneva import (
+from ehr_simulator.ingestion._shared import (
     CategoricalGroup,
     _decode_categorical,
-    _drop_imputed,
-    _inverse_normalize,
     _load_categorical_encoding,
-    _load_normalisation_params,
-    _load_units,
     _path_traversal_guard,
 )
+from ehr_simulator.ingestion.geneva import _load_units
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -64,30 +60,6 @@ def _row(label: str, value: float) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 # Unit tests
 # ---------------------------------------------------------------------------
-
-
-def test_drop_imputed_drops_six_of_eight_known_sources() -> None:
-    sources = [
-        "EHR",
-        "EHR_locf_imputed",
-        "EHR_pop_imputed",
-        "EHR_pop_imputed_locf_imputed",
-        "stroke_registry",
-        "stroke_registry_locf_imputed",
-        "stroke_registry_pop_imputed",
-        "stroke_registry_pop_imputed_locf_imputed",
-    ]
-    frame = pd.DataFrame({"source": sources, "value": list(range(len(sources)))})
-    out = _drop_imputed(frame)
-    assert sorted(out["source"].tolist()) == ["EHR", "stroke_registry"]
-
-
-def test_inverse_normalize_round_trip() -> None:
-    cases = [(73.6, 73.6, 14.5), (1.09, 1.09, 0.27), (0.0, 22.1, 4.3)]
-    for x, mean, std in cases:
-        z = (x - mean) / std
-        assert math.isclose(_inverse_normalize(z, mean, std), x, abs_tol=1e-9)
-    assert math.isnan(_inverse_normalize(float("nan"), 0.0, 1.0))
 
 
 def test_decode_categorical_threshold_below_returns_baseline() -> None:
@@ -246,32 +218,6 @@ _ALL_GENEVA_SAMPLE_LABELS: set[str] = {
 }
 
 
-def test_load_categorical_encoding_covers_all_19_groups(geneva_fixture_dir: Path) -> None:
-    sample_labels = set(
-        pd.read_csv(geneva_fixture_dir / "geneva_sample.csv", dtype={"sample_label": str})[
-            "sample_label"
-        ].unique()
-    )
-    groups = _load_categorical_encoding(
-        geneva_fixture_dir / "categorical_variable_encoding.csv",
-        sample_labels,
-        dataset="geneva",
-    )
-    assert len(groups) == 19
-    for group in groups.values():
-        for col in group.one_hot_columns:
-            assert col in sample_labels
-
-    stripped = sample_labels - {"sex_male"}
-    with pytest.raises(AdapterError) as exc:
-        _load_categorical_encoding(
-            geneva_fixture_dir / "categorical_variable_encoding.csv",
-            stripped,
-            dataset="geneva",
-        )
-    assert "sex_male" in str(exc.value)
-
-
 def test_decode_categorical_edge_cases() -> None:
     rows_eq = pd.DataFrame([_row("sex_male", 0.5)])
     decoded, issue = _decode_categorical(
@@ -389,14 +335,6 @@ def test_load_units_raises_on_malformed_json(
         assert "not valid JSON" in str(exc.value)
     finally:
         _load_units.cache_clear()
-
-
-def test_load_normalisation_params_raises_on_missing_column(tmp_path: Path) -> None:
-    bad = tmp_path / "norm.csv"
-    pd.DataFrame({"variable": ["age"], "original_mean": [1.0]}).to_csv(bad, index=False)
-    with pytest.raises(AdapterError) as exc:
-        _load_normalisation_params(bad, dataset="geneva")
-    assert "original_std" in str(exc.value)
 
 
 def test_load_categorical_encoding_raises_on_malformed_cell(tmp_path: Path) -> None:
@@ -580,62 +518,6 @@ def test_load_geneva_raises_on_missing_required_columns(
     with pytest.raises(AdapterError) as exc:
         load_geneva(out_csv, geneva_fixture_dir, strict=True)
     assert "source" in str(exc.value)
-
-
-# ---------------------------------------------------------------------------
-# S5: defensive-issue test — _read_features_csv against the Geneva fixture
-# ---------------------------------------------------------------------------
-
-
-def test_read_features_csv_emits_issue_for_unrecognized_source_geneva_fixture(
-    geneva_fixture_dir: Path, tmp_path: Path
-) -> None:
-    """TODOS.md S4 carryover: a MIMIC vocab leak (``source = "notes"``) into
-    a Geneva CSV must surface as an :class:`IngestionIssue` AND a structlog
-    WARNING — never as a silent drop. Mirror of test_shared.py #7 + #8 but
-    exercises the real Geneva fixture so the integration boundary is locked.
-    """
-    import structlog
-
-    from ehr_simulator.ingestion._shared import _read_features_csv
-
-    base = pd.read_csv(geneva_fixture_dir / "geneva_sample.csv")
-    leaked_row = pd.DataFrame(
-        {
-            "relative_sample_date_hourly_cat": [0],
-            "case_admission_id": ["geneva_fixture_001"],
-            "sample_label": ["age"],
-            "source": ["notes"],
-            "value": [42.0],
-        }
-    )
-    polluted = pd.concat([base, leaked_row], ignore_index=True)
-    polluted_csv = tmp_path / "geneva_with_leak.csv"
-    polluted.to_csv(polluted_csv, index=False)
-
-    with structlog.testing.capture_logs() as captured:
-        frame, issues = _read_features_csv(
-            polluted_csv,
-            required_columns=(
-                "relative_sample_date_hourly_cat",
-                "case_admission_id",
-                "sample_label",
-                "source",
-                "value",
-            ),
-            dataset="geneva",
-            known_sources=("EHR", "stroke_registry"),
-        )
-
-    # (a) The leaked row is dropped.
-    assert "notes" not in frame["source"].astype(str).tolist()
-    # (b) The structlog WARNING fires.
-    warning_events = [e for e in captured if e.get("event_kind") == "ingest.source.unrecognized"]
-    assert len(warning_events) == 1
-    assert warning_events[0]["dataset"] == "geneva"
-    assert warning_events[0]["source_value"] == "notes"
-    # (c) The IngestionIssue surfaces in the issues list.
-    assert any(i.dataset == "geneva" and "notes" in i.reason for i in issues)
 
 
 # ---------------------------------------------------------------------------

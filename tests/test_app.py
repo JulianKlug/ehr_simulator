@@ -65,32 +65,6 @@ def _pre_seed(tmp_db_path: Path, study_path: Path, questions_path: Path) -> str:
     return clinician_id
 
 
-def test_app_from_study_config_synthetic_renders_synth_001(
-    study_fixture_dir: Path,
-    tmp_log_dir: Path,
-    tmp_db_path: Path,
-    tmp_backup_dir: Path,
-) -> None:
-    clinician_id = _pre_seed(
-        tmp_db_path,
-        study_fixture_dir / "study_synthetic.yaml",
-        study_fixture_dir / "questions.yaml",
-    )
-    app = app_from_study_config(
-        study_fixture_dir / "study_synthetic.yaml",
-        study_fixture_dir / "questions.yaml",
-        log_dir=tmp_log_dir,
-        db_path=tmp_db_path,
-        backup_dir=tmp_backup_dir,
-    )
-    with TestClient(app) as client:
-        client.cookies.set("ehrsim_clinician_id", clinician_id)
-        response = client.get("/patient/synth_001/timepoint/0")
-        assert response.status_code == 200
-        # Patient summary card includes the patient_id.
-        assert "synth_001" in response.text
-
-
 def test_app_from_study_config_t_index_resolves_to_study_timepoints(
     study_fixture_dir: Path,
     tmp_log_dir: Path,
@@ -149,17 +123,6 @@ timepoints: [0, 180]
         assert "synth_001" in response.text
         assert 'data-t-index="1"' in response.text
         assert 'data-t-minutes="180.0"' in response.text
-
-
-def test_serve_no_config_path_does_not_set_study_timepoints(
-    tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
-) -> None:
-    """The synthetic-only ``serve`` path (no --config) keeps the S2 behavior:
-    routes fall back to ``patient_timepoints(dataset, pid)``. Locks the
-    "no-config path is unchanged" acceptance criterion in spec §12.
-    """
-    app = create_app(log_dir=tmp_log_dir, db_path=tmp_db_path, backup_dir=tmp_backup_dir)
-    assert not hasattr(app.state, "study_timepoints") or app.state.study_timepoints is None
 
 
 def test_app_from_study_config_index_lists_only_study_patients(
@@ -260,13 +223,6 @@ timepoints: [0, 60]
             f"expected declared order [003, 001, 002] but got "
             f"positions: 003={idx_003}, 001={idx_001}, 002={idx_002}"
         )
-
-
-def test_serve_no_config_path_does_not_set_study_patient_ids(
-    tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
-) -> None:
-    app = create_app(log_dir=tmp_log_dir, db_path=tmp_db_path, backup_dir=tmp_backup_dir)
-    assert not hasattr(app.state, "study_patient_ids") or app.state.study_patient_ids is None
 
 
 # ---------------------------------------------------------------------------
@@ -410,6 +366,9 @@ def test_app_from_study_config_sets_questions_and_config_hash(
 
     bare = create_app(log_dir=tmp_log_dir, db_path=tmp_db_path, backup_dir=tmp_backup_dir)
     assert (bare.state.study, bare.state.questions, bare.state.config_hash) == (None, None, None)
+    # No --config: routes fall back to the dataset's own timepoints and patients.
+    assert getattr(bare.state, "study_timepoints", None) is None
+    assert getattr(bare.state, "study_patient_ids", None) is None
 
 
 def test_app_from_study_config_warns_when_no_question_required(

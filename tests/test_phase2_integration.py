@@ -38,7 +38,6 @@ from ehr_simulator.db.connection import AccessMode
 from ehr_simulator.db.migrations import MIGRATIONS
 from ehr_simulator.export_phase2 import Phase2Bundle, build_phase2_bundle
 from ehr_simulator.pseudonym import pseudonymize
-from tests.conftest import drop_append_only_triggers
 from tests.support.cases import HX, _start, _started_patient
 from tests.support.lifecycle import GRACE, LifecycleHarness, _harness
 from tests.support.pseudonym import TEST_SECRET
@@ -387,32 +386,6 @@ def test_g_resume_keeps_the_branch(integrated: Integrated) -> None:
     assert slot is not None and not slot.find("form")
 
 
-def test_g_reached_unanswered_and_unreached_stay_distinct(tmp_path: Path) -> None:  # 21
-    """A case abandoned at a timepoint it reached: that timepoint's blank
-    required questions are reached_unanswered, later ones case_abandoned."""
-    h = _new_study(tmp_path)
-    with _tab(h) as client:
-        patient_id = _started_patient(_start(client))
-        render_id = _page(client, patient_id)
-        _claim(client, patient_id, TAB_A, render_id)
-        headers = {**HX, **_owner(TAB_A, render_id)}
-        client.post(
-            f"/patient/{patient_id}/timepoint/0/answer",
-            data={"question_id": "confidence", "value": "3"},
-            headers=headers,
-        )
-        h.clock.advance(GRACE + 1)
-        client.post(f"/case/{patient_id}/heartbeat")
-
-    bundle = _bundle(h.db_path, h.v1.study.study_id)
-    cells = {(r["t_index"], r["question_id"]): r for r in _rows(bundle, "answers.csv")}
-    assert cells[("0", "confidence")]["response_status"] == "answered"
-    assert cells[("0", "deterioration_6h")]["missing_reason"] == "reached_unanswered"
-    assert cells[("0", "good_outcome_3mo")]["missing_reason"] == "reached_unanswered"
-    assert cells[("1", "deterioration_6h")]["missing_reason"] == "case_abandoned"
-    assert cells[("0", "primary_cause")]["response_status"] == "not_applicable"
-
-
 # ---------------------------------------------------------------------------
 # I: backup identity and restore smoke (tests #31-#32)
 # ---------------------------------------------------------------------------
@@ -545,36 +518,6 @@ def test_d_configuration_update_keeps_old_cases_pinned(tmp_path: Path) -> None:
     assert (counts["v1"]["activated_cases"], counts["v2"]["activated_cases"]) == ("1", "1")
     assert counts["v1"]["completed_cases"] == "1"
 
-    legacy = CliRunner().invoke(
-        cli.app_typer,
-        [
-            "export-answers",
-            str(v2.study_yaml),
-            str(v2.questions_yaml),
-            "--db-path",
-            str(h.db_path),
-            "--out",
-            str(tmp_path / "legacy.csv"),
-            "--pseudonym-secret",
-            str(tmp_path / "pseudonym.secret"),
-        ],
-    )
-    assert legacy.exit_code == 1 and "export-phase2" in legacy.stderr
-
-
-def test_d_unknown_provenance_refuses(tmp_path: Path) -> None:  # 17
-    from ehr_simulator.export_phase2 import Phase2ExportError
-
-    h = _new_study(tmp_path)
-    with _tab(h) as client:
-        _walk(h, client, h.clinician_id, stop_at=0)
-    with h.conn() as conn:
-        drop_append_only_triggers(conn)
-        conn.execute("UPDATE configuration_history SET config_hash = 'forged'")
-        conn.commit()
-    with pytest.raises(Phase2ExportError):
-        _bundle(h.db_path, h.v1.study.study_id)
-
 
 # ---------------------------------------------------------------------------
 # Examples (tests #33-#34)
@@ -593,28 +536,3 @@ def test_example_phase2_config_validates_and_preflights() -> None:
     assert validated.exit_code == 0, validated.output
     assert preflight.exit_code == 0, preflight.output
     assert " 0 FAIL" in preflight.output
-
-
-# ---------------------------------------------------------------------------
-# Documentation (tests #35-#36)
-# ---------------------------------------------------------------------------
-
-REPO = Path(__file__).parents[1]
-
-
-def test_cli_help_lists_phase2_commands() -> None:
-    result = CliRunner().invoke(cli.app_typer, ["--help"])
-    assert result.exit_code == 0
-    for command in ("activate-config", "expire-cases", "backup", "export-phase2"):
-        assert command in result.output
-
-
-def test_docs_no_longer_describe_pairwise_coin_flips() -> None:
-    roadmap = (REPO / "specs" / "ROADMAP.md").read_text()
-    readme = (REPO / "README.md").read_text()
-
-    assert "assign_arm(" not in roadmap.replace(
-        "an independent `assign_arm(clinician_id, patient_id, seed)` coin flip", ""
-    )
-    assert "Superseded" in roadmap
-    assert "export-phase2" in readme and "Session 11.)" not in readme

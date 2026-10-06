@@ -62,41 +62,15 @@ from pathlib import Path
 import pandas as pd
 
 from ehr_simulator.ingestion._shared import (
-    CategoricalGroup,
-    _apply_scalar_ts_inverse_normalize,
-    _build_admission,
-    _build_scalar_ts,
-    _decode_categorical,
-    _drop_imputed,
     _FeatureLayout,
-    _inverse_normalize,
-    _load_categorical_encoding,
     _load_feature_frames,
-    _load_normalisation_params,
-    _one_hot_column_name,
-    _path_traversal_guard,
-    _read_features_csv,
-    _validate_and_collect,
 )
 from ehr_simulator.ingestion.exceptions import IngestionIssue
 from ehr_simulator.ingestion.provenance import AIArtifactProvenance
 
 __all__ = [
-    "CategoricalGroup",
     "MimicDataset",
     "load_mimic",
-    "_apply_scalar_ts_inverse_normalize",
-    "_build_admission",
-    "_build_scalar_ts",
-    "_decode_categorical",
-    "_drop_imputed",
-    "_inverse_normalize",
-    "_load_categorical_encoding",
-    "_load_normalisation_params",
-    "_one_hot_column_name",
-    "_path_traversal_guard",
-    "_read_features_csv",
-    "_validate_and_collect",
 ]
 
 _DATASET_NAME = "mimic"

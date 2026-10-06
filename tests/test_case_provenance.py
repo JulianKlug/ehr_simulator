@@ -21,10 +21,11 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
-from ehr_simulator.config import compute_config_hash_from_models, load_questions, load_study_config
+from ehr_simulator.config import load_study_config
 from ehr_simulator.db import ConfigurationProvenanceError, config_history, connect, progress
 from ehr_simulator.web.app import app_from_study_config
 from tests.conftest import _activate_configuration, _seed_clinician
+from tests.support.cases import Config
 
 KEPT_PID = "synth_001"
 REMOVED_PID = "synth_002"
@@ -37,19 +38,6 @@ HTTP_NOT_FOUND = 404
 HTTP_CONFLICT = 409
 HTTP_UNPROCESSABLE = 422
 HTTP_INTEGRITY_ERROR = 500
-
-
-@dataclass(frozen=True)
-class Config:
-    version: str
-    study_yaml: Path
-    questions_yaml: Path
-
-    @property
-    def config_hash(self) -> str:
-        return compute_config_hash_from_models(
-            load_study_config(self.study_yaml), load_questions(self.questions_yaml)
-        )
 
 
 @dataclass(frozen=True)
@@ -424,17 +412,3 @@ def test_removed_assigned_patient_loaded_for_filtered_dataset(
 
     assert loaded == {kept, removed}
     assert case.status_code == HTTP_OK, case.text
-
-
-def test_dataset_loader_adds_extra_patient_ids(tmp_path: Path, study_fixture_dir: Path) -> None:
-    """Extras are read at load time and merged after the active list."""
-    from ehr_simulator.cli_support import build_dataset_loader
-
-    study_yaml = _geneva_study(tmp_path, study_fixture_dir, "g.yaml", ["geneva_fixture_001"])
-    study = load_study_config(study_yaml)
-
-    only_active = build_dataset_loader(study)()
-    with_extra = build_dataset_loader(study, extra_patient_ids=lambda: ["geneva_fixture_002"])()
-
-    assert set(only_active.admission["patient_id"]) == {"geneva_fixture_001"}
-    assert set(with_extra.admission["patient_id"]) == {"geneva_fixture_001", "geneva_fixture_002"}

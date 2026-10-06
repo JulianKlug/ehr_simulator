@@ -321,7 +321,6 @@ def test_serialisation_is_byte_stable_and_independent_of_insertion_order() -> No
 
     expected = '{"explanation":{"base_value":-1.0,"contributions":{}},"probability":0.25}'
     assert _dumps(forward) == _dumps(backward) == expected
-    assert _load()["output_json"].tolist() == _load()["output_json"].tolist()
 
 
 def test_prediction_digest_covers_sidecar_and_predictions(ai_dir: Path) -> None:
