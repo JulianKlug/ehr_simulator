@@ -56,6 +56,18 @@ _ConfigLoader.add_implicit_resolver(
     list("-+0123456789"),
 )
 
+# YAML 1.2 booleans only: ``On``/``Off``/``yes``/``no`` stay strings, so a
+# question option like ``On`` is not silently rewritten to ``Yes``.
+_ConfigLoader.yaml_implicit_resolvers = {
+    first_char: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:bool"]
+    for first_char, resolvers in _ConfigLoader.yaml_implicit_resolvers.items()
+}
+_ConfigLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"),
+)
+
 
 #: Questions schema generations (S11h added "2": branching).
 _QUESTIONS_SCHEMA_VERSIONS = ("1", "2")
@@ -101,7 +113,24 @@ def load_study_config(path: Path) -> StudyConfig:
 
     _check_balance_at_target(study, path)
     _check_intervention_configured(study, path)
+    _check_geneva_ai_alignment_guarded(study, path)
     return study
+
+
+def _check_geneva_ai_alignment_guarded(study: StudyConfig, path: Path) -> None:
+    """S7: the Geneva AI artifact is positional and SHAP alignment is the only
+    check against a reordered sidecar, so a randomised study needs the SHAP
+    directory. YAML only: stored snapshots stay readable.
+    """
+    if study.randomisation is None or study.geneva_ai is None:
+        return
+    if study.geneva_ai.explanations_dir is not None:
+        return
+
+    raise ConfigError(
+        f"{path.name}: a randomisation block requires geneva_ai.explanations_dir "
+        "(SHAP alignment is the only check that the positional sidecar is in order)"
+    )
 
 
 def _check_intervention_configured(study: StudyConfig, path: Path) -> None:

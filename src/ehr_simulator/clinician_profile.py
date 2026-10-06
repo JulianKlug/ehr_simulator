@@ -16,6 +16,7 @@ Characteristics describe the clinician only; nothing here feeds scheduling.
 from __future__ import annotations
 
 import math
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
@@ -41,6 +42,10 @@ SPECIALTY = "primary_specialty"
 FIELDS = (ROLE, YEARS, COUNTRY, SPECIALTY)
 
 
+#: A non-negative decimal, e.g. ``7`` or ``7.5``.
+_YEARS_PATTERN = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+
+
 class ProfessionalRole(StrEnum):
     PHYSICIAN = "physician"
     NURSE = "nurse"
@@ -63,11 +68,12 @@ class ProfileValidationError(ValueError):
 
 
 def _years(raw: str, errors: dict[str, str]) -> float | None:
-    try:
-        years = float(raw)
-    except ValueError:
+    # Plain decimals only: ``float`` alone also takes "7_5", "1e1", "inf".
+    if not _YEARS_PATTERN.fullmatch(raw):
         errors[YEARS] = "Enter a number of years."
         return None
+
+    years = float(raw)
 
     if not math.isfinite(years) or not 0 <= years <= MAX_YEARS_OF_PRACTICE:
         errors[YEARS] = f"Years of practice must be between 0 and {MAX_YEARS_OF_PRACTICE:g}."

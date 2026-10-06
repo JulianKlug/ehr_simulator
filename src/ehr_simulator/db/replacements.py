@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 
-from ehr_simulator.db.case_lifecycle import to_db_timestamp
+from ehr_simulator.db._timestamps import _as_utc, to_db_timestamp
 from ehr_simulator.db.exceptions import CaseActivationError
 
 
@@ -46,18 +46,10 @@ _COLUMNS = (
 )
 
 
-def _as_utc(value: datetime | str | None) -> datetime | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
-
-
 def _row(row: tuple) -> ReplacementPlan:
     return ReplacementPlan(
         *row[:7],
-        generated_at=_as_utc(row[7]),  # type: ignore[arg-type]
+        generated_at=_as_utc(row[7]),
         activated_at=_as_utc(row[8]),
     )
 
@@ -120,12 +112,19 @@ def mark_activated(
     conn: sqlite3.Connection, replacement_id: str, *, now: datetime, commit: bool = True
 ) -> None:
     """Set ``activated_at`` once; a second activation is refused."""
+    joined = conn.in_transaction
     cursor = conn.execute(
         "UPDATE case_replacements SET activated_at = ? "
         "WHERE replacement_id = ? AND activated_at IS NULL",
         (to_db_timestamp(now), replacement_id),
     )
-    if commit:
-        conn.commit()
-    if cursor.rowcount != 1:
-        raise CaseActivationError(f"replacement {replacement_id} is unknown or already activated")
+    if cursor.rowcount == 1:
+        if commit:
+            conn.commit()
+        return
+
+    # A miss never commits the caller's pending writes; it only ends the
+    # empty transaction its own UPDATE opened.
+    if commit and not joined:
+        conn.rollback()
+    raise CaseActivationError(f"replacement {replacement_id} is unknown or already activated")

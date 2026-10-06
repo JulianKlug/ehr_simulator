@@ -82,10 +82,10 @@ CONFLICT_VALUE = "conflict"
 #: ``timepoint.render`` payload key of a guarded render.
 GUARD_PAYLOAD_KEY = "tab_guard"
 
-_CLAIMED = "tab.claimed"
-_RELEASED = "tab.released"
-_CONFLICT = "tab.conflict"
-_EXPIRED = "tab.lease_expired"
+_CLAIMED = telemetry.CLAIMED_KIND
+_RELEASED = telemetry.RELEASED_KIND
+_CONFLICT = telemetry.CONFLICT_KIND
+_EXPIRED = telemetry.LEASE_EXPIRED_KIND
 _LIVE_OTHER_TAB = "live_other_tab"
 _TTL = "ttl"
 
@@ -341,8 +341,13 @@ def move_to_render(
     patient_id: str,
     tab_id: str,
     render_id: str,
+    commit: bool = True,
 ) -> None:
-    """After a guarded advance: the owner's lease follows its new render."""
+    """After a guarded advance: the owner's lease follows its new render.
+
+    ``commit=False`` joins the caller's open transaction (the render row the
+    lease names is written in it), which commits and bumps the counter.
+    """
 
     def decide() -> None:
         lease = tab_leases.fetch(conn, clinician_id, patient_id)
@@ -350,6 +355,10 @@ def move_to_render(
             return
         render = _claimable_render(conn, clinician_id, patient_id, render_id)
         _acquire(conn, now(app_state), render, tab_id)
+
+    if not commit:
+        decide()
+        return
 
     _locked(conn, app_state, decide)
 

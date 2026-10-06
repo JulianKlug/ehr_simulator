@@ -152,7 +152,7 @@ def _render(
         patient_id=patient,
         dataset=_synthetic_dataset(),
     )
-    fig.save(str(out))
+    fig.save(str(out), verbose=False)
     return out
 
 
@@ -356,6 +356,42 @@ def test_no_answers_at_all_still_renders(db, study, questions, live_hash, tmp_pa
     finally:
         out.unlink(missing_ok=True)
     assert "<svg" in svg or svg.startswith("<?xml")
+
+
+def test_reads_share_one_snapshot(
+    db, study, questions, live_hash, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Answers, assignments and timing events come from one BEGIN…ROLLBACK."""
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    seen: list[tuple[str, bool]] = []
+
+    def spy(name: str, real):
+        def read(conn, *args, **kwargs):
+            seen.append((name, conn.in_transaction))
+            return real(conn, *args, **kwargs)
+
+        return read
+
+    monkeypatch.setattr(
+        divergence.answers, "fetch_all", spy("answers", divergence.answers.fetch_all)
+    )
+    monkeypatch.setattr(
+        divergence.arm_assignments,
+        "fetch_all",
+        spy("assignments", divergence.arm_assignments.fetch_all),
+    )
+    monkeypatch.setattr(
+        divergence.timing,
+        "fetch_timing_events",
+        spy("events", divergence.timing.fetch_timing_events),
+    )
+
+    _render(db, study, questions, live_hash=live_hash, out_dir=tmp_path)
+
+    assert seen == [("answers", True), ("assignments", True), ("events", True)]
+    assert not db.in_transaction
 
 
 # ---------------------------------------------------------------------------

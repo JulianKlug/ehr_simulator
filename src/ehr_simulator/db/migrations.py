@@ -518,6 +518,41 @@ BEGIN
 END;
 """
 
+# Integrity hardening: a non-phase2 row is never promoted by UPDATE (only
+# ``activate_planned_assignment`` inserts phase2 rows), and the documented
+# append-only tables refuse every UPDATE and DELETE. No source code mutates
+# them; tests that simulate tampering drop these triggers first.
+# No inline SQL comments: sqlite_master stores the DDL verbatim and the
+# schema-snapshot test compares it byte-for-byte.
+_APPEND_ONLY_TABLES = (
+    "events",
+    "configuration_history",
+    "randomisation_schedules",
+    "randomisation_schedule_items",
+    "study_identity",
+)
+
+_APPEND_ONLY_TRIGGER = """
+CREATE TRIGGER IF NOT EXISTS trg_{table}_no_{op}
+BEFORE {verb} ON {table}
+BEGIN
+    SELECT RAISE(ABORT, '{table} is append-only');
+END;
+"""
+
+_INTEGRITY_HARDENING_DDL = """
+CREATE TRIGGER IF NOT EXISTS trg_arm_phase2_no_promotion
+BEFORE UPDATE ON arm_assignments
+WHEN NEW.arm_source = 'phase2_randomized' AND OLD.arm_source <> 'phase2_randomized'
+BEGIN
+    SELECT RAISE(ABORT, 'phase2_randomized assignments are created by activation only');
+END;
+""" + "".join(
+    _APPEND_ONLY_TRIGGER.format(table=table, op=op, verb=op.upper())
+    for table in _APPEND_ONLY_TABLES
+    for op in ("update", "delete")
+)
+
 MIGRATIONS: tuple[Migration, ...] = (
     Migration(version=1, name="initial", up_sql=_INITIAL_DDL),
     Migration(version=2, name="sessions_open_unique", up_sql=_SESSIONS_OPEN_UNIQUE_DDL),
@@ -561,6 +596,7 @@ MIGRATIONS: tuple[Migration, ...] = (
     ),
     Migration(version=13, name="s11m_case_tab_leases", up_sql=_S11M_TAB_LEASES_DDL),
     Migration(version=14, name="s11p_clinician_profiles", up_sql=_S11P_CLINICIAN_PROFILES_DDL),
+    Migration(version=15, name="integrity_hardening", up_sql=_INTEGRITY_HARDENING_DDL),
 )
 
 
@@ -615,3 +651,23 @@ def apply_migrations(conn: sqlite3.Connection) -> list[int]:
         )
         versions.append(m.version)
     return versions
+
+
+def applied_versions(conn: sqlite3.Connection) -> frozenset[int]:
+    """Versions recorded in ``schema_migrations``; empty before the first migrate."""
+    if not _has_migrations_table(conn):
+        return frozenset()
+
+    return frozenset(row[0] for row in conn.execute("SELECT version FROM schema_migrations"))
+
+
+def schema_version(conn: sqlite3.Connection) -> int | None:
+    """Highest applied migration, or ``None`` when none is recorded."""
+    return max(applied_versions(conn), default=None)
+
+
+def _has_migrations_table(conn: sqlite3.Connection) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
+    ).fetchone()
+    return row is not None

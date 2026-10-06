@@ -129,6 +129,39 @@ def is_phase2_mode(app_state: Any) -> bool:
     return isinstance(study, StudyConfig) and study.randomisation is not None
 
 
+def is_unactivated_phase2_pair(
+    conn: sqlite3.Connection, app_state: Any, *, clinician_id: str, patient_id: str
+) -> bool:
+    """Phase 2 pair with no assignment or practice case: not a case, nothing
+    may be resolved or written (S11d)."""
+    if not is_phase2_mode(app_state):
+        return False
+
+    if practice.fetch(conn, clinician_id, patient_id) is not None:
+        return False
+    return arm_assignments.fetch_for_pair(conn, clinician_id, patient_id) is None
+
+
+def transitional_patient_ids(
+    conn: sqlite3.Connection, app_state: Any, *, clinician_id: str
+) -> list[str]:
+    """S11b transitional index: active-config patients in configured order, then
+    this clinician's already-assigned patients that the active version no
+    longer lists (existing cases stay reachable).
+    """
+    active = list(getattr(app_state, "study_patient_ids", None) or [])
+    if not clinician_id:
+        return active
+
+    seen = set(active)
+    for patient_id in arm_assignments.patient_ids_for_clinician(conn, clinician_id):
+        if patient_id in seen:
+            continue
+        seen.add(patient_id)
+        active.append(patient_id)
+    return active
+
+
 def _legacy_or_raise(app_state: Any) -> tuple[StudyConfig, Questions]:
     study = getattr(app_state, "study", None)
     questions = getattr(app_state, "questions", None)
@@ -294,6 +327,45 @@ def resolve_case_configuration(
     return _active_case_or_raise(conn, app_state)
 
 
+def _pinned_version(
+    conn: sqlite3.Connection, clinician_id: str, patient_id: str
+) -> tuple[str, str] | None:
+    """The ``(config_version, config_hash)`` a pair is pinned to, if any."""
+    practice_case = practice.fetch(conn, clinician_id, patient_id)
+    if practice_case is not None:
+        return practice_case.config_version, practice_case.config_hash
+
+    assignment = arm_assignments.fetch_for_pair(conn, clinician_id, patient_id)
+    if assignment is None or assignment.config_version is None:
+        return None
+    return assignment.config_version, assignment.config_hash
+
+
+def pinned_timepoint_counts(
+    conn: sqlite3.Connection, *, clinician_id: str, patient_ids: Sequence[str]
+) -> dict[str, int]:
+    """Timepoint count of each pair's pinned configuration version (S11b).
+
+    Feeds the index + jumper progress markers, so a v1 case keeps its own
+    frontier after v2 is activated. Unpinned pairs (no case yet, legacy S11a
+    case) are left out: the caller's active count applies. Each version's
+    snapshot is parsed once per call.
+    """
+    by_version: dict[tuple[str, str], int] = {}
+    counts: dict[str, int] = {}
+    for patient_id in patient_ids:
+        pinned = _pinned_version(conn, clinician_id, patient_id)
+        if pinned is None:
+            continue
+
+        if pinned not in by_version:
+            row = config_history.require_known(conn, *pinned)
+            study, _ = case_from_history_row(row)
+            by_version[pinned] = len(study.timepoints_minutes)
+        counts[patient_id] = by_version[pinned]
+    return counts
+
+
 def resolve_intervention(
     conn: sqlite3.Connection,
     dataset: Any,
@@ -400,6 +472,38 @@ def bootstrap_session(
         case = resolve_case_configuration(
             conn, app_state, clinician_id=clinician_id, patient_id=patient_id
         )
+
+    # One transaction (like ``gating.advance``): assignment, session and its
+    # ``session.start`` event commit together or not at all.
+    try:
+        context, is_new_session = _bootstrap_in_transaction(
+            conn,
+            app_state,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            frontier=frontier,
+            case=case,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
+    if is_new_session and app_state is not None:
+        app_state.write_counter = getattr(app_state, "write_counter", 0) + 1
+    return context
+
+
+def _bootstrap_in_transaction(
+    conn: sqlite3.Connection,
+    app_state: Any,
+    *,
+    clinician_id: str,
+    patient_id: str,
+    frontier: Frontier,
+    case: CaseConfiguration,
+) -> tuple[SessionContext, bool]:
+    """:func:`bootstrap_session`'s writes, uncommitted; ``True`` = new session."""
     config_hash = case.config_hash
     config_version = case.config_version
     mode = case.observation_mode
@@ -415,7 +519,12 @@ def bootstrap_session(
         arm = assignment.arm
     else:
         arm, _source = arm_assignments.assign_or_lookup(
-            conn, clinician_id, patient_id, config_hash=config_hash, config_version=config_version
+            conn,
+            clinician_id,
+            patient_id,
+            config_hash=config_hash,
+            config_version=config_version,
+            commit=False,
         )
 
     session_id = sessions.find_open(conn, clinician_id, patient_id)
@@ -443,6 +552,7 @@ def bootstrap_session(
             config_hash=config_hash,
             config_version=config_version,
             observation_mode=mode,
+            commit=False,
         )
 
     prog = progress.fetch(conn, clinician_id=clinician_id, patient_id=patient_id)
@@ -465,10 +575,10 @@ def bootstrap_session(
             timepoint=None,
             kind="session.start",
             payload={"arm": arm},
-            app_state=app_state,
+            commit=False,
         )
 
-    return SessionContext(
+    context = SessionContext(
         session_id=session_id,
         arm=arm,
         config_hash=config_hash,
@@ -476,3 +586,4 @@ def bootstrap_session(
         frontier=frontier,
         observation_mode=mode,
     )
+    return context, is_new_session

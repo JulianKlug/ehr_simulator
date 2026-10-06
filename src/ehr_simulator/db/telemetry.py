@@ -11,13 +11,24 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable
-from dataclasses import dataclass
 from typing import Any
+
+from ehr_simulator.domain_types import (
+    CLAIMED_KIND,
+    CONFLICT_KIND,
+    LEASE_EXPIRED_KIND,
+    RELEASED_KIND,
+    RenderRow,
+    TabAuditRow,
+    TelemetryRow,
+)
 
 __all__ = [
     "BROWSER_KINDS",
     "CLAIMED_KIND",
     "CONFLICT_KIND",
+    "LEASE_EXPIRED_KIND",
+    "RELEASED_KIND",
     "RENDER_KIND",
     "RenderRow",
     "TabAuditRow",
@@ -49,11 +60,7 @@ BROWSER_KINDS = (
     "panel.open",
     "panel.close",
 )
-_BROWSER_KIND_SQL = ", ".join(f"'{k}'" for k in BROWSER_KINDS)
-
-#: S11m: a tab was granted / refused the lease for a render.
-CLAIMED_KIND = "tab.claimed"
-CONFLICT_KIND = "tab.conflict"
+_BROWSER_KIND_PLACEHOLDERS = ", ".join("?" for _ in BROWSER_KINDS)
 
 _RENDER_COLUMNS = (
     "event_id, render_id, session_id, clinician_id, patient_id, timepoint, payload_json"
@@ -64,53 +71,6 @@ _TELEMETRY_COLUMNS = (
     "event_id, render_id, tab_id, kind, client_seq, client_mono_ms, "
     "CAST(client_ts AS TEXT), payload_json"
 )
-
-
-@dataclass(frozen=True)
-class RenderRow:
-    """One server-rendered view. ``payload``: ``t_index``, ``visit_kind``
-    and the S11l ``ai`` delivery value."""
-
-    event_id: int
-    render_id: str
-    session_id: str | None
-    clinician_id: str
-    patient_id: str | None
-    timepoint: float | None
-    payload: dict[str, Any]
-
-    @property
-    def t_index(self) -> int:
-        return int(self.payload["t_index"])
-
-    @property
-    def visit_kind(self) -> str:
-        return str(self.payload["visit_kind"])
-
-
-@dataclass(frozen=True)
-class TelemetryRow:
-    """One browser event bound to a render."""
-
-    event_id: int
-    render_id: str
-    tab_id: str
-    kind: str
-    client_seq: int
-    client_mono_ms: float
-    client_ts: str | None
-    payload: dict[str, Any]
-
-
-@dataclass(frozen=True)
-class TabAuditRow:
-    """One S11m ``tab.*`` audit row: who held (or gave up) a render's lease,
-    in server ``event_id`` order."""
-
-    event_id: int
-    kind: str
-    tab_id: str
-    render_id: str | None
 
 
 def _render(row: tuple[Any, ...]) -> RenderRow:
@@ -158,9 +118,9 @@ def load_telemetry_rows(
     """Every browser event of one clinician × patient, in arrival order."""
     rows = conn.execute(
         f"SELECT {_TELEMETRY_COLUMNS} FROM events "
-        f"WHERE kind IN ({_BROWSER_KIND_SQL}) AND clinician_id = ? AND patient_id = ? "
+        f"WHERE kind IN ({_BROWSER_KIND_PLACEHOLDERS}) AND clinician_id = ? AND patient_id = ? "
         "ORDER BY event_id",
-        (clinician_id, patient_id),
+        (*BROWSER_KINDS, clinician_id, patient_id),
     ).fetchall()
     return [
         TelemetryRow(

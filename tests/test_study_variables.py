@@ -20,6 +20,7 @@ from ehr_simulator.behavioral_timing import TelemetryStatus
 from ehr_simulator.config import load_questions
 from ehr_simulator.config.study import TelemetryConfig
 from ehr_simulator.db.case_lifecycle import CaseState
+from ehr_simulator.db.exceptions import ConfigurationProvenanceError
 from ehr_simulator.db.telemetry import RenderRow
 from ehr_simulator.ingestion import load_synthetic
 from ehr_simulator.study_variables import (
@@ -37,10 +38,15 @@ from ehr_simulator.web.panels import (
     ai_delivery,
     slice_to_timepoint,
 )
-from tests.conftest import answer_all_required, seed_progress
-from tests.test_case_start import Harness, _start, _started_patient, harness  # noqa: F401
-from tests.test_panel_exposure import PanelStream
-from tests.test_telemetry import TELEMETRY, _event, _post, _view
+from tests.conftest import answer_all_required, drop_append_only_triggers, seed_progress
+from tests.support.cases import (
+    Harness,
+    _start,
+    _started_patient,
+    harness,  # noqa: F401
+)
+from tests.support.telemetry import TELEMETRY, _event, _post, _view
+from tests.support.timeline import PanelStream
 
 REPO = Path(__file__).parent.parent
 FUC_QUESTIONS = load_questions(REPO / "configs" / "example_phase2_questions.yaml")
@@ -118,7 +124,7 @@ def _slice(t_minutes: float = 0.0):
 
 
 def test_ai_delivery_values_by_mode(study_fixture_dir: Path) -> None:
-    from tests.test_intervention import _study
+    from tests.support.intervention import _study
 
     study = _study(study_fixture_dir)
     dataset = load_synthetic()
@@ -329,6 +335,37 @@ def test_mixed_compliance_within_one_case() -> None:
     assert summary.ai_exposure_seconds == pytest.approx(5)
     assert summary.ai_episode_count == 2
     assert summary.all_reached_pp_compliant is False
+
+
+def test_case_summary_is_indeterminate_when_an_observation_is() -> None:
+    gapped = PanelStream("r1").enter(0).mount(0, "ai").ratio(0, 0.5, "ai")
+    gapped.gap(0.5)
+    renders = [_render("r1", 0), _render("r2", 1), _render("r3", 2)]
+    streams = [gapped.exit(5), _ai_stream("r2", 3, seq=20), _ai_stream("r3", 3, seq=40)]
+    summary = derive_case_variables(_with_streams(renders, streams)).summary
+
+    assert summary.ai_exposure_seconds is None
+    assert summary.ai_episode_count is None
+    assert summary.all_reached_pp_compliant is None
+
+
+def test_ai_case_without_telemetry_has_unknown_episodes() -> None:
+    """REGRESSION: no telemetry exported a measured-looking zero AI episodes."""
+    renders = tuple(_render(f"r{i + 1}", i) for i in range(len(TIMEPOINTS)))
+    variables = derive_case_variables(_inputs(renders=renders, telemetry=None))
+
+    assert all(o.reached for o in variables.observations)
+    assert {o.ai_episode_count for o in variables.observations} == {None}
+    assert variables.summary.ai_episode_count is None
+
+
+def test_no_ai_case_summary_has_zero_exposure() -> None:
+    renders = tuple(_render(f"r{i + 1}", i, ai="none") for i in range(len(TIMEPOINTS)))
+    summary = derive_case_variables(_inputs(arm=NO_AI, renders=renders)).summary
+
+    assert summary.ai_exposure_seconds == 0
+    assert summary.ai_episode_count == 0
+    assert summary.all_reached_pp_compliant is True
 
 
 def test_unreached_timepoint_has_no_pp() -> None:
@@ -552,6 +589,21 @@ def test_loader_ignores_non_phase2_pairs(telemetry_study: Any) -> None:
         result = load_case_variables(client.app.state.db, study.clinician_id, "synth_001")
 
     assert result is None
+
+
+def test_loader_refuses_case_pinned_to_mismatched_config_hash(telemetry_study: Any) -> None:
+    # A case whose pinned (version, hash) no longer matches history cannot
+    # be interpreted: raised, never silently dropped or read under another config.
+    study, config = telemetry_study
+    with study.boot(config) as client:
+        patient_id = _started_patient(_start(client))
+        db = client.app.state.db
+        drop_append_only_triggers(db)
+        db.execute("UPDATE configuration_history SET config_hash = ?", ("f" * 64,))
+        db.commit()
+
+        with pytest.raises(ConfigurationProvenanceError, match="provenance mismatch"):
+            load_case_variables(db, study.clinician_id, patient_id)
 
 
 def test_forged_mount_cannot_make_no_ai_case_ai(telemetry_study: Any) -> None:

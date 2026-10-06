@@ -50,6 +50,27 @@ def test_scalar_ts_rejects_negative_t_minutes() -> None:
         validate(frame, CanonicalShape.SCALAR_TS, strict=True)
 
 
+@pytest.mark.parametrize(
+    ("column", "bad"),
+    [
+        ("t_minutes", float("inf")),
+        ("value", float("inf")),
+        ("value", float("-inf")),
+    ],
+)
+def test_scalar_ts_rejects_infinite(column: str, bad: float) -> None:
+    frame = _base_scalar_ts()
+    frame.loc[1, column] = bad
+    with pytest.raises(AdapterError):
+        validate(frame, CanonicalShape.SCALAR_TS, strict=True)
+
+
+def test_scalar_ts_value_stays_nullable() -> None:
+    frame = _base_scalar_ts()
+    frame.loc[1, "value"] = None
+    assert len(validate(frame, CanonicalShape.SCALAR_TS, strict=True)) == 2
+
+
 def test_scalar_ts_accepts_arbitrary_source_strings() -> None:
     frame = pd.DataFrame(
         {
@@ -98,6 +119,33 @@ def test_ai_output_requires_valid_json() -> None:
             "t_minutes": [0.0],
             "model_id": ["demo_v0"],
             "output_json": ["{not json"],
+        }
+    )
+    with pytest.raises(AdapterError):
+        validate(frame, CanonicalShape.AI_OUTPUT, strict=True)
+
+
+def test_imaging_rejects_infinite_t_minutes() -> None:
+    frame = pd.DataFrame(
+        {
+            "patient_id": ["p1"],
+            "t_minutes": [float("inf")],
+            "modality": ["CT"],
+            "report_text": ["a"],
+            "image_refs": [None],
+        }
+    )
+    with pytest.raises(AdapterError):
+        validate(frame, CanonicalShape.IMAGING, strict=True)
+
+
+def test_ai_output_rejects_infinite_t_minutes() -> None:
+    frame = pd.DataFrame(
+        {
+            "patient_id": ["p1"],
+            "t_minutes": [float("inf")],
+            "model_id": ["demo_v0"],
+            "output_json": ["{}"],
         }
     )
     with pytest.raises(AdapterError):

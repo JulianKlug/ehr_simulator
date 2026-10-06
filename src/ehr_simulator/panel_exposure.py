@@ -23,22 +23,24 @@ never summed into attention time.
 from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import StrEnum
 
 from ehr_simulator.behavioral_timing import (
     ENTER,
+    EXIT,
     MS_PER_SECOND,
     STATE,
+    TRUSTWORTHY,
     UNMEASURABLE,
     RenderTimeline,
     TelemetryStatus,
     aggregate_status,
-    build_timeline,
+    build_timelines,
     group_observations,
-    rows_by_render,
+    sum_per_tab,
 )
-from ehr_simulator.db.telemetry import RenderRow, TabAuditRow, TelemetryRow
+from ehr_simulator.domain_types import RenderRow, TabAuditRow, TelemetryRow
 
 __all__ = [
     "PANEL_IDS",
@@ -53,12 +55,12 @@ __all__ = [
 #: The instrumented information panels (``section[data-panel]``).
 PANEL_IDS = ("admission", "vitals", "labs", "imaging", "ai")
 
+#: Every panel primitive's kind starts with it.
+PANEL_KIND_PREFIX = "panel."
 MOUNT = "panel.mount"
 VIEWPORT = "panel.viewport"
 OPEN = "panel.open"
 CLOSE = "panel.close"
-
-_TRUSTWORTHY = (TelemetryStatus.COMPLETE, TelemetryStatus.INCOMPLETE)
 
 
 class EndReason(StrEnum):
@@ -111,79 +113,128 @@ class _PanelState:
     ratio: float | None = None
 
 
+def _cut_at_segment_end(open_start: tuple[float, str | None], last: TelemetryRow) -> Episode:
+    """An episode still open when its segment ended: at its exit, else truncated."""
+    reason = EndReason.TRUNCATED
+    if last.kind == EXIT:
+        reason = _EXIT_REASONS.get(str(last.payload["reason"]), reason)
+    return Episode(open_start[0], last.client_mono_ms, open_start[1], last.client_ts, reason)
+
+
+@dataclass
+class _Replay:
+    """Mutable replay state of one render for one panel."""
+
+    panel: _PanelState
+    visible: bool = False
+    focused: bool = False
+    open_count: int = 0
+
+    def qualifying(self, viewport_threshold: float) -> bool:
+        return (
+            self.panel.mounted
+            and self.panel.expanded
+            and self.panel.ratio is not None
+            and self.panel.ratio >= viewport_threshold
+            and self.visible
+            and self.focused
+        )
+
+    def apply(self, row: TelemetryRow, panel_id: str) -> None:
+        """Fold one event into the state; other panels' rows are ignored."""
+        mine = row.payload.get("panel_id") == panel_id
+        if row.kind in (ENTER, STATE):
+            self.visible, self.focused = bool(row.payload["visible"]), bool(row.payload["focused"])
+        elif mine and row.kind == MOUNT:
+            self.panel.mounted, self.panel.expanded = True, bool(row.payload["expanded"])
+        elif mine and row.kind == VIEWPORT:
+            self.panel.ratio = float(row.payload["intersection_ratio"])
+        elif mine and row.kind == OPEN:
+            self.panel.expanded = True
+            self.open_count += 1
+        elif mine and row.kind == CLOSE:
+            self.panel.expanded = False
+
+
+def _end_reason(before: _Replay, after: _Replay) -> EndReason:
+    """Why a qualifying episode stopped: the first condition that dropped."""
+    if before.visible and not after.visible:
+        return EndReason.TAB_HIDDEN
+    if before.focused and not after.focused:
+        return EndReason.FOCUS_LOST
+    if before.panel.expanded and not after.panel.expanded:
+        return EndReason.PANEL_COLLAPSED
+    return EndReason.SCROLL_OUT
+
+
+def _close_at_stream_end(
+    open_start: tuple[float, str | None], timeline: RenderTimeline
+) -> Episode | None:
+    """An episode still open after the last row: ends at the timeline end."""
+    if timeline.end_ms is None:
+        return None
+
+    reason = _EXIT_REASONS.get(timeline.exit_reason or "", EndReason.TRUNCATED)
+    end_ts = timeline.events[-1].client_ts if timeline.events else None
+    return Episode(open_start[0], timeline.end_ms, open_start[1], end_ts, reason)
+
+
+def _time_to_first_view_ms(kept: tuple[Episode, ...], timeline: RenderTimeline) -> float | None:
+    """First episode start relative to the render start (needs an enter)."""
+    has_enter = any(r.kind == ENTER for r in timeline.events)
+    if not kept or not has_enter or timeline.start_ms is None:
+        return None
+    return kept[0].start_ms - timeline.start_ms
+
+
 def render_panel_exposure(
     timeline: RenderTimeline, panel_id: str, *, viewport_threshold: float
 ) -> RenderPanelExposure:
     """Replay one render's events and cut ``panel_id``'s episodes."""
-    panel = _PanelState()
-    visible = focused = False
+    state = _Replay(panel=_PanelState())
     episodes: list[Episode] = []
     open_start: tuple[float, str | None] | None = None
-    open_count = 0
 
-    def qualifying() -> bool:
-        return (
-            panel.mounted
-            and panel.expanded
-            and panel.ratio is not None
-            and panel.ratio >= viewport_threshold
-            and visible
-            and focused
-        )
-
+    # S11m: a restarted segment (second enter) re-reports everything; the
+    # unobserved time before it ends any open episode at the previous row.
+    restarts = {start for start, _ in timeline.segments[1:]}
+    previous: TelemetryRow | None = None
     for row in timeline.events:
-        mine = row.payload.get("panel_id") == panel_id
-        before = qualifying()
-        was_visible, was_focused, was_expanded = visible, focused, panel.expanded
-        if row.kind in (ENTER, STATE):
-            visible, focused = bool(row.payload["visible"]), bool(row.payload["focused"])
-        elif mine and row.kind == MOUNT:
-            panel.mounted, panel.expanded = True, bool(row.payload["expanded"])
-        elif mine and row.kind == VIEWPORT:
-            panel.ratio = float(row.payload["intersection_ratio"])
-        elif mine and row.kind == OPEN:
-            panel.expanded = True
-            open_count += 1
-        elif mine and row.kind == CLOSE:
-            panel.expanded = False
-        after = qualifying()
+        if row.kind == ENTER and row.client_mono_ms in restarts and previous is not None:
+            if open_start is not None:
+                episodes.append(_cut_at_segment_end(open_start, previous))
+                open_start = None
+            state.panel = _PanelState()
+        previous = row
 
-        if not before and after:
+        before = replace(state, panel=replace(state.panel))
+        was_qualifying = before.qualifying(viewport_threshold)
+        state.apply(row, panel_id)
+        is_qualifying = state.qualifying(viewport_threshold)
+
+        if not was_qualifying and is_qualifying:
             open_start = (row.client_mono_ms, row.client_ts)
-        elif before and not after and open_start is not None:
-            if was_visible and not visible:
-                reason = EndReason.TAB_HIDDEN
-            elif was_focused and not focused:
-                reason = EndReason.FOCUS_LOST
-            elif was_expanded and not panel.expanded:
-                reason = EndReason.PANEL_COLLAPSED
-            else:
-                reason = EndReason.SCROLL_OUT
+        elif was_qualifying and not is_qualifying and open_start is not None:
+            reason = _end_reason(before, state)
             episodes.append(
                 Episode(open_start[0], row.client_mono_ms, open_start[1], row.client_ts, reason)
             )
             open_start = None
 
-    if open_start is not None and timeline.end_ms is not None:
-        reason = _EXIT_REASONS.get(timeline.exit_reason or "", EndReason.TRUNCATED)
-        end_ts = timeline.events[-1].client_ts if timeline.events else None
-        episodes.append(Episode(open_start[0], timeline.end_ms, open_start[1], end_ts, reason))
+    if open_start is not None:
+        last = _close_at_stream_end(open_start, timeline)
+        if last is not None:
+            episodes.append(last)
 
     kept = tuple(e for e in episodes if e.duration_ms > 0)
-    has_enter = any(r.kind == ENTER for r in timeline.events)
-    first_view = (
-        kept[0].start_ms - timeline.start_ms
-        if kept and has_enter and timeline.start_ms is not None
-        else None
-    )
     return RenderPanelExposure(
         render_id=timeline.render.render_id,
         panel_id=panel_id,
         status=timeline.status,
-        mounted=panel.mounted,
+        mounted=state.panel.mounted,
         episodes=kept,
-        open_count=open_count,
-        time_to_first_view_ms=first_view,
+        open_count=state.open_count,
+        time_to_first_view_ms=_time_to_first_view_ms(kept, timeline),
     )
 
 
@@ -194,7 +245,8 @@ class PanelSummary:
     ``qualifying_seconds`` is a measured lower bound (``None`` when nothing
     trustworthy exists: a gapped stream is not a lower bound). ``viewed``:
     ``True`` once the bound reaches the threshold, ``False`` only on
-    complete telemetry, else ``None``.
+    complete telemetry, else ``None``. ``episode_count`` and
+    ``time_to_first_view_seconds`` are ``None`` with the seconds.
     """
 
     t_index: int
@@ -204,7 +256,7 @@ class PanelSummary:
     mounted: bool
     qualifying_seconds: float | None
     viewed: bool | None
-    episode_count: int
+    episode_count: int | None
     panel_open_count: int
     time_to_first_view_seconds: float | None
     first_view_client_ts: str | None
@@ -214,7 +266,7 @@ class PanelSummary:
 
 
 def _viewed(status: TelemetryStatus, qualifying_ms: float, threshold_seconds: float) -> bool | None:
-    if status not in _TRUSTWORTHY:
+    if status not in TRUSTWORTHY:
         return None
     if qualifying_ms >= threshold_seconds * MS_PER_SECOND:
         return True
@@ -228,25 +280,30 @@ def derive_panel_summaries(
     viewport_threshold: float,
     viewed_threshold_seconds: float,
     tab_audit: Sequence[TabAuditRow] = (),
+    timelines: Mapping[str, RenderTimeline] | None = None,
 ) -> dict[tuple[int, str, str], PanelSummary]:
     """Every panel summary of one clinician × patient, keyed by
-    ``(t_index, visit_kind, panel_id)``. Revisits never extend primaries."""
-    by_render = rows_by_render(rows)
+    ``(t_index, visit_kind, panel_id)``. Revisits never extend primaries.
+    ``timelines``: prebuilt from the same renders and rows (``build_timelines``)."""
+    renders = list(renders)
+    if timelines is None:
+        timelines = build_timelines(renders, rows)
+
     out: dict[tuple[int, str, str], PanelSummary] = {}
     for (t_index, visit_kind), group in group_observations(renders).items():
-        timelines = [build_timeline(r, by_render.get(r.render_id, [])) for r in group]
-        status = aggregate_status(timelines, tab_audit)
+        group_timelines = [timelines[r.render_id] for r in group]
+        status = aggregate_status(group_timelines, tab_audit)
         for panel_id in PANEL_IDS:
             exposures = [
                 render_panel_exposure(t, panel_id, viewport_threshold=viewport_threshold)
-                for t in timelines
+                for t in group_timelines
             ]
             out[(t_index, visit_kind, panel_id)] = _summarise(
                 t_index,
                 visit_kind,
                 panel_id,
                 status,
-                timelines,
+                group_timelines,
                 exposures,
                 viewed_threshold_seconds,
             )
@@ -262,19 +319,24 @@ def _summarise(
     exposures: list[RenderPanelExposure],
     viewed_threshold_seconds: float,
 ) -> PanelSummary:
-    per_tab: dict[str, float | None] = {}
-    for timeline, exposure in zip(timelines, exposures, strict=True):
-        for tab in timeline.tab_ids:
-            so_far = per_tab.get(tab, 0.0)
-            if so_far is None or timeline.status in UNMEASURABLE:
-                per_tab[tab] = None  # no partial sum from an unmeasurable render
-                continue
-            per_tab[tab] = so_far + exposure.qualifying_ms / MS_PER_SECOND
+    per_tab = sum_per_tab(
+        (
+            timeline,
+            None if timeline.status in UNMEASURABLE else exposure.qualifying_ms / MS_PER_SECOND,
+        )
+        for timeline, exposure in zip(timelines, exposures, strict=True)
+    )
 
     episodes = [e for x in exposures for e in x.episodes]
     total_ms = sum(x.qualifying_ms for x in exposures)
-    trustworthy = status in _TRUSTWORTHY
+    trustworthy = status in TRUSTWORTHY
     first = exposures[0] if exposures else None
+    # S11k: like the seconds, counts and first view exist only on a lower bound.
+    first_view_s = (
+        first.time_to_first_view_ms / MS_PER_SECOND
+        if trustworthy and first is not None and first.time_to_first_view_ms is not None
+        else None
+    )
     return PanelSummary(
         t_index=t_index,
         visit_kind=visit_kind,
@@ -283,13 +345,9 @@ def _summarise(
         mounted=any(x.mounted for x in exposures),
         qualifying_seconds=total_ms / MS_PER_SECOND if trustworthy else None,
         viewed=_viewed(status, total_ms, viewed_threshold_seconds),
-        episode_count=len(episodes),
+        episode_count=len(episodes) if trustworthy else None,
         panel_open_count=sum(x.open_count for x in exposures),
-        time_to_first_view_seconds=(
-            first.time_to_first_view_ms / MS_PER_SECOND
-            if first is not None and first.time_to_first_view_ms is not None
-            else None
-        ),
+        time_to_first_view_seconds=first_view_s,
         first_view_client_ts=episodes[0].start_client_ts if episodes else None,
         last_view_client_ts=episodes[-1].end_client_ts if episodes else None,
         render_ids=tuple(x.render_id for x in exposures),

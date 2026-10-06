@@ -634,6 +634,9 @@ class StudyConfig(BaseModel):
     def _timepoints_sorted_unique_nonnegative(cls, v: list[float]) -> list[float]:
         if not v:
             raise ValueError("timepoints must be non-empty")
+        # NaN/inf would reveal all data and serialize as null (no round trip).
+        if not all(math.isfinite(t) for t in v):
+            raise ValueError("timepoints must all be finite")
         if any(t < 0 for t in v):
             raise ValueError("timepoints must all be >= 0")
         if len(set(v)) != len(v):
@@ -656,6 +659,19 @@ class StudyConfig(BaseModel):
     def _geneva_ai_dataset(self) -> StudyConfig:
         if self.geneva_ai is not None and self.dataset != "geneva":
             raise ValueError(f"geneva_ai requires dataset 'geneva'; got {self.dataset!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _geneva_ai_model_matches_intervention(self) -> StudyConfig:
+        """S7: the loaded rows carry ``geneva_ai.model_id``; an AI case shows
+        ``ai_intervention.model_id`` rows only, so a mismatch shows nothing."""
+        if self.geneva_ai is None or self.ai_intervention is None:
+            return self
+        if self.geneva_ai.model_id != self.ai_intervention.model_id:
+            raise ValueError(
+                f"geneva_ai.model_id {self.geneva_ai.model_id!r} must equal "
+                f"ai_intervention.model_id {self.ai_intervention.model_id!r}"
+            )
         return self
 
     @model_validator(mode="after")

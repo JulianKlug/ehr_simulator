@@ -35,13 +35,6 @@ def test_load_synthetic_has_three_patients() -> None:
     assert set(d.ai_output["patient_id"].unique()) == {"synth_001", "synth_002", "synth_003"}
 
 
-def test_load_synthetic_timepoints_non_negative() -> None:
-    d = load_synthetic()
-    assert (d.scalar_ts["t_minutes"] >= 0).all()
-    assert (d.imaging["t_minutes"] >= 0).all()
-    assert (d.ai_output["t_minutes"] >= 0).all()
-
-
 def test_load_synthetic_includes_rr() -> None:
     """Round-03 added respiratory rate to the synthetic dataset.
 

@@ -577,46 +577,63 @@ def reset_progress(
         raise ResetError(
             f"--to-t-index {to_t_index} outside the study (valid: 0…{len(timepoints) - 1})"
         )
-    clinician_id = clinicians.lookup(conn, clinician_name)
-    if clinician_id is None:
-        raise ResetError(f"unknown clinician {clinician_name!r}")
-    row = progress.fetch(conn, clinician_id=clinician_id, patient_id=patient_id)
-    if row is None:
-        raise ResetError(f"{clinician_name!r} has not started patient {patient_id!r}")
-    if to_t_index > row.unlocked_t_index:
-        raise ResetError(
-            f"--to-t-index {to_t_index} is ahead of the current frontier "
-            f"{row.unlocked_t_index}; reset only rewinds"
-        )
-    # S11e: completed and incomplete Phase 2 cases are terminal.
-    lifecycle = case_lifecycle.fetch(conn, clinician_id, patient_id)
-    if lifecycle is not None and not lifecycle.is_open:
-        raise ResetError(f"case {patient_id!r} is {lifecycle.state}; a closed case cannot be reset")
 
-    # Delete first, rewind second: a failure between the two leaves the walk
-    # intact for a retry instead of a rewound frontier over orphaned answers
-    # that would pre-fill the re-walk as already complete.
-    deleted = answers.delete_after(
-        conn,
-        clinician_id=clinician_id,
-        patient_id=patient_id,
-        min_timepoint_exclusive=timepoints[to_t_index],
-    )
-    progress.reset(conn, clinician_id=clinician_id, patient_id=patient_id, to_t_index=to_t_index)
-    events.append(
-        conn,
-        session_id=None,
-        clinician_id=clinician_id,
-        patient_id=patient_id,
-        timepoint=timepoints[to_t_index],
-        kind="progress.reset",
-        payload={
-            "from_t_index": row.unlocked_t_index,
-            "to_t_index": to_t_index,
-            "was_completed": row.completed_at is not None,
-            "deleted_answers": deleted,
-        },
-    )
+    # One transaction: checks, answer deletion, rewind and the audit event
+    # land together or not at all.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        clinician_id = clinicians.lookup(conn, clinician_name)
+        if clinician_id is None:
+            raise ResetError(f"unknown clinician {clinician_name!r}")
+        row = progress.fetch(conn, clinician_id=clinician_id, patient_id=patient_id)
+        if row is None:
+            raise ResetError(f"{clinician_name!r} has not started patient {patient_id!r}")
+        if to_t_index > row.unlocked_t_index:
+            raise ResetError(
+                f"--to-t-index {to_t_index} is ahead of the current frontier "
+                f"{row.unlocked_t_index}; reset only rewinds"
+            )
+        # S11e: completed and incomplete Phase 2 cases are terminal.
+        lifecycle = case_lifecycle.fetch(conn, clinician_id, patient_id)
+        if lifecycle is not None and not lifecycle.is_open:
+            raise ResetError(
+                f"case {patient_id!r} is {lifecycle.state}; a closed case cannot be reset"
+            )
+
+        deleted = answers.delete_after(
+            conn,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            min_timepoint_exclusive=timepoints[to_t_index],
+            commit=False,
+        )
+        progress.reset(
+            conn,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            to_t_index=to_t_index,
+            commit=False,
+        )
+        events.append(
+            conn,
+            session_id=None,
+            clinician_id=clinician_id,
+            patient_id=patient_id,
+            timepoint=timepoints[to_t_index],
+            kind="progress.reset",
+            payload={
+                "from_t_index": row.unlocked_t_index,
+                "to_t_index": to_t_index,
+                "was_completed": row.completed_at is not None,
+                "deleted_answers": deleted,
+            },
+            commit=False,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+
     return ResetReport(
         clinician_id=clinician_id,
         previous_unlocked_t_index=row.unlocked_t_index,
@@ -799,28 +816,15 @@ def assert_schema_current(conn: Any) -> None:
     ``ehr-simulator migrate``'s job, run with the server stopped.
     """
     from ehr_simulator.db import MIGRATIONS
+    from ehr_simulator.db.migrations import applied_versions
 
-    applied = {
-        row[0]
-        for row in conn.execute(
-            "SELECT version FROM schema_migrations"
-            if _has_migrations_table(conn)
-            else "SELECT 0 WHERE 0"
-        )
-    }
+    applied = applied_versions(conn)
     pending = [m.version for m in MIGRATIONS if m.version not in applied]
     if pending:
         raise OperatorError(
             f"database schema is behind (pending migrations {pending}); "
             "stop the server and run `ehr-simulator migrate` first"
         )
-
-
-def _has_migrations_table(conn: Any) -> bool:
-    row = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'"
-    ).fetchone()
-    return row is not None
 
 
 # ---------------------------------------------------------------------------
@@ -862,12 +866,11 @@ def activate_for_cli(
     (bind-or-verify the study identity, metadata validation, dataset
     invariant, S11a backfill probe, snapshot storage, active pointer —
     one atomic commit, so a failed activation leaves a fresh database
-    unbound). A legacy S11a database (unbound, already walked) is refused
-    — the explicit ``study_identity.adopt`` escape hatch is the only way
-    to claim it.
+    unbound). A legacy S11a database (unbound, already walked) is refused;
+    no adoption path exists.
 
     Raises:
-        StudyIdentityError: identity mismatch or refused adoption.
+        StudyIdentityError: identity mismatch or unbound walked database.
         ConfigurationActivationError: metadata/dataset/collision refusal.
         OperatorError: the transaction could not be applied atomically.
     """

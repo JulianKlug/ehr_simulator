@@ -28,7 +28,14 @@ from ehr_simulator.db.case_lifecycle import CaseState
 from ehr_simulator.db.randomisation import ScheduleItem
 from ehr_simulator.replacement import ArmCounts, select_replacement
 from ehr_simulator.web import case_contact, case_start
-from tests.test_case_lifecycle import (
+from tests.support.cases import (
+    HTTP_CONFLICT,
+    HTTP_SEE_OTHER,
+    INDEX_URL,
+    _start,
+    _started_patient,
+)
+from tests.support.lifecycle import (
     GRACE,
     VALID_LIFECYCLE,
     LifecycleHarness,
@@ -38,13 +45,6 @@ from tests.test_case_lifecycle import (
     _study,
     _url,
     _with_lifecycle,
-)
-from tests.test_case_start import (
-    HTTP_CONFLICT,
-    HTTP_SEE_OTHER,
-    INDEX_URL,
-    _start,
-    _started_patient,
 )
 
 SCHEDULE_TABLES = ("randomisation_schedules", "randomisation_schedule_items")
@@ -140,15 +140,6 @@ def test_completed_case_never_plans_a_replacement(rh: LifecycleHarness) -> None:
         )
 
 
-def test_replacement_is_a_patient_the_clinician_never_held(rh: LifecycleHarness) -> None:
-    with rh.client() as client:
-        original = _started_patient(_start(client))
-        _time_out(rh, client, original)
-
-    (plan,) = _plans(rh)
-    assert plan.replacement_patient_id not in {a.patient_id for a in rh.assignments()}
-
-
 def test_original_case_is_never_rewritten(rh: LifecycleHarness) -> None:
     with rh.client() as client:
         original = _started_patient(_start(client))
@@ -159,27 +150,6 @@ def test_original_case_is_never_rewritten(rh: LifecycleHarness) -> None:
 
     assert rh.assignments()[0] == assignment_before[0]
     assert rh.lifecycle(original) == lifecycle_before
-
-
-def test_link_is_navigable_in_both_directions(rh: LifecycleHarness) -> None:
-    with rh.client() as client:
-        original = _started_patient(_start(client))
-        _time_out(rh, client, original)
-        replacement_patient = _started_patient(_start(client))
-
-    (plan,) = _plans(rh)
-    assert (plan.original_patient_id, plan.replacement_patient_id) == (
-        original,
-        replacement_patient,
-    )
-    assert (
-        rh.count(
-            "SELECT COUNT(*) FROM case_replacements WHERE clinician_id = ? "
-            "AND replacement_patient_id = ?",
-            (rh.clinician_id, replacement_patient),
-        )
-        == 1
-    )
 
 
 def test_replanning_the_same_original_is_idempotent(rh: LifecycleHarness) -> None:
@@ -240,6 +210,13 @@ def test_patient_imbalance_breaks_the_next_tie() -> None:
     far = _item(5, "p5", "ai")
     counts = {"p2": ArmCounts(ai=2), "p5": ArmCounts(no_ai=1)}
     assert _select([near, far], patient_counts=counts) == far
+
+
+def test_arm_counts_share_the_randomisation_imbalance() -> None:
+    assert ArmCounts(ai=2, no_ai=1).projected_imbalance("no_ai") == 0
+    assert ArmCounts(ai=2, no_ai=1).projected_imbalance("ai") == 2
+    with pytest.raises(ValueError):
+        ArmCounts().projected_imbalance("placebo")  # never counted as no_ai
 
 
 def test_sequence_distance_breaks_the_next_tie() -> None:

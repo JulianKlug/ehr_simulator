@@ -32,7 +32,8 @@ Public API::
 Derivation rules (spec §4):
 
 1. group by clinician, patient, and timepoint;
-2. sort by ``server_ts``, then deterministic event id/order;
+2. sort by event id (arrival order), so a server clock step back surfaces
+   as rule 9 instead of silently reordering the pair;
 3. ``started_at`` is the earliest ``timepoint.enter``;
 4. ``ended_at`` is the earliest ``timepoint.exit`` at or after that enter;
 5. later enters/exits do not replace the first completed interval;
@@ -40,7 +41,7 @@ Derivation rules (spec §4):
 7. if enter exists but no exit after it, start is set and end/elapsed blank;
 8. an exit preceding every enter is ignored;
 9. if the selected end timestamp is earlier than the start, raise
-   :class:`TimingError` (defensive — real emissions happen in order);
+   :class:`TimingError` (a server clock stepped back);
 10. never infer missing timestamps from answer ``ts_recorded``, progress,
     or session timestamps.
 
@@ -205,7 +206,7 @@ def derive_timepoint_timings(
 
     out: dict[float, TimepointTiming] = {}
     for tp, group in by_tp.items():
-        ordered = sorted(group, key=lambda e: (e.server_ts, e.event_id))
+        ordered = sorted(group, key=lambda e: e.event_id)
         out[tp] = _pair(ordered, clinician_id=clinician_id, patient_id=patient_id, timepoint=tp)
     return out
 

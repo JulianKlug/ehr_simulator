@@ -117,7 +117,7 @@ def normalize_client_seq(raw: str | None) -> int | None:
     """Per-tab counter from the browser → int within SQLite's INTEGER range, or NULL."""
     if not raw:
         return None
-    if not _INT_RE.match(raw):
+    if not _INT_RE.fullmatch(raw):
         get_logger().warning(
             "client_seq unparseable", event_kind="answer.client_seq.invalid", raw=raw
         )

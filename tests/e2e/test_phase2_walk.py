@@ -114,7 +114,16 @@ def test_ai_and_no_ai_cases_walk_and_export(
     out = tmp_path / "bundle"
     result = CliRunner().invoke(
         cli.app_typer,
-        ["export-phase2", str(EXAMPLE_STUDY), "--db-path", str(phase2_db), "--out-dir", str(out)],
+        [
+            "export-phase2",
+            str(EXAMPLE_STUDY),
+            "--db-path",
+            str(phase2_db),
+            "--out-dir",
+            str(out),
+            "--pseudonym-secret",
+            str(tmp_path / "pseudonym.secret"),
+        ],
     )
     assert result.exit_code == 0, result.output
     with (out / "timepoints.csv").open(newline="") as fh:

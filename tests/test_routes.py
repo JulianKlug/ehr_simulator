@@ -28,20 +28,12 @@ def _pre_seed_clinician(tmp_db_path: Path) -> str:
     up. Returns the canonical id; callers pass it to
     ``client.cookies.set("ehrsim_clinician_id", ...)``.
     """
-    import hashlib
+    from ehr_simulator.db import apply_migrations, clinicians, connect
 
-    from ehr_simulator.db import apply_migrations, connect
-
-    name_normalized = " ".join("Dr. Test".casefold().split())
-    clinician_id = hashlib.sha256(name_normalized.encode("utf-8")).hexdigest()[:16]
     tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(tmp_db_path)
     apply_migrations(conn)
-    conn.execute(
-        "INSERT OR IGNORE INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
-        (clinician_id, name_normalized),
-    )
-    conn.commit()
+    clinician_id = clinicians.lookup_or_create(conn, "Dr. Test")
     conn.close()
     return clinician_id
 
@@ -167,6 +159,14 @@ def test_route_unknown_patient_returns_404(client: TestClient) -> None:
     assert "'unknown' not found" in r.text
 
 
+def test_route_error_flash_escapes_patient_id(client: TestClient) -> None:
+    """A URL patient id is echoed in the error flash: it must render as text."""
+    r = client.get("/patient/%3Cimg%20src%3Dx%20onerror%3Dalert(1)%3E/timepoint/0")
+    assert r.status_code == 404
+    assert "<img" not in r.text
+    assert "&lt;img src=x onerror=alert(1)&gt;" in r.text
+
+
 def test_route_invalid_chrome_returns_422(client: TestClient) -> None:
     r = client.get("/patient/synth_001/timepoint/0?chrome=garbage")
     assert r.status_code == 422
@@ -239,7 +239,7 @@ def broken_render_client(
     """Force the chart renderer to raise so we can verify per-panel containment."""
     from ehr_simulator.ingestion.synthetic import load_synthetic
     from ehr_simulator.web import charts as charts_module
-    from ehr_simulator.web import routes as routes_module
+    from ehr_simulator.web import panel_render as panel_render_module
 
     def boom(*_args, **_kwargs):
         raise RuntimeError("boom")
@@ -248,7 +248,7 @@ def broken_render_client(
         raise RuntimeError("boom")
 
     monkeypatch.setattr(charts_module, "render_timeline_svg", boom)
-    monkeypatch.setattr(routes_module, "_render_vitals", vitals_boom)
+    monkeypatch.setattr(panel_render_module, "_render_vitals", vitals_boom)
 
     clinician_id = _pre_seed_clinician(tmp_db_path)
     dataset = load_synthetic()
@@ -371,6 +371,18 @@ def test_vitals_panel_partial_dbp_renders_panel_note(
     assert note is not None, "expected per-panel BP partial note"
     assert "DBP" in note.get_text()
     assert "missing" in note.get_text().lower()
+
+
+def test_renderer_exception_detail_is_not_shown_to_clinicians(
+    broken_render_client: TestClient,
+) -> None:
+    r = broken_render_client.get("/patient/synth_001/timepoint/0")
+    assert r.status_code == 200
+    soup = BeautifulSoup(r.text, "html.parser")
+    vitals = soup.select_one("section[data-panel='vitals']")
+    assert vitals is not None
+    assert "RuntimeError" not in vitals.get_text()
+    assert "boom" not in vitals.get_text()
 
 
 def test_renderer_exception_contains_to_single_panel(broken_render_client: TestClient) -> None:

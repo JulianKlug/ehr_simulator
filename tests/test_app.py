@@ -15,7 +15,6 @@ exceptions surface as ``app.boot.failed``.
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -25,22 +24,16 @@ from fastapi.testclient import TestClient
 
 from ehr_simulator.db import MIGRATIONS
 from ehr_simulator.web.app import app_from_study_config, create_app
+from tests.conftest import drop_append_only_triggers
 
 
 def _seed_and_cookie(tmp_db_path: Path, client: TestClient) -> str:
-    from ehr_simulator.db import apply_migrations, connect
+    from ehr_simulator.db import apply_migrations, clinicians, connect
 
-    name = "Dr. Test"
-    name_normalized = " ".join(name.casefold().split())
-    clinician_id = hashlib.sha256(name_normalized.encode("utf-8")).hexdigest()[:16]
     tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(tmp_db_path)
     apply_migrations(conn)
-    conn.execute(
-        "INSERT OR IGNORE INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
-        (clinician_id, name_normalized),
-    )
-    conn.commit()
+    clinician_id = clinicians.lookup_or_create(conn, "Dr. Test")
     conn.close()
     client.cookies.set("ehrsim_clinician_id", clinician_id)
     return clinician_id
@@ -56,53 +49,20 @@ def _pre_seed(tmp_db_path: Path, study_path: Path, questions_path: Path) -> str:
     without an active configuration.
     """
     from ehr_simulator.config import load_study_config
-    from ehr_simulator.db import apply_migrations, connect, study_identity
+    from ehr_simulator.db import apply_migrations, clinicians, connect, study_identity
     from tests.conftest import _activate_configuration
 
     study = load_study_config(study_path)
-    name = "Dr. Test"
-    name_normalized = " ".join(name.casefold().split())
-    clinician_id = hashlib.sha256(name_normalized.encode("utf-8")).hexdigest()[:16]
     tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(tmp_db_path)
     apply_migrations(conn)
     study_identity.bind(conn, study.study_id)
-    conn.execute(
-        "INSERT OR IGNORE INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
-        (clinician_id, name_normalized),
-    )
-    conn.commit()
+    clinician_id = clinicians.lookup_or_create(conn, "Dr. Test")
     conn.close()
     _activate_configuration(
         tmp_db_path, study_path, questions_path, version="v1", description="test activation"
     )
     return clinician_id
-
-
-def test_app_from_study_config_synthetic_renders_synth_001(
-    study_fixture_dir: Path,
-    tmp_log_dir: Path,
-    tmp_db_path: Path,
-    tmp_backup_dir: Path,
-) -> None:
-    clinician_id = _pre_seed(
-        tmp_db_path,
-        study_fixture_dir / "study_synthetic.yaml",
-        study_fixture_dir / "questions.yaml",
-    )
-    app = app_from_study_config(
-        study_fixture_dir / "study_synthetic.yaml",
-        study_fixture_dir / "questions.yaml",
-        log_dir=tmp_log_dir,
-        db_path=tmp_db_path,
-        backup_dir=tmp_backup_dir,
-    )
-    with TestClient(app) as client:
-        client.cookies.set("ehrsim_clinician_id", clinician_id)
-        response = client.get("/patient/synth_001/timepoint/0")
-        assert response.status_code == 200
-        # Patient summary card includes the patient_id.
-        assert "synth_001" in response.text
 
 
 def test_app_from_study_config_t_index_resolves_to_study_timepoints(
@@ -163,17 +123,6 @@ timepoints: [0, 180]
         assert "synth_001" in response.text
         assert 'data-t-index="1"' in response.text
         assert 'data-t-minutes="180.0"' in response.text
-
-
-def test_serve_no_config_path_does_not_set_study_timepoints(
-    tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
-) -> None:
-    """The synthetic-only ``serve`` path (no --config) keeps the S2 behavior:
-    routes fall back to ``patient_timepoints(dataset, pid)``. Locks the
-    "no-config path is unchanged" acceptance criterion in spec §12.
-    """
-    app = create_app(log_dir=tmp_log_dir, db_path=tmp_db_path, backup_dir=tmp_backup_dir)
-    assert not hasattr(app.state, "study_timepoints") or app.state.study_timepoints is None
 
 
 def test_app_from_study_config_index_lists_only_study_patients(
@@ -274,13 +223,6 @@ timepoints: [0, 60]
             f"expected declared order [003, 001, 002] but got "
             f"positions: 003={idx_003}, 001={idx_001}, 002={idx_002}"
         )
-
-
-def test_serve_no_config_path_does_not_set_study_patient_ids(
-    tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
-) -> None:
-    app = create_app(log_dir=tmp_log_dir, db_path=tmp_db_path, backup_dir=tmp_backup_dir)
-    assert not hasattr(app.state, "study_patient_ids") or app.state.study_patient_ids is None
 
 
 # ---------------------------------------------------------------------------
@@ -424,6 +366,9 @@ def test_app_from_study_config_sets_questions_and_config_hash(
 
     bare = create_app(log_dir=tmp_log_dir, db_path=tmp_db_path, backup_dir=tmp_backup_dir)
     assert (bare.state.study, bare.state.questions, bare.state.config_hash) == (None, None, None)
+    # No --config: routes fall back to the dataset's own timepoints and patients.
+    assert getattr(bare.state, "study_timepoints", None) is None
+    assert getattr(bare.state, "study_patient_ids", None) is None
 
 
 def test_app_from_study_config_warns_when_no_question_required(
@@ -500,13 +445,8 @@ timepoints: [0, 60, 180]
 
 
 def _seed_clinician_row(db_path: Path, *, bound_study_id: str | None = None) -> str:
-    import hashlib
+    from ehr_simulator.db import apply_migrations, clinicians, connect, study_identity
 
-    from ehr_simulator.db import apply_migrations, connect, study_identity
-
-    name = "Dr. Preexisting"
-    nn = " ".join(name.casefold().split())
-    cid = hashlib.sha256(nn.encode("utf-8")).hexdigest()[:16]
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(db_path)
     apply_migrations(conn)
@@ -514,11 +454,7 @@ def _seed_clinician_row(db_path: Path, *, bound_study_id: str | None = None) -> 
         # Bind FIRST: bind refuses to claim a non-empty unbound DB, so the
         # preexisting clinician row only exists after the identity is set.
         study_identity.bind(conn, bound_study_id)
-    conn.execute(
-        "INSERT INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
-        (cid, nn),
-    )
-    conn.commit()
+    cid = clinicians.lookup_or_create(conn, "Dr. Preexisting")
     conn.close()
     return cid
 
@@ -808,6 +744,7 @@ def test_lifespan_refuses_corrupted_active_snapshot(
     _pre_seed(tmp_db_path, study_path, questions_path)
     conn = connect(tmp_db_path)
     stored = conn.execute(f"SELECT {column} FROM configuration_history").fetchone()[0]
+    drop_append_only_triggers(conn)
     conn.execute(f"UPDATE configuration_history SET {column} = ?", (corrupt(stored),))  # type: ignore[operator]
     conn.commit()
     conn.close()

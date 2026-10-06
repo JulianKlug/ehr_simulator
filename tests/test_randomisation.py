@@ -570,6 +570,23 @@ class TestPersistence:
         assert reinserted == first
         assert _dump(activated) == before
 
+    def test_identical_reinsert_leaves_caller_transaction_open(
+        self, activated: sqlite3.Connection, study: StudyConfig, config_hash: str
+    ) -> None:
+        first = _create(activated, study, config_hash)
+        activated.execute(
+            "INSERT INTO clinicians (clinician_id, name_normalized) VALUES ('pending', 'p')"
+        )
+
+        schedules_dao.insert_schedule(activated, first.schedule)
+
+        # The caller's pending write is neither rolled back nor committed.
+        assert activated.in_transaction
+        pending = "SELECT COUNT(*) FROM clinicians WHERE clinician_id = 'pending'"
+        assert activated.execute(pending).fetchone()[0] == 1
+        activated.rollback()
+        assert activated.execute(pending).fetchone()[0] == 0
+
     def test_existing_schedule_is_never_recalculated(
         self, activated: sqlite3.Connection, study: StudyConfig, config_hash: str
     ) -> None:

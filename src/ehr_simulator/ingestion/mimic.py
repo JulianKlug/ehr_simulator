@@ -8,9 +8,8 @@ preprocessed layout one-for-one with three deliberate differences:
 ==============================  ==========================================
 Difference                      Handling
 ==============================  ==========================================
-no unnamed-index column         ``pd.read_csv`` is called WITHOUT
-                                ``index_col=0`` (Geneva has one; MIMIC
-                                does not)
+no unnamed-index column         none needed: both adapters read only
+                                ``_REQUIRED_COLUMNS`` (``usecols``)
 ``notes`` replaces              ``stroke_registry`` is never matched;
 ``stroke_registry``             ``frame[frame.source == "notes"]`` routes
                                 to ``ADMISSION``
@@ -27,8 +26,8 @@ contains ``"imputed"``          drop before validation (substring match,
                                 via :func:`_shared._drop_imputed`)
 ``"EHR"`` (exact)               route to ``SCALAR_TS``; inverse-normalize via
                                 ``reference_population_normalisation_parameters.csv``
-                                when ``variable`` is in the params (passthrough
-                                + issue when not, per S3 post-review-3.2);
+                                (a variable missing from the params: strict
+                                raises, lenient drops its rows + issue);
                                 ``unit = None``;
                                 ``t_minutes = relative_sample_date_hourly_cat
                                 * 60.0``
@@ -57,47 +56,21 @@ empty value is treated identically to unset.
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import pandas as pd
 
 from ehr_simulator.ingestion._shared import (
-    CategoricalGroup,
-    _apply_scalar_ts_inverse_normalize,
-    _build_admission,
-    _build_scalar_ts,
-    _decode_categorical,
-    _drop_imputed,
-    _inverse_normalize,
-    _load_categorical_encoding,
-    _load_normalisation_params,
-    _one_hot_column_name,
-    _path_traversal_guard,
-    _read_features_csv,
-    _validate_and_collect,
+    _FeatureLayout,
+    _load_feature_frames,
 )
-from ehr_simulator.ingestion.canonical import CanonicalShape, empty_frame
 from ehr_simulator.ingestion.exceptions import IngestionIssue
 from ehr_simulator.ingestion.provenance import AIArtifactProvenance
 
 __all__ = [
-    "CategoricalGroup",
     "MimicDataset",
     "load_mimic",
-    "_apply_scalar_ts_inverse_normalize",
-    "_build_admission",
-    "_build_scalar_ts",
-    "_decode_categorical",
-    "_drop_imputed",
-    "_inverse_normalize",
-    "_load_categorical_encoding",
-    "_load_normalisation_params",
-    "_one_hot_column_name",
-    "_path_traversal_guard",
-    "_read_features_csv",
-    "_validate_and_collect",
 ]
 
 _DATASET_NAME = "mimic"
@@ -112,6 +85,14 @@ _REQUIRED_COLUMNS: tuple[str, ...] = (
 )
 _NON_IMPUTED_SOURCES: tuple[str, ...] = ("EHR", "notes")
 _REGISTRY_SOURCE = "notes"
+_LAYOUT = _FeatureLayout(
+    dataset=_DATASET_NAME,
+    norm_params_filename=_NORM_PARAMS_FILENAME,
+    categorical_encoding_filename=_CATEGORICAL_ENCODING_FILENAME,
+    required_columns=_REQUIRED_COLUMNS,
+    known_sources=_NON_IMPUTED_SOURCES,
+    registry_source=_REGISTRY_SOURCE,
+)
 
 
 @dataclass
@@ -154,71 +135,14 @@ def load_mimic(
     AI_OUTPUT frames are empty either way. Every SCALAR_TS row ships
     ``unit=None`` (MIMIC has no upstream units source).
     """
-    csv_path = Path(csv_path)
-    params_dir = Path(params_dir)
-    root_str = os.environ.get("EHR_SIM_DATA_ROOT") or None
-    root = Path(root_str) if root_str else None
-    csv_path = _path_traversal_guard(csv_path, root, dataset=_DATASET_NAME)
-    params_dir = _path_traversal_guard(params_dir, root, dataset=_DATASET_NAME)
-
-    issues: list[IngestionIssue] = []
-
-    frame, read_issues = _read_features_csv(
-        csv_path,
-        required_columns=_REQUIRED_COLUMNS,
-        dataset=_DATASET_NAME,
-        known_sources=_NON_IMPUTED_SOURCES,
-        patient_ids=patient_ids,
-    )
-    issues.extend(read_issues)
-    norm_params = _load_normalisation_params(
-        params_dir / _NORM_PARAMS_FILENAME, dataset=_DATASET_NAME
-    )
-    sample_labels = set(frame["sample_label"].unique().tolist())
-    cat_groups = _load_categorical_encoding(
-        params_dir / _CATEGORICAL_ENCODING_FILENAME,
-        sample_labels,
-        dataset=_DATASET_NAME,
-    )
-
-    frame = frame.copy()
-    frame["t_minutes"] = frame["relative_sample_date_hourly_cat"].astype(float) * 60.0
-    frame = frame.rename(columns={"case_admission_id": "patient_id"})
-
-    ehr_rows = frame[frame["source"] == "EHR"]
-    registry_rows = frame[frame["source"] == _REGISTRY_SOURCE]
-
-    scalar_ts, scalar_issues = _build_scalar_ts(
-        ehr_rows, norm_params, units=None, dataset=_DATASET_NAME
-    )
-    issues.extend(scalar_issues)
-
-    admission, admission_issues = _build_admission(
-        registry_rows, norm_params, cat_groups, strict=strict, dataset=_DATASET_NAME
-    )
-    issues.extend(admission_issues)
-
-    imaging = empty_frame(CanonicalShape.IMAGING)
-    ai_output = empty_frame(CanonicalShape.AI_OUTPUT)
-
-    scalar_ts = _validate_and_collect(
-        scalar_ts, CanonicalShape.SCALAR_TS, strict=strict, issues=issues, dataset=_DATASET_NAME
-    )
-    scalar_ts = _apply_scalar_ts_inverse_normalize(scalar_ts, norm_params)
-    admission = _validate_and_collect(
-        admission, CanonicalShape.ADMISSION, strict=strict, issues=issues, dataset=_DATASET_NAME
-    )
-    imaging = _validate_and_collect(
-        imaging, CanonicalShape.IMAGING, strict=strict, issues=issues, dataset=_DATASET_NAME
-    )
-    ai_output = _validate_and_collect(
-        ai_output, CanonicalShape.AI_OUTPUT, strict=strict, issues=issues, dataset=_DATASET_NAME
+    frames = _load_feature_frames(
+        csv_path, params_dir, _LAYOUT, units=None, strict=strict, patient_ids=patient_ids
     )
 
     return MimicDataset(
-        scalar_ts=scalar_ts,
-        admission=admission,
-        imaging=imaging,
-        ai_output=ai_output,
-        issues=issues,
+        scalar_ts=frames.scalar_ts,
+        admission=frames.admission,
+        imaging=frames.imaging,
+        ai_output=frames.ai_output,
+        issues=frames.issues,
     )
