@@ -271,6 +271,7 @@ source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "jinja2" },
+    { name = "numpy" },
     { name = "pandas" },
     { name = "pandera", extra = ["pandas"] },
     { name = "plotnine" },
@@ -299,6 +300,7 @@ dev = [
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
     { name = "jinja2", specifier = ">=3.1" },
+    { name = "numpy", specifier = ">=2" },
     { name = "pandas", specifier = ">=2.2" },
     { name = "pandera", extras = ["pandas"], specifier = ">=0.20" },
     { name = "plotnine", specifier = ">=0.13" },
