@@ -62,6 +62,33 @@ The original roadmap predates substantial implementation work. Several items ori
 
 S8 must preserve all of these contracts.
 
+### Code layout (as of `3d22860`)
+
+The post spec review refactor (`a8453a8`) split the web layer. S8 work lands in:
+
+| Concern | Location |
+|---|---|
+| Slicing, panel states, AI selection, `exposed_field_ids` | `web/panels.py` |
+| Panel rendering (`_render_panels`, `_render_vitals/labs/admission/imaging/ai/measured_ai`, `_render_summary`) | `web/panel_render.py` |
+| View composition, the request's `slice_to_timepoint` call | `web/patient_view.py` |
+| Routing only | `web/routes.py` |
+| Chart helpers | `web/charts.py` (`render_timeline_svg`, `render_grouped_bp_svg`) |
+| Phase 2 export panel table | `export_phase2/tables/panels.py` (sorts by `PANEL_IDS.index`) |
+
+`_render_panels` runs under the process wide `_PANEL_RENDER_LOCK` (plotnine/matplotlib global state): panel rendering is serialised across requests.
+
+### Current presentation baseline
+
+Verified against the code, these are the gaps S8 closes:
+
+1. `ingestion/geneva.py::_VARIABLE_RENAMES` maps only the five median vitals, `temperature` and five labs. `min_*`/`max_*`, NIHSS, GCS, FiO2, the other labs and imaging derived ids pass through unrenamed and match no panel.
+2. `VITAL_VAR_SET` / `LAB_VAR_SET` (`ingestion/canonical.py`) still hold the six synthetic ids each.
+3. `_scalar_panel_state` returns `partial` when a variable is missing at the current bucket **or appears later** (§10.1 removes both).
+4. Every panel template prints `empty-expected` and `empty-unexpected` differently, and `aria-label="<panel> panel — {{ state }}"` announces the precise state (§9.2 removes both).
+5. Geneva AI payloads lack the synthetic keys, so `_ai_panel_state` and `measured_ai_state` report them `partial` and `_panel_ai.html` dumps the raw dictionary. S11l counts `loading` and `partial` as delivered, so moving a valid Geneva payload to `loading` (§6.3) does not change delivery.
+6. `_summary_card.html` reads `admission_facts.get("sex")`; Geneva ships `Sex`, so the summary shows `sex ?` (§4.1).
+7. The preflight walk (`cli_support.walk_preflight`) and `render_preview` call `slice_to_timepoint` with `timepoint_index=0` for every timepoint (§9.1).
+
 ---
 
 ## What remains for S8
@@ -210,12 +237,13 @@ The panel id set is closed in several shipped layers. Adding `neuro_support` mus
 
 | Layer | Change |
 |---|---|
-| `web/panels.py` | `PanelName`, `panel_states`, `panel_errors` |
+| `web/panels.py` | `PanelName`, `panel_states`, `panel_errors` (both built in `slice_to_timepoint`) |
+| `web/panel_render.py` | `_render_panels` renderer list |
 | `web/telemetry.py` | `PanelId` Literal |
-| `panel_exposure.py` | `PANEL_IDS` (also drives `export_phase2` `panel_summaries.csv`) |
+| `panel_exposure.py` | `PANEL_IDS` (also drives `export_phase2/tables/panels.py` → `panel_summaries.csv`) |
 | `web/templates/_chrome_epic.html` | `Neuro / Support` tab after `Vitals` |
 | `web/templates/_chrome_dense.html` | section after vitals |
-| `tests/e2e/` | walks that enumerate tabs or panels |
+| `tests/e2e/` | walks that enumerate tabs or panels (`test_telemetry_walk.py`) |
 
 Semantics of telemetry, exposure and export do not change; only the vocabulary grows. Renders recorded before S8 simply have no `neuro_support` rows.
 
@@ -317,7 +345,9 @@ Sections:
 
 Raw registry names remain valid canonical `ADMISSION.field` values. Presentation labels belong in a display registry rather than in Jinja conditionals.
 
-Registry keys are the exact Geneva field names, e.g. `Antihypert. drugs pre-stroke`, `MedHist CHD`, `Prestroke disability (Rankin)`, `categorical_IVT`, `wake_up_stroke`, `age`, `weight`.
+Registry keys are the exact Geneva field names, e.g. `Antihypert. drugs pre-stroke`, `MedHist CHD`, `Prestroke disability (Rankin)`, `categorical_IVT`, `wake_up_stroke`, `age`, `Sex`, `weight` (fixture `geneva_fixture_expected.json`).
+
+The summary card reads age and sex through the same registry, so Geneva `Sex` renders instead of `?`. Synthetic `sex` keeps working.
 
 ### Other
 
@@ -654,7 +684,7 @@ After S8 there is one consistent meaning for:
 
 the sequence the current UI walk is actually using.
 
-The two other callers (`cli_support.py` preflight walk and preview) pass the study timepoints too.
+Callers today: `web/patient_view.py` (request path), `cli_support.walk_preflight` and `cli_support.render_preview`. The two CLI callers pass the study timepoints too, and their real `t_index` instead of the current hard coded `0`.
 
 ## 9.2 Future existence must not be clinician facing
 
@@ -667,7 +697,7 @@ With sparse Geneva labs and AI that is a frequent, clinically meaningful leak.
 
 After S8:
 
-1. Visible text and `aria-label` are identical for both empty states: `No <panel> data up to this timepoint.` (`aria-label`: `<panel> panel — empty`).
+1. Visible text and `aria-label` are identical for both empty states: `No <panel> data up to this timepoint.` (`aria-label`: `<panel> panel — empty`). Today's `aria-label` interpolates the raw state, so screen readers announce `empty-unexpected`.
 2. `data-state` keeps the precise state. It is consumed by S11k `panel.mount` telemetry and is not rendered or announced. This is an accepted residual: visible only through developer tools.
 3. Every **other** clinician facing state (`partial`, rows, columns, chart ranges) is derived from data at or before `t` only (§10).
 4. Applies to every panel, synthetic included.
@@ -786,7 +816,7 @@ The existing TODO concerning inline SVG payload size is closed only after this m
 
 If TTI exceeds 2 seconds, optimise within S8 before clinician use. Candidate order:
 
-1. remove redundant chart rendering
+1. remove redundant chart rendering (all charts render under `_PANEL_RENDER_LOCK`, so concurrent requests queue)
 2. cache deterministic SVGs by patient, panel, and current t within the process
 3. only then consider splitting panel delivery with HTMX out of band swaps
 
@@ -900,7 +930,7 @@ A value cannot be newly visible in S8 while remaining invisible to the prohibite
 
 `base_value` is not shown, so `ai:explanation` and `ai:explanation.base_value` are not exposed. Synthetic payloads keep `ai:<top-level key>`.
 
-AI ids come from one pure function used by both the renderer and preflight, e.g. `web/ai_payload.py::exposed_ai_field_ids(payload)` built on `top_contributors` (§6.2). `exposed_field_ids()` takes the decoded payload of the row actually shown instead of `ai_payload_keys`. `cli_support._cell_failures` passes it per timepoint, so a prohibited contributor fails preflight at exactly the timepoint where it would enter the top ten.
+AI ids come from one pure function used by both the renderer and preflight, e.g. `web/ai_payload.py::exposed_ai_field_ids(payload)` built on `top_contributors` (§6.2). `exposed_field_ids()` takes the decoded payload of the row actually shown instead of `ai_payload_keys` (today `_cell_failures` unions the top level keys of every selected row). `cli_support._cell_failures` passes it per timepoint, so a prohibited contributor fails preflight at exactly the timepoint where it would enter the top ten.
 
 ## 15.2 Pattern
 
@@ -962,9 +992,17 @@ Add neuro/support state handling, imaging derived state handling, truthful study
 
 Add min / median / max range bar rendering (§11).
 
-`src/ehr_simulator/web/routes.py`
+`src/ehr_simulator/web/panel_render.py`
 
-Render the new panel, expanded labs, derived imaging, grouped admission sections, and Geneva AI payload.
+Render the new panel, expanded labs, derived imaging, grouped admission sections, and Geneva AI payload; registry based summary age/sex.
+
+`src/ehr_simulator/web/patient_view.py`
+
+Pass `resolved.timepoints` to `slice_to_timepoint` (§9.1).
+
+`src/ehr_simulator/web/templates/_summary_card.html`
+
+Read sex through the registry (§4.1).
 
 `src/ehr_simulator/web/templates/_panel_vitals.html`
 
@@ -1016,7 +1054,7 @@ Pass study timepoints to `slice_to_timepoint`; build AI exposed ids from the sho
 
 `README.md`
 
-Presentation versioning convention (§14.1).
+Presentation versioning convention (§14.1); *The five panels* becomes six.
 
 `TODOS.md`
 
@@ -1062,13 +1100,13 @@ Pure AI payload family validation, `top_contributors`, `exposed_ai_field_ids` (�
 
 `tests/test_geneva_ui.py`
 
-Focused Geneva presentation integration suite.
+Focused Geneva presentation integration suite. Not in `tests/conftest.py` `UNIT_MODULES`, so it runs in the integration stage.
 
 ---
 
 # 18. Test inventory
 
-Target: **at least 36 S8 tests** (items 1-23 and 26-38 below), in addition to the existing suite. Items 24 and 25 are regression gates on existing tests; items 39-41 are e2e, real data or manual.
+Target: **at least 37 S8 tests** (items 1-23, 26-38 and 42 below), in addition to the existing suite (1563 collected at `3d22860`). Items 24 and 25 are regression gates on existing tests; items 39-41 are e2e, real data or manual.
 
 ## Unit
 
@@ -1122,6 +1160,10 @@ Target: **at least 36 S8 tests** (items 1-23 and 26-38 below), in addition to th
 39. Geneva fixture patient can be walked from first configured timepoint to last without a render error, epic tabs included.
 40. `@pytest.mark.real_data`: 30 patient × 12 timepoint headless walk stays below the S8 SLA.
 41. Manual Chrome trace confirms TTI < 2 seconds on the baseline machine.
+
+## Added after the refactor audit
+
+42. Geneva summary card shows the patient's `Sex`, not `?`; synthetic `sex` unchanged.
 
 ---
 
