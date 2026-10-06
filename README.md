@@ -61,12 +61,13 @@ uv run ehr-simulator activate-config STUDY.yaml QUESTIONS.yaml --version v1 --de
 uv run ehr-simulator serve --config STUDY.yaml --questions QUESTIONS.yaml
 uv run ehr-simulator expire-cases STUDY.yaml      # cases whose clinician never came back
 uv run ehr-simulator backup --db-path data/study_<study_id>.db
-uv run ehr-simulator export-phase2 STUDY.yaml     # the research bundle
+uv run ehr-simulator export-phase2 STUDY.yaml --pseudonym-secret keys/pseudonym.secret  # the research bundle
 ```
 
 **Geneva AI (S7).** A `dataset: geneva` study delivers real AI output through a
 `geneva_ai` block (`predictions_path`, `patient_ids_path`, `model_path`,
-`model_id`, optional `explanations_dir`; relative to the YAML). Before
+`model_id`, `explanations_dir` — optional, required with `randomisation`;
+relative to the YAML). Before
 `activate-config`:
 
 ```bash
@@ -103,6 +104,16 @@ panel still expects the synthetic payload keys, so a Geneva row renders as
   configuration version. `--keyfile FILE` (outside the bundle, mode 600) is the
   only output that maps `clinician_id` back to names. `export-answers` stays the
   single configuration wide CSV.
+- **Exported clinician ids are keyed pseudonyms.** Both exports require
+  `--pseudonym-secret FILE`: 32 random bytes, mode 600, created on first use,
+  never inside `--out-dir`. Ids (and schedule/replacement ids) export as
+  `HMAC-SHA256(secret, id)[:16]`; keep the same file for stable ids across
+  exports, and never share it with the bundle. The DB id is
+  `sha256(name)[:16]`, so a roster would reverse an unkeyed one.
+- **Known residual risk (accepted):** the Phase 2 bundle carries the
+  randomisation seeds so schedules stay regenerable. Anyone holding the
+  bundle and a staff roster can regenerate each candidate's schedule and
+  match it to a pseudonym. Treat the bundle as re-identifiable.
 
 ---
 
