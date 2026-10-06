@@ -13,7 +13,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
 
-from ehr_simulator.db.case_lifecycle import to_db_timestamp
+from ehr_simulator.db._timestamps import to_db_timestamp
 
 
 @dataclass(frozen=True)

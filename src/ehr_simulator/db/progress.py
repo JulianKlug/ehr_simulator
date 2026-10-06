@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-from ehr_simulator.db.answers import _require_version_provenance
+from ehr_simulator.db._provenance import _require_version_provenance
 from ehr_simulator.db.exceptions import ConfigurationProvenanceError
 from ehr_simulator.db.observation import ObservationMode
 
@@ -163,9 +163,10 @@ def unlock(
 
     if not moved and from_t_index == 0:
         cursor = conn.execute(
-            "INSERT OR IGNORE INTO progress "
+            "INSERT INTO progress "
             "(clinician_id, patient_id, unlocked_t_index, config_hash, config_version, "
-            "observation_mode) VALUES (?, ?, ?, ?, ?, ?)",
+            "observation_mode) VALUES (?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(clinician_id, patient_id) DO NOTHING",
             (
                 clinician_id,
                 patient_id,
@@ -239,17 +240,22 @@ def reset(
     patient_id: str,
     to_t_index: int,
     app_state: Any = None,
+    commit: bool = True,
 ) -> int:
     """Rewind the frontier to ``to_t_index`` and re-open a completed walk.
 
     Operator path (``ehr-simulator reset-progress``). Returns the rowcount:
-    0 means the pair has no walk to rewind.
+    0 means the pair has no walk to rewind. ``commit=False`` leaves the
+    write in the caller's transaction and skips the write-counter bump.
     """
     cursor = conn.execute(
         "UPDATE progress SET unlocked_t_index = ?, completed_at = NULL, "
         "updated_at = CURRENT_TIMESTAMP WHERE clinician_id = ? AND patient_id = ?",
         (to_t_index, clinician_id, patient_id),
     )
+    if not commit:
+        return cursor.rowcount
+
     conn.commit()
     if cursor.rowcount > 0:
         _bump(app_state)

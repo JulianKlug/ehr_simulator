@@ -324,8 +324,9 @@ def test_normalize_client_ts(raw: str | None, expected: str | None) -> None:
         (None, None, False),
         ("9" * 30, None, True),
         ("-1", None, True),
+        ("5\n", None, True),
     ],
-    ids=["int", "zero", "garbage", "empty", "none", "overflow", "negative"],
+    ids=["int", "zero", "garbage", "empty", "none", "overflow", "negative", "trailing_newline"],
 )
 def test_normalize_client_seq(raw: str | None, expected: int | None, warns: bool) -> None:
     with capture_logs() as cap:

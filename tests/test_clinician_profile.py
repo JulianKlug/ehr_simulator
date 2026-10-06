@@ -26,15 +26,15 @@ from ehr_simulator.config import load_questions, load_study_config
 from ehr_simulator.db import clinician_profiles, connect
 from ehr_simulator.db.connection import AccessMode
 from ehr_simulator.export_phase2 import build_phase2_bundle
+from ehr_simulator.pseudonym import pseudonymize
 from tests.conftest import ProfileSetup, valid_profile_form
-from tests.test_case_lifecycle import LifecycleHarness, _harness
-from tests.test_case_start import HTTP_CONFLICT, HTTP_SEE_OTHER, _start, _started_patient
+from tests.support.cases import HTTP_CONFLICT, HTTP_SEE_OTHER, _start, _started_patient
+from tests.support.lifecycle import LifecycleHarness, _harness
+from tests.support.pseudonym import TEST_SECRET
 
 PROFILE = {"specialties": ["neurology", "emergency_medicine"], "countries": ["CH", "FR"]}
-HTTP_OK = 200
 HTTP_NOT_FOUND = 404
 HTTP_UNPROCESSABLE = 422
-COOKIE = "ehrsim_clinician_id"
 NURSE = {"professional_role": "nurse", "years_of_practice": "3", "country_of_practice": "FR"}
 
 
@@ -92,7 +92,9 @@ def test_nurse_profile_has_no_specialty(ph: LifecycleHarness) -> None:  # 2
     assert _stored(ph).primary_specialty is None
 
 
-@pytest.mark.parametrize("years", ["-1", "abc", "", "inf", "nan", "80.5"])
+@pytest.mark.parametrize(
+    "years", ["-1", "abc", "", "inf", "nan", "80.5", "7_5", "1e1", "1.", ".5", "+3"]
+)
 def test_invalid_years_are_refused(ph: LifecycleHarness, years: str) -> None:  # 4
     with ph.client() as client:
         response = _save(client, {**_physician(), "years_of_practice": years})
@@ -205,7 +207,9 @@ def test_open_case_resumes_without_a_profile(tmp_path: Path, study_fixture_dir: 
 def _clinicians_csv(h: LifecycleHarness) -> list[dict[str, str]]:
     conn = connect(h.db_path, access=AccessMode.READ_ONLY)
     try:
-        bundle = build_phase2_bundle(conn, study_id=h.v1.study.study_id)
+        bundle = build_phase2_bundle(
+            conn, study_id=h.v1.study.study_id, pseudonym_secret=TEST_SECRET
+        )
     finally:
         conn.close()
     table = next(t for t in bundle.tables if t.name == "clinicians.csv")
@@ -221,7 +225,7 @@ def test_clinicians_csv_carries_the_profile(ph: LifecycleHarness) -> None:  # 8
     assert _clinicians_csv(ph) == [
         {
             "study_id": ph.v1.study.study_id,
-            "clinician_id": ph.clinician_id,
+            "clinician_id": pseudonymize(TEST_SECRET, ph.clinician_id),
             "profile_status": "complete",
             "professional_role": "physician",
             "years_of_practice": "7.5",

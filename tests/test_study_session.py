@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
 from structlog.testing import capture_logs
 
 from ehr_simulator.db import clinicians, progress, sessions
@@ -70,6 +71,27 @@ def test_bootstrap_session_idempotent(db: sqlite3.Connection) -> None:
     assert second == first
     assert _counts(db) == (1, 1, 1)
     assert state.write_counter == 1
+
+
+def test_bootstrap_session_event_failure_rolls_back_assignment_and_session(
+    db: sqlite3.Connection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # One transaction: a failed session.start event leaves no orphan
+    # assignment or open session behind.
+    from ehr_simulator.db import events
+
+    state = _AppState()
+    cid = clinicians.lookup_or_create(db, "Dr. Smith")
+
+    def _fail(*_args: object, **_kwargs: object) -> int:
+        raise sqlite3.OperationalError("injected event failure")
+
+    monkeypatch.setattr(events, "append", _fail)
+    with pytest.raises(sqlite3.OperationalError, match="injected"):
+        _bootstrap(db, state, cid)
+
+    assert _counts(db) == (0, 0, 0)
+    assert state.write_counter == 0
 
 
 def test_bootstrap_session_after_ended_creates_new(db: sqlite3.Connection) -> None:

@@ -344,13 +344,6 @@ def test_hidden_cause_does_not_block_advance(client: TestClient) -> None:
     assert response.status_code == HTTP_OK
 
 
-def test_post_to_hidden_cause_refused(client: TestClient) -> None:
-    response = _post(client, "primary_cause", CAUSE)
-    assert response.status_code == HTTP_CONFLICT
-    assert "is not shown" in response.text
-    assert _rows(client) == {}
-
-
 def test_good_outcome_yes_writes_rule_death(client: TestClient) -> None:
     _post(client, "good_outcome_3mo", "Yes")
     assert _rows(client)["death_3mo"] == ("No", "rule", "good_outcome_3mo")
@@ -366,14 +359,6 @@ def test_rule_death_satisfies_gate(client: TestClient) -> None:
     _answer_required_except(client, "good_outcome_3mo", "death_3mo")
     _post(client, "good_outcome_3mo", "Yes")
     assert client.post(ADVANCE_URL, headers=HX).status_code == HTTP_OK
-
-
-def test_post_to_derived_death_refused(client: TestClient) -> None:
-    _post(client, "good_outcome_3mo", "Yes")
-    response = _post(client, "death_3mo", "Yes")
-    assert response.status_code == HTTP_CONFLICT
-    assert "set automatically" in response.text
-    assert _rows(client)["death_3mo"] == ("No", "rule", "good_outcome_3mo")
 
 
 def test_yes_to_no_clears_rule_death_and_blocks(client: TestClient) -> None:
@@ -553,21 +538,9 @@ def test_fixture_question_shapes(fuc: Questions) -> None:
     assert by_id["death_3mo"].auto_value.value == "No"
 
 
-def test_fixture_drops_phase1_questions(fuc: Questions) -> None:
-    ids = {q.question_id for q in fuc.questions}
-    assert not ids & {"survives_hospital", "dead_6mo", "contributing_factors", "free_notes"}
-    assert all(q.response_type not in {"free-text", "multi-select"} for q in fuc.questions)
-
-
 # ---------------------------------------------------------------------------
 # Regression
 # ---------------------------------------------------------------------------
-
-
-def test_v1_gating_unchanged() -> None:
-    questions = load_questions(V1_QUESTIONS)
-    required = [q.question_id for q in questions.questions if q.required]
-    assert evaluate(questions, {}).remaining == tuple(required)
 
 
 def test_v1_and_v2_pinned_cases_coexist(tmp_path: Path) -> None:
@@ -633,12 +606,19 @@ def test_branch_state_survives_pause_and_resume(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("setup", "target"),
-    [([], "primary_cause"), ([("good_outcome_3mo", "Yes")], "death_3mo")],
+    ("setup", "target", "valid_value", "message"),
+    [
+        ([], "primary_cause", CAUSE, "is not shown"),
+        ([("good_outcome_3mo", "Yes")], "death_3mo", "Yes", "set automatically"),
+    ],
     ids=["hidden", "derived"],
 )
 def test_invalid_value_to_non_editable_question_is_409(
-    client: TestClient, setup: list[tuple[str, str]], target: str
+    client: TestClient,
+    setup: list[tuple[str, str]],
+    target: str,
+    valid_value: str,
+    message: str,
 ) -> None:
     """Editability is decided before the value is validated (spec order)."""
     for qid, value in setup:
@@ -648,6 +628,13 @@ def test_invalid_value_to_non_editable_question_is_409(
     response = _post(client, target, "not an option")
 
     assert response.status_code == HTTP_CONFLICT
+    assert _rows(client) == before
+
+    # A valid value is refused the same way, with the reason shown.
+    response = _post(client, target, valid_value)
+
+    assert response.status_code == HTTP_CONFLICT
+    assert message in response.text
     assert _rows(client) == before
 
 

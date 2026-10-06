@@ -22,13 +22,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 from ehr_simulator.answer_codec import deserialize_answer
-from ehr_simulator.behavioral_timing import TelemetryStatus, build_timeline, rows_by_render
+from ehr_simulator.behavioral_timing import RenderTimeline, TelemetryStatus, build_timelines
 from ehr_simulator.config.questions import Questions
 from ehr_simulator.config.study import TelemetryConfig
-from ehr_simulator.db.arm_assignments import ARM_AI
-from ehr_simulator.db.case_lifecycle import CaseState
-from ehr_simulator.db.telemetry import RenderRow, TabAuditRow, TelemetryRow
-from ehr_simulator.panel_exposure import PanelSummary, derive_panel_summaries
+from ehr_simulator.domain_types import ARM_AI, CaseState, RenderRow, TabAuditRow, TelemetryRow
+from ehr_simulator.panel_exposure import (
+    MOUNT,
+    PANEL_KIND_PREFIX,
+    PanelSummary,
+    derive_panel_summaries,
+)
 from ehr_simulator.question_branching import AnswerSource, QuestionState, evaluate
 
 __all__ = [
@@ -148,7 +151,7 @@ class ObservationVariables:
     ai_exposure_seconds: float | None
     ai_viewed: bool | None
     ai_viewing_status: TelemetryStatus | None
-    ai_episode_count: int
+    ai_episode_count: int | None
     pp_compliant: bool | None
     pp_determinate: bool
     integrity_warnings: tuple[str, ...]
@@ -171,13 +174,14 @@ class ResponseProvenance:
 
 @dataclass(frozen=True)
 class CaseSummary:
-    """Secondary convenience measures; the timepoint rows stay authoritative."""
+    """Secondary convenience measures; the timepoint rows stay authoritative.
+    A total over an indeterminate observation is ``None``, never a guess."""
 
     ai_viewed_any: bool
     ai_viewed_timepoints: int
-    ai_exposure_seconds: float
-    ai_episode_count: int
-    all_reached_pp_compliant: bool
+    ai_exposure_seconds: float | None
+    ai_episode_count: int | None
+    all_reached_pp_compliant: bool | None
     failure_count: int
     leakage_count: int
 
@@ -216,7 +220,7 @@ def _reached(inputs: CaseInputs, t_index: int) -> bool:
 def _ai_mounted(rows: Sequence[TelemetryRow], render_id: str) -> bool:
     return any(
         r.render_id == render_id
-        and r.kind == "panel.mount"
+        and r.kind == MOUNT
         and r.payload.get("panel_id") == AI_PANEL
         and r.payload.get("state") in _DISPLAYED_STATES
         for r in rows
@@ -226,7 +230,7 @@ def _ai_mounted(rows: Sequence[TelemetryRow], render_id: str) -> bool:
 def _has_ai_panel_event(rows: Sequence[TelemetryRow], render_ids: set[str]) -> bool:
     return any(
         r.render_id in render_ids
-        and r.kind.startswith("panel.")
+        and r.kind.startswith(PANEL_KIND_PREFIX)
         and r.payload.get("panel_id") == AI_PANEL
         for r in rows
     )
@@ -265,15 +269,15 @@ def _delivery(
     return delivered, reasons
 
 
-def _render_statuses(inputs: CaseInputs) -> dict[str, TelemetryStatus]:
-    by_render = rows_by_render(inputs.telemetry_rows)
-    return {
-        r.render_id: build_timeline(r, by_render.get(r.render_id, [])).status
-        for r in inputs.renders
-    }
+def _render_statuses(
+    inputs: CaseInputs, timelines: Mapping[str, RenderTimeline]
+) -> dict[str, TelemetryStatus]:
+    return {r.render_id: timelines[r.render_id].status for r in inputs.renders}
 
 
-def _panel_summaries(inputs: CaseInputs) -> dict[tuple[int, str, str], PanelSummary]:
+def _panel_summaries(
+    inputs: CaseInputs, timelines: Mapping[str, RenderTimeline]
+) -> dict[tuple[int, str, str], PanelSummary]:
     if inputs.telemetry is None:
         return {}
     return derive_panel_summaries(
@@ -282,7 +286,75 @@ def _panel_summaries(inputs: CaseInputs) -> dict[tuple[int, str, str], PanelSumm
         viewport_threshold=inputs.telemetry.panel_viewport_threshold,
         viewed_threshold_seconds=inputs.telemetry.panel_viewed_threshold_seconds,
         tab_audit=inputs.tab_audit,
+        timelines=timelines,
     )
+
+
+@dataclass(frozen=True)
+class _ArmExposure:
+    """What the arm actually received at one timepoint."""
+
+    delivered: bool | None
+    leakage: bool
+    reasons: tuple[FailureReason, ...]
+    exposure: float | None = None
+    viewed: bool | None = None
+    viewing_status: TelemetryStatus | None = None
+
+
+def _ai_arm_exposure(
+    inputs: CaseInputs,
+    primary: Sequence[RenderRow],
+    ai_summary: PanelSummary | None,
+    statuses: Mapping[str, TelemetryStatus],
+) -> _ArmExposure:
+    """AI arm: delivery over the primary renders plus the AI panel's viewing."""
+    delivered, reasons = _delivery(inputs, primary, statuses)
+    if ai_summary is None:
+        return _ArmExposure(delivered=delivered, leakage=False, reasons=tuple(reasons))
+
+    return _ArmExposure(
+        delivered=delivered,
+        leakage=False,
+        reasons=tuple(reasons),
+        exposure=ai_summary.qualifying_seconds,
+        viewed=ai_summary.viewed,
+        viewing_status=ai_summary.status,
+    )
+
+
+def _no_ai_arm_exposure(
+    inputs: CaseInputs, renders: Sequence[RenderRow], ai_summary: PanelSummary | None
+) -> _ArmExposure:
+    """No AI arm: any AI markup or AI panel event is leakage (delivered = leaked)."""
+    shown_markup = any(r.payload.get("ai") != AI_NONE for r in renders)
+    panel_events = _has_ai_panel_event(inputs.telemetry_rows, {r.render_id for r in renders})
+    leakage = shown_markup or panel_events
+    reasons = (FailureReason.OTHER_INTEGRITY_FAILURE,) if shown_markup else ()
+    exposure = ai_summary.qualifying_seconds if panel_events and ai_summary is not None else None
+    return _ArmExposure(delivered=leakage, leakage=leakage, reasons=reasons, exposure=exposure)
+
+
+def _per_protocol(reached: bool, is_ai: bool, arm: _ArmExposure) -> tuple[bool | None, bool]:
+    """``(pp_compliant, pp_determinate)``: AI = delivered and viewed; no AI = no leakage."""
+    if not reached:
+        return None, True
+    if is_ai:
+        determinate = arm.delivered is not None and arm.viewed is not None
+        return arm.delivered is True and arm.viewed is True, determinate
+    return not arm.leakage, True
+
+
+def _episode_count(ai_summary: PanelSummary | None, ai_exposable: bool) -> int | None:
+    """AI viewing episodes; unmeasured is ``None``, never a zero.
+
+    Zero needs evidence: a telemetry summary, or a view that could not show
+    AI (no AI arm without leakage). Example: an AI case pinned to a config
+    without ``telemetry`` has no summary, so its count is unknown.
+    """
+    if ai_summary is not None:
+        return ai_summary.episode_count
+    return None if ai_exposable else 0
 
 
 def _observation(
@@ -298,47 +370,24 @@ def _observation(
     warnings = _integrity_warnings(inputs, t_index, renders, statuses)
     is_ai = inputs.arm == ARM_AI
 
-    reasons: list[FailureReason] = []
-    exposure: float | None = None
-    viewed: bool | None = None
-    viewing_status: TelemetryStatus | None = None
-    if is_ai:
-        leakage = False
-        delivered, reasons = _delivery(inputs, primary, statuses)
-        if ai_summary is not None:
-            exposure, viewed = ai_summary.qualifying_seconds, ai_summary.viewed
-            viewing_status = ai_summary.status
-    else:
-        shown_markup = any(r.payload.get("ai") != AI_NONE for r in renders)
-        panel_events = _has_ai_panel_event(inputs.telemetry_rows, {r.render_id for r in renders})
-        leakage = shown_markup or panel_events
-        delivered = leakage
-        if shown_markup:
-            reasons.append(FailureReason.OTHER_INTEGRITY_FAILURE)
-        if panel_events and ai_summary is not None:
-            exposure = ai_summary.qualifying_seconds
-
-    pp_compliant: bool | None
-    determinate = True
-    if not reached:
-        pp_compliant = None
-    elif is_ai:
-        pp_compliant = delivered is True and viewed is True
-        determinate = delivered is not None and viewed is not None
-    else:
-        pp_compliant = not leakage
+    arm = (
+        _ai_arm_exposure(inputs, primary, ai_summary, statuses)
+        if is_ai
+        else _no_ai_arm_exposure(inputs, renders, ai_summary)
+    )
+    pp_compliant, determinate = _per_protocol(reached, is_ai, arm)
 
     return ObservationVariables(
         t_index=t_index,
         arm=inputs.arm,
         reached=reached,
-        ai_delivered=delivered,
-        intervention_failure_reasons=tuple(sorted(set(reasons))),
-        intervention_leakage=leakage,
-        ai_exposure_seconds=exposure,
-        ai_viewed=viewed,
-        ai_viewing_status=viewing_status,
-        ai_episode_count=ai_summary.episode_count if ai_summary is not None else 0,
+        ai_delivered=arm.delivered,
+        intervention_failure_reasons=tuple(sorted(set(arm.reasons))),
+        intervention_leakage=arm.leakage,
+        ai_exposure_seconds=arm.exposure,
+        ai_viewed=arm.viewed,
+        ai_viewing_status=arm.viewing_status,
+        ai_episode_count=_episode_count(ai_summary, is_ai or arm.leakage),
         pp_compliant=pp_compliant,
         pp_determinate=determinate,
         integrity_warnings=warnings,
@@ -431,21 +480,39 @@ def _responses(inputs: CaseInputs) -> tuple[ResponseProvenance, ...]:
 
 def _summary(observations: Sequence[ObservationVariables]) -> CaseSummary:
     reached = [o for o in observations if o.reached]
+
+    # Reached views that could show AI: their unknown exposure is no zero.
+    exposable = [o for o in reached if o.arm == ARM_AI or o.intervention_leakage]
+    exposure_unknown = any(o.ai_exposure_seconds is None for o in exposable)
+    episodes_unknown = any(o.ai_episode_count is None for o in exposable)
+    pp_unknown = any(not o.pp_determinate for o in reached)
     return CaseSummary(
         ai_viewed_any=any(o.ai_viewed is True for o in observations),
         ai_viewed_timepoints=sum(1 for o in observations if o.ai_viewed is True),
-        ai_exposure_seconds=sum(o.ai_exposure_seconds or 0.0 for o in observations),
-        ai_episode_count=sum(o.ai_episode_count for o in observations),
-        all_reached_pp_compliant=bool(reached) and all(o.pp_compliant for o in reached),
+        ai_exposure_seconds=(
+            None if exposure_unknown else sum(o.ai_exposure_seconds or 0.0 for o in observations)
+        ),
+        ai_episode_count=(
+            None if episodes_unknown else sum(o.ai_episode_count or 0 for o in observations)
+        ),
+        all_reached_pp_compliant=(
+            None if pp_unknown else bool(reached) and all(o.pp_compliant for o in reached)
+        ),
         failure_count=sum(1 for o in observations if o.intervention_failure),
         leakage_count=sum(1 for o in observations if o.intervention_leakage),
     )
 
 
-def derive_case_variables(inputs: CaseInputs) -> CaseVariables:
-    """All S11l variables of one measured case."""
-    statuses = _render_statuses(inputs)
-    summaries = _panel_summaries(inputs)
+def derive_case_variables(
+    inputs: CaseInputs, timelines: Mapping[str, RenderTimeline] | None = None
+) -> CaseVariables:
+    """All S11l variables of one measured case. ``timelines``: prebuilt from
+    ``inputs.renders`` and ``inputs.telemetry_rows`` (``build_timelines``)."""
+    if timelines is None:
+        timelines = build_timelines(inputs.renders, inputs.telemetry_rows)
+
+    statuses = _render_statuses(inputs, timelines)
+    summaries = _panel_summaries(inputs, timelines)
     observations = tuple(
         _observation(inputs, t_index, summaries, statuses)
         for t_index in range(len(inputs.timepoints))

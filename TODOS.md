@@ -102,4 +102,12 @@ Surfaced when the user pointed `serve --config` at the real Geneva CSV for the f
 - **S11: `/answer` and `/advance` bootstrap before their lock/stale check.** S9b R21 made the GET gate a pure read, but both POST routes still lock the arm and open a session before refusing a locked/stale timepoint (a POST implies the page was already opened, so no new exposure vs S9a). Record alongside the S11 arm-assignment decision.
 - **`mark_complete` has no compare-and-set.** Guarded by `frontier.completed` and the single shared connection only; two concurrent final advances from separate connections would emit two `advance.ok(final)` + two `session.end`. Revisit with any multi-connection refactor (S6 §6.3 caveat).
 - **`_render_advance_cta(oob: bool)` is a boolean Python parameter.** §13 allowed `oob` only as a template flag. Three literal call sites; convert to a `Literal["inline", "oob"]` if a fourth appears.
-- **`reset_progress` is three commits, not one transaction.** Reordered (delete, then rewind) so a failure leaves the walk intact. A `with conn:` block around all three needs the DAOs to stop committing individually — a wider change than S9b carries.
+- **`reset_progress` is three commits, not one transaction.** Reordered (delete, then rewind) so a failure leaves the walk intact. A `with conn:` block around all three needs the DAOs to stop committing individually — a wider change than S9b carries. **Completed:** 2026-10-06 (one `BEGIN IMMEDIATE` transaction, `commit=False` DAOs).
+
+## From /review of the whole repo (2026-10-06)
+
+- Hash YAML-relative `geneva_ai` paths (or artifact digests) instead of absolute paths; today the config hash moves with the checkout location. Deferred: shifts existing hashes.
+- Trim private `_shared` helpers from `__all__` in `ingestion/_shared.py`, `geneva.py`, `mimic.py` (visibility change, needs approval).
+- Split `cli_support.py` (~900 lines: preflight, preview, operator, activation services).
+- Accepted risk: Phase 2 bundle keeps randomisation seeds, so bundle + roster can re-identify clinicians by regenerating schedules.
+- `insert_schedule` still commits/rolls back a caller-opened transaction on insert; `create_or_fetch_schedule` relies on it.

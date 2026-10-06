@@ -2,7 +2,7 @@
 patient) pair.
 
 S6 ships the ``phase1_stub`` assigner — always returns ``("no_ai",
-"phase1_stub")``. The row is INSERT-OR-IGNOREd so the first call for a
+"phase1_stub")``. The row is inserted ON CONFLICT DO NOTHING so the first call for a
 ``(clinician_id, patient_id)`` pair locks the assignment forever. S11 will
 swap the body to a deterministic randomized assigner; the call signature
 stays.
@@ -23,13 +23,12 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from ehr_simulator.db import config_history
-from ehr_simulator.db.answers import _require_version_provenance
+from ehr_simulator.db._provenance import _require_version_provenance
 from ehr_simulator.db.exceptions import CaseActivationError, ConfigurationProvenanceError
 from ehr_simulator.db.randomisation import GeneratedSchedule, ScheduleItem
+from ehr_simulator.domain_types import ARM_AI, ARM_NO_AI
 
 ARM_SOURCE_PHASE2 = "phase2_randomized"
-ARM_AI = "ai"
-ARM_NO_AI = "no_ai"
 
 
 @dataclass(frozen=True)
@@ -66,6 +65,13 @@ class ActivatedAssignment:
     activated_at: datetime | str | None
 
 
+_ARM_COLUMNS = "clinician_id, patient_id, arm, arm_source, seed, config_hash, config_version"
+
+
+def _arm_row(row: tuple) -> ArmAssignment:
+    return ArmAssignment(*row)
+
+
 _ACTIVATED_COLUMNS = (
     "clinician_id, patient_id, arm, arm_source, seed, config_hash, config_version, "
     "schedule_id, case_position, assigned_at, activated_at"
@@ -80,21 +86,9 @@ def fetch_all(conn: sqlite3.Connection) -> tuple[ArmAssignment, ...]:
     re-runs deterministic.
     """
     rows = conn.execute(
-        "SELECT clinician_id, patient_id, arm, arm_source, seed, config_hash, config_version "
-        "FROM arm_assignments ORDER BY clinician_id, patient_id"
+        f"SELECT {_ARM_COLUMNS} FROM arm_assignments ORDER BY clinician_id, patient_id"
     ).fetchall()
-    return tuple(
-        ArmAssignment(
-            clinician_id=row[0],
-            patient_id=row[1],
-            arm=row[2],
-            arm_source=row[3],
-            seed=row[4],
-            config_hash=row[5],
-            config_version=row[6],
-        )
-        for row in rows
-    )
+    return tuple(_arm_row(row) for row in rows)
 
 
 def assigned_patient_ids(conn: sqlite3.Connection) -> tuple[str, ...]:
@@ -115,6 +109,15 @@ def assigned_patient_ids(conn: sqlite3.Connection) -> tuple[str, ...]:
     return tuple(row[0] for row in rows)
 
 
+def patient_ids_for_clinician(conn: sqlite3.Connection, clinician_id: str) -> tuple[str, ...]:
+    """Patients the clinician holds an assignment for, ``patient_id``-sorted."""
+    rows = conn.execute(
+        "SELECT patient_id FROM arm_assignments WHERE clinician_id = ? ORDER BY patient_id",
+        (clinician_id,),
+    ).fetchall()
+    return tuple(row[0] for row in rows)
+
+
 def assign_or_lookup(
     conn: sqlite3.Connection,
     clinician_id: str,
@@ -122,6 +125,7 @@ def assign_or_lookup(
     *,
     config_hash: str,
     config_version: str | None = None,
+    commit: bool = True,
 ) -> tuple[str, str]:
     """Return ``(arm, arm_source)`` for the (clinician, patient) pair,
     creating the row if it doesn't exist. Existing rows are never rewritten.
@@ -129,6 +133,7 @@ def assign_or_lookup(
     The new row's provenance (``config_version``, ``config_hash``) pins it
     to the configuration under which the case started (S11b); once the
     study has history, an omitted ``config_version`` is refused.
+    ``commit=False`` leaves the INSERT in the caller's transaction.
     """
     _require_version_provenance(conn, config_version)
     row = conn.execute(
@@ -139,12 +144,14 @@ def assign_or_lookup(
         return row[0], row[1]
     arm, arm_source = _phase1_stub()
     conn.execute(
-        "INSERT OR IGNORE INTO arm_assignments "
+        "INSERT INTO arm_assignments "
         "(clinician_id, patient_id, arm, arm_source, seed, config_hash, config_version) "
-        "VALUES (?, ?, ?, ?, NULL, ?, ?)",
+        "VALUES (?, ?, ?, ?, NULL, ?, ?) "
+        "ON CONFLICT(clinician_id, patient_id) DO NOTHING",
         (clinician_id, patient_id, arm, arm_source, config_hash, config_version),
     )
-    conn.commit()
+    if commit:
+        conn.commit()
     fresh = conn.execute(
         "SELECT arm, arm_source FROM arm_assignments WHERE clinician_id = ? AND patient_id = ?",
         (clinician_id, patient_id),
@@ -157,21 +164,10 @@ def fetch_for_pair(
 ) -> ArmAssignment | None:
     """The pair's locked row (with provenance), or ``None`` if never assigned."""
     row = conn.execute(
-        "SELECT clinician_id, patient_id, arm, arm_source, seed, config_hash, config_version "
-        "FROM arm_assignments WHERE clinician_id = ? AND patient_id = ?",
+        f"SELECT {_ARM_COLUMNS} FROM arm_assignments WHERE clinician_id = ? AND patient_id = ?",
         (clinician_id, patient_id),
     ).fetchone()
-    if row is None:
-        return None
-    return ArmAssignment(
-        clinician_id=row[0],
-        patient_id=row[1],
-        arm=row[2],
-        arm_source=row[3],
-        seed=row[4],
-        config_hash=row[5],
-        config_version=row[6],
-    )
+    return None if row is None else _arm_row(row)
 
 
 def fetch_activated_for_pair(

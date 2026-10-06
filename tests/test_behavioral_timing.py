@@ -19,72 +19,11 @@ from ehr_simulator.behavioral_timing import (
     measure,
     union,
 )
-from ehr_simulator.db.telemetry import RenderRow, TabAuditRow, TelemetryRow
+from ehr_simulator.db.telemetry import RenderRow, TabAuditRow
+from tests.support.timeline import TAB, S, Stream, _render
 
-TAB = "tab-a"
 OTHER_TAB = "tab-b"
 THRESHOLD_S = 60.0
-S = 1000.0  # milliseconds per second
-
-
-class Stream:
-    """Builds one render's rows in the order the browser would send them."""
-
-    def __init__(
-        self, render_id: str = "r1", tab_id: str = TAB, seq_start: int = 1, event_base: int = 0
-    ) -> None:
-        self.render_id = render_id
-        self.tab_id = tab_id
-        self.seq = seq_start
-        self.event_base = event_base  # server event_id offset (cross-tab ordering)
-        self.rows: list[TelemetryRow] = []
-
-    def _add(self, kind: str, mono_s: float, payload: dict, seq: int | None = None) -> Stream:
-        self.rows.append(
-            TelemetryRow(
-                event_id=self.event_base + len(self.rows) + 1,
-                render_id=self.render_id,
-                tab_id=self.tab_id,
-                kind=kind,
-                client_seq=self.seq if seq is None else seq,
-                client_mono_ms=mono_s * S,
-                client_ts=None,
-                payload=payload,
-            )
-        )
-        self.seq += 1
-        return self
-
-    def enter(self, at: float, *, visible: bool = True, focused: bool = True) -> Stream:
-        return self._add("browser.timepoint_enter", at, {"visible": visible, "focused": focused})
-
-    def state(self, at: float, *, visible: bool, focused: bool, reason: str = "blur") -> Stream:
-        return self._add(
-            "browser.state", at, {"visible": visible, "focused": focused, "reason": reason}
-        )
-
-    def activity(self, at: float, kind: str = "click", seq: int | None = None) -> Stream:
-        return self._add("browser.activity", at, {"activity_kind": kind}, seq)
-
-    def exit(self, at: float, reason: str = "swap") -> Stream:
-        return self._add("browser.timepoint_exit", at, {"reason": reason})
-
-    def gap(self, at: float) -> Stream:
-        return self._add("browser.gap", at, {"dropped": 2})
-
-
-def _render(
-    render_id: str = "r1", t_index: int = 0, visit_kind: str = "primary", event_id: int = 1
-) -> RenderRow:
-    return RenderRow(
-        event_id=event_id,
-        render_id=render_id,
-        session_id="s",
-        clinician_id="c",
-        patient_id="p",
-        timepoint=0.0,
-        payload={"t_index": t_index, "visit_kind": visit_kind},
-    )
 
 
 def _timing(stream: Stream, threshold_s: float = THRESHOLD_S):
@@ -196,6 +135,27 @@ def test_trailing_activity_behind_its_sequence_is_valid() -> None:
     stream.activity(0.2).exit(1)
 
     assert _timing(stream).timeline.status is TelemetryStatus.COMPLETE
+
+
+def test_regranted_render_does_not_count_the_refused_period() -> None:
+    """S11m: a tab granted by Retry restarts its timeline with a second enter
+    on the same render. The unobserved time before it never counts, and the
+    first segment, closed at its last event, makes the total a lower bound."""
+    stream = Stream().enter(0, focused=False).state(1, visible=True, focused=True)
+    stream.enter(601).exit(602)
+    timing = _timing(stream)
+
+    assert timing.timeline.status is TelemetryStatus.INCOMPLETE
+    assert timing.foreground_ms == 1 * S
+    assert timing.active_ms == 1 * S
+
+
+def test_reentered_render_after_its_exit_sums_both_segments() -> None:
+    stream = Stream().enter(0).exit(10, reason="pagehide").enter(100).exit(105)
+    timing = _timing(stream)
+
+    assert timing.timeline.status is TelemetryStatus.COMPLETE
+    assert timing.foreground_ms == 15 * S
 
 
 # ---------------------------------------------------------------------------

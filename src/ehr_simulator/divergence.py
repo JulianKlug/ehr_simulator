@@ -65,6 +65,7 @@ from ehr_simulator.config import (
 )
 from ehr_simulator.db import answers, arm_assignments
 from ehr_simulator.db.observation import ObservationMode
+from ehr_simulator.export import ExportError, read_snapshot
 from ehr_simulator.ingestion.canonical import LAB_VAR_SET, VITAL_VAR_SET
 
 if TYPE_CHECKING:
@@ -88,6 +89,7 @@ WALL_CLOCK_LABEL = "wall-clock elapsed seconds"
 # mappings): the figure can hold up to two arms × ~6 options + medians,
 # which exceeds plotnine's discrete-scale palette limits (linetype 4,
 # colour 10). Constants bypass palette resolution entirely.
+_MIN_LINE_POINTS = 2  # a line needs two points
 _ARM_COLORS = ("#1a1a1a", "#c0392b", "#1f77b4", "#2ca02c", "#9467bd", "#8c564b")
 _ARM_COLOR_NAMES = ("black", "red", "blue", "green", "purple", "brown")
 _OPT_STYLES = (
@@ -206,18 +208,25 @@ def build_divergence_figure(
     tps_set = set(tps)
     by_id: Mapping[str, Question] = {q.question_id: q for q in questions.questions}
 
+    # One snapshot: answers, arms and timing events must agree with each other.
+    try:
+        with read_snapshot(conn):
+            stored_answers = answers.fetch_all(conn)
+            stored_assignments = arm_assignments.fetch_all(conn)
+            stored_events = timing.fetch_timing_events(conn)
+    except ExportError as exc:
+        raise DivergenceError(str(exc)) from exc
+
     all_answers = tuple(
         a
-        for a in answers.fetch_all(conn)
+        for a in stored_answers
         if a.patient_id == patient_id and a.observation_mode == ObservationMode.MEASURED
     )
     # S10 fix: config-hash drift is checked on the assignment rows too, not
     # only the answer rows — with zero answers the drift would otherwise be
     # invisible (spec §5: the patient's answers AND their locked arm were
     # both written under the live config).
-    all_assignments = tuple(
-        a for a in arm_assignments.fetch_all(conn) if a.patient_id == patient_id
-    )
+    all_assignments = tuple(a for a in stored_assignments if a.patient_id == patient_id)
     for a in all_assignments:
         if a.config_hash != live_hash:
             raise DivergenceError(
@@ -251,7 +260,7 @@ def build_divergence_figure(
         panels.append((q.question_id, df))
 
     # -- Timing (spec §4/§6) --------------------------------------------
-    events = tuple(e for e in timing.fetch_timing_events(conn) if e.patient_id == patient_id)
+    events = tuple(e for e in stored_events if e.patient_id == patient_id)
     # S9c guarantee retained by S10: a timing event's recording generation is
     # pinned on its sessions row — refuse a present, differing hash.
     for ev in events:
@@ -682,14 +691,19 @@ def _render(panels: list[tuple[str, pd.DataFrame]], *, title: str, subtitle: str
             for (arm, _), sub in line.groupby(["arm", "series"], sort=True):
                 style = sub["style"].iloc[0]
                 color = arm_color.get(arm, _ARM_COLORS[0])
-                p = p + geom_line(
-                    data=sub,
-                    mapping=aes(x="x", y="value", group="g"),
-                    color=color,
-                    size=1.0,
-                    alpha=0.9,
-                    linetype=style,
-                )
+
+                # One-point groups draw no line; skipping them silences plotnine's
+                # "Each group consist of only one observation" warning.
+                line_sub = sub[sub.groupby("g")["x"].transform("size") >= _MIN_LINE_POINTS]
+                if not line_sub.empty:
+                    p = p + geom_line(
+                        data=line_sub,
+                        mapping=aes(x="x", y="value", group="g"),
+                        color=color,
+                        size=1.0,
+                        alpha=0.9,
+                        linetype=style,
+                    )
                 p = p + geom_point(
                     data=sub,
                     mapping=aes(x="x", y="value"),

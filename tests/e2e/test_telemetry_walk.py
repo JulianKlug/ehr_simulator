@@ -18,24 +18,13 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import Page
 
+from tests.support.browser import _login_and_start
+
 TAB_ID_KEY = "ehrsim:tab-id"
 UUID_V4 = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 POLL_TIMEOUT_S = 12.0  # one 5 s flush interval plus slack
 POLL_STEP_S = 0.2
 TELEMETRY_GLOB = "**/telemetry/events"
-
-
-def _login_and_start(page: Page, base_url: str, name: str, chrome: str = "epic") -> str:
-    page.goto(f"{base_url}/login")
-    page.fill('input[name="clinician_name"]', name)
-    page.click('button[type="submit"]')
-    page.wait_for_url(f"{base_url}/")
-    page.click("button.case-start")
-    page.wait_for_selector("#patient-view[data-render-id]")
-    if chrome != "epic":
-        page.goto(page.url.replace("chrome=epic", f"chrome={chrome}"))
-        page.wait_for_selector("#patient-view[data-render-id]")
-    return page.url.split("/patient/")[1].split("/")[0]
 
 
 def _wait_for_new_render(page: Page, old: str) -> None:

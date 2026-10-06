@@ -44,7 +44,9 @@ from ehr_simulator.db.randomisation import GeneratedSchedule, ScheduleItem
 from ehr_simulator.db.replacements import ReplacementPlan
 from ehr_simulator.randomisation import (
     ActivatedAllocationState,
+    Arm,
     load_activated_allocation_state,
+    projected_imbalance,
     replacement_tie_rank,
 )
 
@@ -55,10 +57,9 @@ class ArmCounts:
     no_ai: int = 0
 
     def projected_imbalance(self, arm: str) -> int:
-        """``|ai - no_ai|`` after one more activation on ``arm``."""
-        ai = self.ai + (1 if arm == ARM_AI else 0)
-        no_ai = self.no_ai + (0 if arm == ARM_AI else 1)
-        return abs(ai - no_ai)
+        """``|ai - no_ai|`` after one more activation on ``arm``. Schedule
+        items are ``ai``/``no_ai`` (schema CHECK); any other arm raises."""
+        return projected_imbalance(self.ai, self.no_ai, Arm(arm))
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +180,49 @@ def eligible_candidates(
     return candidates, next_nominal
 
 
+def _choose_candidate(
+    conn: sqlite3.Connection,
+    schedule: GeneratedSchedule,
+    *,
+    clinician_id: str,
+    original_patient_id: str,
+    original_arm: str,
+    active_patient_ids: list[str],
+) -> ScheduleItem | None:
+    """The best eligible schedule item to replace the incomplete case."""
+    candidates, next_nominal = eligible_candidates(
+        conn, schedule, clinician_id=clinician_id, active_patient_ids=active_patient_ids
+    )
+    return select_replacement(
+        candidates,
+        original_patient_id=original_patient_id,
+        original_arm=original_arm,
+        clinician_counts=_clinician_counts(conn, clinician_id),
+        patient_counts=_patient_counts(load_activated_allocation_state(conn, active_patient_ids)),
+        next_nominal_position=next_nominal or 0,
+        schedule_key_hex=schedule.derived_seed_hex,
+    )
+
+
+def _record_plan(conn: sqlite3.Connection, plan: ReplacementPlan) -> None:
+    """Insert the plan and its ``case.replacement_planned`` event; no commit."""
+    replacements_dao.insert(conn, plan, commit=False)
+    events.append(
+        conn,
+        session_id=None,
+        clinician_id=plan.clinician_id,
+        patient_id=plan.original_patient_id,
+        timepoint=None,
+        kind="case.replacement_planned",
+        payload={
+            "replacement_id": plan.replacement_id,
+            "replacement_patient_id": plan.replacement_patient_id,
+            "replacement_case_position": plan.replacement_case_position,
+        },
+        commit=False,
+    )
+
+
 def _plan_locked(
     conn: sqlite3.Connection, *, clinician_id: str, original_patient_id: str, now: datetime
 ) -> ReplacementPlan | None:
@@ -203,17 +247,13 @@ def _plan_locked(
         raise ConfigurationProvenanceError("the clinician holds a case but no schedule")
 
     schedule = stored.schedule
-    candidates, next_nominal = eligible_candidates(
-        conn, schedule, clinician_id=clinician_id, active_patient_ids=active_patient_ids
-    )
-    chosen = select_replacement(
-        candidates,
+    chosen = _choose_candidate(
+        conn,
+        schedule,
+        clinician_id=clinician_id,
         original_patient_id=original_patient_id,
         original_arm=original.arm,
-        clinician_counts=_clinician_counts(conn, clinician_id),
-        patient_counts=_patient_counts(load_activated_allocation_state(conn, active_patient_ids)),
-        next_nominal_position=next_nominal or 0,
-        schedule_key_hex=schedule.derived_seed_hex,
+        active_patient_ids=active_patient_ids,
     )
     if chosen is None:
         return None
@@ -235,21 +275,7 @@ def _plan_locked(
         generated_at=now,
         activated_at=None,
     )
-    replacements_dao.insert(conn, plan, commit=False)
-    events.append(
-        conn,
-        session_id=None,
-        clinician_id=clinician_id,
-        patient_id=original_patient_id,
-        timepoint=None,
-        kind="case.replacement_planned",
-        payload={
-            "replacement_id": plan.replacement_id,
-            "replacement_patient_id": plan.replacement_patient_id,
-            "replacement_case_position": plan.replacement_case_position,
-        },
-        commit=False,
-    )
+    _record_plan(conn, plan)
     return plan
 
 

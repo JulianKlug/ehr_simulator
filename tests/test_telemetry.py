@@ -18,7 +18,6 @@ from typing import Any
 
 import pytest
 import yaml
-from bs4 import BeautifulSoup
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -30,15 +29,23 @@ from ehr_simulator.db.migrations import apply_migrations
 from ehr_simulator.ingestion import load_synthetic
 from ehr_simulator.web.telemetry import MAX_BATCH_BYTES, MAX_BATCH_EVENTS
 from tests.conftest import answer_all_required
-from tests.test_case_start import Harness, _start, _started_patient, harness  # noqa: F401
+from tests.support.cases import (
+    Harness,
+    _start,
+    _started_patient,
+    harness,  # noqa: F401
+)
+from tests.support.telemetry import (
+    OTHER_TAB_ID,
+    TAB_ID,
+    TELEMETRY,
+    TELEMETRY_URL,
+    _event,
+    _post,
+    _view,
+)
 
 FIXTURES = Path(__file__).parent / "fixtures" / "study"
-TELEMETRY = {
-    "inactivity_threshold_seconds": 60,
-    "panel_viewport_threshold": 0.05,
-    "panel_viewed_threshold_seconds": 2.0,
-}
-TELEMETRY_URL = "/telemetry/events"
 HX = {"HX-Request": "true"}
 HTTP_OK = 200
 HTTP_NO_CONTENT = 204
@@ -153,10 +160,6 @@ def _renders(client: TestClient) -> list[tuple[str, str, float, dict]]:
     return [(r[0], r[1], r[2], json.loads(r[3])) for r in rows]
 
 
-def _view(html: str) -> Any:
-    return BeautifulSoup(html, "html.parser").select_one("#patient-view")
-
-
 def _open_case(client: TestClient) -> tuple[str, str]:
     """Start a case and GET its first timepoint; return (patient, render_id)."""
     patient_id = _started_patient(_start(client))
@@ -226,8 +229,24 @@ def test_blocked_and_stale_advance_write_no_render(telemetry_harness: Any) -> No
 
     assert blocked.status_code == HTTP_CONFLICT
     assert stale.status_code == HTTP_PRECONDITION_FAILED
-    assert not _view(stale.text).has_attr("data-render-id")
     assert before == after == 2
+
+
+def test_guarded_stale_advance_redirects_to_the_frontier_get(telemetry_harness: Any) -> None:
+    """S11m: a render-id-less stale view would strand its tab without the
+    lease; a guarded case gets the frontier GET (a fresh guarded render)."""
+    study, config = telemetry_harness
+    with study.boot(config) as client:
+        patient_id, _ = _open_case(client)
+        answer_all_required(client, patient_id, 0)
+        client.post(f"/patient/{patient_id}/timepoint/0/advance", headers=HX)
+        stale = client.post(f"/patient/{patient_id}/timepoint/0/advance", headers=HX)
+        frontier = client.get(stale.headers["HX-Redirect"])
+
+    assert stale.status_code == HTTP_PRECONDITION_FAILED
+    assert stale.headers["HX-Redirect"] == f"/patient/{patient_id}/timepoint/1?chrome=epic"
+    assert stale.text == ""
+    assert _view(frontier.text).has_attr("data-render-id")
 
 
 def test_revisit_render_is_labelled_revisit(telemetry_harness: Any) -> None:
@@ -258,42 +277,6 @@ def test_render_ids_are_unique_per_render(telemetry_harness: Any) -> None:
 # ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
-
-TAB_ID = "0b6f7c1e-3f5a-4c2d-9e8b-7a6d5c4b3a21"
-OTHER_TAB_ID = "5d1c9a0e-8b7f-4e6d-a5c4-3b2a1f0e9d8c"
-
-
-def _event(render_id: str, seq: int, kind: str = "browser.state", **overrides: Any) -> dict:
-    payloads = {
-        "browser.timepoint_enter": {"visible": True, "focused": True},
-        "browser.state": {"visible": True, "focused": False, "reason": "blur"},
-        "browser.activity": {"activity_kind": "click"},
-        "browser.timepoint_exit": {"reason": "swap"},
-        "browser.gap": {"dropped": 3},
-        "panel.mount": {
-            "panel_id": "vitals",
-            "expanded": True,
-            "collapsible": True,
-            "state": "loading",
-        },
-        "panel.viewport": {"panel_id": "vitals", "intersection_ratio": 0.049},
-        "panel.open": {"panel_id": "labs"},
-        "panel.close": {"panel_id": "admission"},
-    }
-    event = {
-        "kind": kind,
-        "render_id": render_id,
-        "client_seq": seq,
-        "client_mono_ms": 100.0 * seq,
-        "client_ts": "2026-09-27T10:00:00.000Z",
-        "payload": payloads[kind],
-    }
-    event.update(overrides)
-    return event
-
-
-def _post(client: TestClient, events_: list[dict], tab_id: str = TAB_ID) -> Any:
-    return client.post(TELEMETRY_URL, json={"tab_id": tab_id, "events": events_})
 
 
 def _browser_rows(client: TestClient) -> list[tuple]:

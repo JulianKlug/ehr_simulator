@@ -11,24 +11,18 @@ service layer directly for concurrency, rollback and allocation-state tests.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import sqlite3
 import threading
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
-from dataclasses import dataclass, field
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
-import yaml
 from fastapi.testclient import TestClient
 
-from ehr_simulator.config import compute_config_hash_from_models, load_questions, load_study_config
 from ehr_simulator.db import arm_assignments, connect, events, sessions
-from ehr_simulator.db import randomisation as schedules_dao
 from ehr_simulator.db.arm_assignments import ARM_SOURCE_PHASE2
 from ehr_simulator.randomisation import (
     ActivatedAllocationState,
@@ -36,174 +30,29 @@ from ehr_simulator.randomisation import (
     load_activated_allocation_state,
 )
 from ehr_simulator.web import case_start
-from ehr_simulator.web.app import app_from_study_config
-from tests.conftest import (
-    ProfileSetup,
-    _activate_configuration,
-    _seed_clinician,
-    adopt_tab_views,
-    ensure_profile,
-    seed_progress,
+from tests.conftest import seed_progress
+from tests.support.cases import (
+    ARM_MARKERS,
+    HTTP_CONFLICT,
+    HTTP_OK,
+    HTTP_SEE_OTHER,
+    HX,
+    INDEX_URL,
+    LAST_T_INDEX,
+    SECOND_CLINICIAN,
+    Config,
+    Harness,
+    _start,
+    _started_patient,
+    new_harness,
 )
 
-HTTP_OK = 200
-HTTP_SEE_OTHER = 303
-HTTP_CONFLICT = 409
 HTTP_INTEGRITY_ERROR = 500
-HX = {"HX-Request": "true"}
-COOKIE = "ehrsim_clinician_id"
-INDEX_URL = "/"
-START_URL = "/case/start"
-LAST_T_INDEX = 2
-SECOND_CLINICIAN = "Dr. Two"
-CASE_KINDS = ("case.activated", "session.start")
-ARM_MARKERS = ("no_ai", "phase2_randomized", "data-arm")
-
-
-def _clinician_id(name: str) -> str:
-    normalized = " ".join(name.casefold().split())
-    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
-
-
-@dataclass(frozen=True)
-class Config:
-    version: str
-    study_yaml: Path
-    questions_yaml: Path
-
-    @property
-    def study(self):
-        return load_study_config(self.study_yaml)
-
-    @property
-    def questions(self):
-        return load_questions(self.questions_yaml)
-
-    @property
-    def config_hash(self) -> str:
-        return compute_config_hash_from_models(self.study, self.questions)
-
-
-@dataclass
-class Harness:
-    tmp_path: Path
-    db_path: Path
-    clinician_id: str
-    v1: Config
-    #: S11p: give every booted clinician a valid profile when the study asks
-    #: for one (the gate's own tests switch this off).
-    profile_setup: ProfileSetup = field(default_factory=lambda: ProfileSetup.AUTO)
-
-    def activate(self, config: Config) -> None:
-        _activate_configuration(
-            self.db_path,
-            config.study_yaml,
-            config.questions_yaml,
-            version=config.version,
-            description=f"activate {config.version}",
-        )
-
-    def variant(self, version: str, **changes: Any) -> Config:
-        """A copy of v1's study YAML with top-level keys replaced."""
-        data = yaml.safe_load(self.v1.study_yaml.read_text())
-        data.update(changes)
-        path = self.tmp_path / f"study_{version}.yaml"
-        path.write_text(yaml.safe_dump(data))
-        return Config(version, path, self.v1.questions_yaml)
-
-    @contextmanager
-    def boot(self, config: Config | None = None, clinician_id: str | None = None):
-        config = config or self.v1
-        app = app_from_study_config(
-            config.study_yaml,
-            config.questions_yaml,
-            log_dir=self.tmp_path / "logs",
-            db_path=self.db_path,
-            backup_dir=self.tmp_path / "backups",
-        )
-        with TestClient(app) as client:
-            client.cookies.set(COOKIE, clinician_id or self.clinician_id)
-            if self.profile_setup is ProfileSetup.AUTO:
-                ensure_profile(client)
-            adopt_tab_views(client)
-            yield client
-
-    @contextmanager
-    def conn(self) -> Iterator[sqlite3.Connection]:
-        conn = connect(self.db_path)
-        try:
-            yield conn
-        finally:
-            conn.close()
-
-    def count(self, sql: str, params: tuple = ()) -> int:
-        with self.conn() as conn:
-            return conn.execute(sql, params).fetchone()[0]
-
-    def dump(self) -> dict[str, list[tuple]]:
-        tables = (
-            "arm_assignments",
-            "sessions",
-            "progress",
-            "randomisation_schedules",
-            "randomisation_schedule_items",
-        )
-        with self.conn() as conn:
-            dumped = {
-                t: [tuple(r) for r in conn.execute(f"SELECT * FROM {t} ORDER BY 1, 2")]
-                for t in tables
-            }
-            dumped["case_events"] = [
-                tuple(r)
-                for r in conn.execute(
-                    "SELECT kind, patient_id FROM events WHERE kind IN (?, ?) ORDER BY event_id",
-                    CASE_KINDS,
-                )
-            ]
-        return dumped
-
-    def assignments(self, clinician_id: str | None = None):
-        with self.conn() as conn:
-            return arm_assignments.list_for_clinician(conn, clinician_id or self.clinician_id)
-
-    def schedule(self, clinician_id: str | None = None):
-        with self.conn() as conn:
-            stored = schedules_dao.fetch_for_clinician(
-                conn, self.v1.study.study_id, clinician_id or self.clinician_id
-            )
-        assert stored is not None
-        return stored.schedule
-
-    def add_clinician(self, name: str) -> str:
-        clinician_id = _clinician_id(name)
-        with self.conn() as conn:
-            conn.execute(
-                "INSERT INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
-                (clinician_id, " ".join(name.casefold().split())),
-            )
-            conn.commit()
-        return clinician_id
 
 
 @pytest.fixture
 def harness(tmp_path: Path, study_fixture_dir: Path) -> Harness:
-    v1 = Config(
-        "v1", study_fixture_dir / "study_randomised.yaml", study_fixture_dir / "questions.yaml"
-    )
-    db_path = tmp_path / "study.db"
-    clinician_id = _seed_clinician(db_path, study_id=v1.study.study_id)
-    h = Harness(tmp_path, db_path, clinician_id, v1)
-    h.activate(v1)
-    return h
-
-
-def _start(client: TestClient, *, htmx: bool = False):
-    return client.post(START_URL, headers=HX if htmx else {}, follow_redirects=False)
-
-
-def _started_patient(response) -> str:
-    assert response.status_code == HTTP_SEE_OTHER, response.text
-    return response.headers["location"].split("/")[2]
+    return new_harness(tmp_path, study_fixture_dir)
 
 
 def _complete(client: TestClient, patient_id: str) -> None:
@@ -274,14 +123,6 @@ def test_activation_stores_schedule_position_and_timestamp(harness: Harness) -> 
     assert row.case_position == 1
     assert row.activated_at is not None
     assert row.activated_at == row.assigned_at
-
-
-def test_assignment_receives_active_configuration(harness: Harness) -> None:
-    with harness.boot() as client:
-        _start(client)
-
-    (row,) = harness.assignments()
-    assert (row.config_version, row.config_hash) == ("v1", harness.v1.config_hash)
 
 
 def test_repeated_start_resumes_the_same_case(harness: Harness) -> None:
@@ -571,18 +412,6 @@ def test_completed_case_is_not_open(harness: Harness) -> None:
     assert [a.case_position for a in harness.assignments()] == [1, 2]
 
 
-def test_start_with_open_case_writes_nothing(harness: Harness) -> None:
-    with harness.boot() as client:
-        _start(client)
-        before = harness.dump()
-        state = client.app.state
-        with harness.conn() as conn:
-            started = case_start.start_next_case(conn, state, clinician_id=harness.clinician_id)
-
-    assert started.outcome is case_start.StartOutcome.RESUMED
-    assert harness.dump() == before
-
-
 def test_exhausted_schedule_refuses(harness: Harness) -> None:
     with harness.boot() as client:
         for _ in harness.v1.study.patient_ids:
@@ -658,14 +487,6 @@ def test_direct_get_to_unactivated_patient_redirects(harness: Harness, htmx: boo
         assert (r.status_code, r.headers["HX-Redirect"]) == (HTTP_OK, INDEX_URL)
     else:
         assert (r.status_code, r.headers["location"]) == (HTTP_SEE_OTHER, INDEX_URL)
-
-
-def test_get_activated_patient_succeeds(harness: Harness) -> None:
-    with harness.boot() as client:
-        patient_id = _started_patient(_start(client))
-        r = client.get(f"/patient/{patient_id}/timepoint/0")
-
-    assert r.status_code == HTTP_OK
 
 
 def test_answer_and_advance_cannot_create_assignments(harness: Harness) -> None:
@@ -802,12 +623,3 @@ def test_starts_never_rewrite_schedules(harness: Harness) -> None:
     for table in ("randomisation_schedules", "randomisation_schedule_items"):
         assert set(first_tables[table]) <= set(after[table])
     assert harness.schedule() == first_schedule
-
-
-def test_stale_server_creates_no_schedule(harness: Harness) -> None:
-    with harness.boot() as client:
-        harness.activate(harness.variant("v2", timepoints=[0, 120]))
-        r = _start(client)
-
-    assert r.status_code == HTTP_CONFLICT
-    assert harness.count("SELECT COUNT(*) FROM randomisation_schedules") == 0

@@ -8,7 +8,7 @@ Callers:
   Refreshes and resume-after-redirect legitimately duplicate the enter;
   the exporter pairs the first valid (enter, exit), so duplicates are
   append-only behavioural data, never a correctness issue.
-* ``web.routes._advance_response`` (the 200 "advanced" path) — one
+* ``web.patient_view._advance_response`` (the 200 "advanced" path) — one
   ``timepoint.enter`` for the pane the response now renders: the htmx swap
   shows it without a new GET, so the enter rides on the advance response.
   The 303/409/412 paths write neither (the browser follows to a full
@@ -80,10 +80,12 @@ def record_enter(
     patient_id: str,
     t_index: int,
     t_minutes: float,
+    commit: bool = True,
 ) -> None:
     """One ``timepoint.enter`` for ``t_index`` (``t_minutes`` must be the
     configured minutes for that index — the caller already resolved the
-    timepoint for the pane about to render)."""
+    timepoint for the pane about to render). ``commit=False`` joins the
+    caller's transaction (the view's render row and lease move)."""
     events.append(
         conn,
         app_state=app_state,
@@ -94,6 +96,7 @@ def record_enter(
         # type: ignore[arg-type] -- ENTER_KIND is an EventKind member
         kind=ENTER_KIND,
         payload={"t_index": t_index},
+        commit=commit,
     )
 
 
@@ -142,6 +145,7 @@ def record_revisit(
     patient_id: str,
     t_index: int,
     t_minutes: float,
+    commit: bool = True,
 ) -> None:
     """S11i: one ``timepoint.revisit`` after a successful read-only render."""
     events.append(
@@ -153,6 +157,7 @@ def record_revisit(
         timepoint=float(t_minutes),
         kind=REVISIT_KIND,
         payload={"t_index": t_index},
+        commit=commit,
     )
 
 
@@ -174,6 +179,7 @@ def record_render(
     visit_kind: VisitKind,
     ai_delivery: dict[str, str],
     tab_guard: bool = False,
+    commit: bool = True,
 ) -> None:
     """S11j: one ``timepoint.render`` after a successful telemetry render.
 
@@ -193,4 +199,5 @@ def record_render(
         kind=RENDER_KIND,  # type: ignore[arg-type]
         payload={"t_index": t_index, "visit_kind": str(visit_kind), **ai_delivery, **guard},
         render_id=render_id,
+        commit=commit,
     )

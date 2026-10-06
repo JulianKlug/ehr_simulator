@@ -21,28 +21,12 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Any
 
-from ehr_simulator.db.config_history import has_any
+from ehr_simulator.db._provenance import _require_version_provenance
 from ehr_simulator.db.exceptions import ConfigurationProvenanceError
 from ehr_simulator.db.observation import ObservationMode
 
 ANSWER_SOURCE_CLINICIAN = "clinician"
 ANSWER_SOURCE_RULE = "rule"
-
-
-def _require_version_provenance(conn: sqlite3.Connection, config_version: str | None) -> None:
-    """Write-side provenance guard (S11b): once the study has any activated
-    configuration, every new case row must carry its ``config_version``.
-
-    Raises:
-        ConfigurationProvenanceError: ``config_version`` is NULL but
-            ``configuration_history`` is non-empty.
-    """
-    if config_version is None and has_any(conn):
-        raise ConfigurationProvenanceError(
-            "refusing to write a case row without a config_version: the study "
-            "has activated configurations in its history; every new case row "
-            "must pin the version under which it was started"
-        )
 
 
 def _require_cell_provenance(
@@ -201,27 +185,10 @@ def fetch_all(conn: sqlite3.Connection) -> tuple[AnswerRow, ...]:
     expects for grouping and is what makes re-runs byte-stable.
     """
     rows = conn.execute(
-        "SELECT clinician_id, patient_id, timepoint, question_id, value, "
-        "arm, config_hash, config_version, answer_source, derived_from_question_id, "
-        "observation_mode FROM answers "
+        f"SELECT {_ROW_COLUMNS} FROM answers "
         "ORDER BY clinician_id, patient_id, timepoint, question_id"
     ).fetchall()
-    return tuple(
-        AnswerRow(
-            clinician_id=row[0],
-            patient_id=row[1],
-            timepoint=float(row[2]),
-            question_id=row[3],
-            value=row[4],
-            arm=row[5],
-            config_hash=row[6],
-            config_version=row[7],
-            answer_source=row[8],
-            derived_from_question_id=row[9],
-            observation_mode=row[10],
-        )
-        for row in rows
-    )
+    return tuple(_answer_row(row) for row in rows)
 
 
 #: S11l: the ``AnswerRow`` columns, in field order.
@@ -363,17 +330,22 @@ def delete_after(
     patient_id: str,
     min_timepoint_exclusive: float,
     app_state: Any = None,
+    commit: bool = True,
 ) -> int:
     """Delete every answer of the pair strictly after a timepoint; return the rowcount.
 
     The S9b ``reset-progress`` CLI rewinds a walk to ``t_index = N`` and
     drops what was answered past it; answers *at* N survive and pre-fill the
-    re-opened pane.
+    re-opened pane. ``commit=False`` leaves the delete in the caller's
+    transaction and skips the write-counter bump.
     """
     cursor = conn.execute(
         "DELETE FROM answers WHERE clinician_id = ? AND patient_id = ? AND timepoint > ?",
         (clinician_id, patient_id, min_timepoint_exclusive),
     )
+    if not commit:
+        return cursor.rowcount
+
     conn.commit()
     deleted = cursor.rowcount
     if deleted > 0 and app_state is not None:

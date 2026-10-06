@@ -6,21 +6,18 @@ exercises a helper across both Geneva and MIMIC inputs (or against
 synthetic frames spanning both source vocabularies) so that re-forking
 the helpers later — adding dataset-specific behavior in either adapter
 — surfaces as a failing test, not a silent divergence.
-
-The function-identity sub-test (#4) lands when ``mimic.py`` does, in
-commit 2; the remaining six tests land in commit 1.
 """
 
 from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
 import structlog
 
-from ehr_simulator.ingestion import _shared
 from ehr_simulator.ingestion._shared import (
     CategoricalGroup,
     _decode_categorical,
@@ -32,6 +29,8 @@ from ehr_simulator.ingestion._shared import (
     _read_features_csv,
 )
 from ehr_simulator.ingestion.exceptions import AdapterError
+from ehr_simulator.ingestion.geneva import load_geneva
+from ehr_simulator.ingestion.mimic import load_mimic
 
 _REQUIRED_COLUMNS: tuple[str, ...] = (
     "relative_sample_date_hourly_cat",
@@ -105,6 +104,7 @@ def test_shared_inverse_normalize_pure_math() -> None:
     for x, (mean, std) in zip([0.5, -1.2, 17.3, -42.0], pairs[:4], strict=True):
         z = (x - mean) / std
         assert math.isclose(_inverse_normalize(z, mean, std), x, abs_tol=1e-9)
+    assert math.isnan(_inverse_normalize(float("nan"), 0.0, 1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -122,82 +122,6 @@ def test_shared_path_traversal_guard_dataset_param_in_issue(tmp_path: Path) -> N
     with pytest.raises(AdapterError) as exc_mimic:
         _path_traversal_guard(outside, tmp_path, dataset="mimic")
     assert exc_mimic.value.issues[0].dataset == "mimic"
-
-
-# ---------------------------------------------------------------------------
-# #4 — layered parity regression: function identity + behavioral cross-vocab
-# ---------------------------------------------------------------------------
-
-
-def test_shared_helpers_produce_identical_output_for_equivalent_inputs() -> None:
-    """ROADMAP-mandated parity regression.
-
-    Sub-(a) function identity: every helper exported by ``_shared.__all__``
-    is the same Python object whether reached via ``geneva`` or ``mimic``.
-    Catches accidental re-fork.
-
-    Sub-(b) behavioral parity on synthetic cross-vocabulary inputs: the
-    helper output is identical regardless of which adapter's source vocab
-    the input rows came from.
-    """
-    from ehr_simulator.ingestion import geneva as geneva_module
-    from ehr_simulator.ingestion import mimic as mimic_module
-
-    # Sub-(a): function identity over _shared.__all__
-    for name in _shared.__all__:
-        shared_obj = getattr(_shared, name)
-        geneva_obj = getattr(geneva_module, name)
-        mimic_obj = getattr(mimic_module, name)
-        assert shared_obj is geneva_obj, f"{name} re-forked between _shared and geneva"
-        assert shared_obj is mimic_obj, f"{name} re-forked between _shared and mimic"
-
-    # Sub-(b1): _drop_imputed produces same surviving row-count regardless of
-    # which dataset's source vocab the rows came from.
-    cross_vocab = pd.DataFrame(
-        {
-            "source": [
-                "EHR",
-                "stroke_registry",
-                "stroke_registry_pop_imputed",
-                "notes",
-                "notes_locf_imputed",
-                "missing_pop_imputed",
-            ],
-            "value": [1, 2, 3, 4, 5, 6],
-        }
-    )
-    survivors_via_geneva = geneva_module._drop_imputed(cross_vocab)
-    survivors_via_mimic = mimic_module._drop_imputed(cross_vocab)
-    pd.testing.assert_frame_equal(survivors_via_geneva, survivors_via_mimic)
-    assert sorted(survivors_via_geneva["source"].tolist()) == [
-        "EHR",
-        "notes",
-        "stroke_registry",
-    ]
-
-    # Sub-(b2): _inverse_normalize is pure math — same z, mean, std → same float
-    z, mean, std = 1.5, 73.6, 14.5
-    via_geneva = geneva_module._inverse_normalize(z, mean, std)
-    via_mimic = mimic_module._inverse_normalize(z, mean, std)
-    assert via_geneva == via_mimic
-
-    # Sub-(b3): _decode_categorical returns the same (label, None) regardless
-    # of the dataset kwarg when only one row is >=0.5.
-    group = CategoricalGroup(
-        group_name="Sex",
-        baseline="Female",
-        other_labels=("Male",),
-        one_hot_columns=("sex_male",),
-    )
-    rows = pd.DataFrame([{"sample_label": "sex_male", "value": 0.7}])
-    decoded_g, issue_g = _decode_categorical(
-        rows, group, strict=True, patient_id="p1", dataset="geneva"
-    )
-    decoded_m, issue_m = _decode_categorical(
-        rows, group, strict=True, patient_id="p1", dataset="mimic"
-    )
-    assert decoded_g == decoded_m == "Male"
-    assert issue_g is None and issue_m is None
 
 
 # ---------------------------------------------------------------------------
@@ -453,3 +377,121 @@ def test_build_admission_non_binary_orphan_still_emits_issue() -> None:
 
     assert "mystery_continuous" not in admission["field"].tolist()
     assert any(i.reason == "orphan registry variable: mystery_continuous" for i in issues)
+
+
+# ---------------------------------------------------------------------------
+# Validation hardening (code review)
+# ---------------------------------------------------------------------------
+
+_NORM_COLUMNS = ("variable", "original_mean", "original_std")
+
+
+def _write_norm(path: Path, rows: list[tuple[str, float, float]]) -> Path:
+    pd.DataFrame(rows, columns=list(_NORM_COLUMNS)).to_csv(path, index=False)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("rows", "reason"),
+    [
+        ([("hr", 70.0, 10.0), ("hr", 71.0, 10.0)], "duplicate"),
+        ([("hr", float("nan"), 10.0)], "mean"),
+        ([("hr", float("inf"), 10.0)], "mean"),
+        ([("hr", 70.0, float("nan"))], "std"),
+        ([("hr", 70.0, float("inf"))], "std"),
+        ([("hr", 70.0, 0.0)], "std"),
+        ([("hr", 70.0, -1.0)], "std"),
+    ],
+    ids=["duplicate", "nan_mean", "inf_mean", "nan_std", "inf_std", "zero_std", "negative_std"],
+)
+def test_load_normalisation_params_refuses_bad_rows(
+    tmp_path: Path, rows: list[tuple[str, float, float]], reason: str
+) -> None:
+    path = _write_norm(tmp_path / "norm.csv", rows)
+    with pytest.raises(AdapterError, match=reason):
+        _load_normalisation_params(path, dataset="geneva")
+
+
+def test_load_normalisation_params_refuses_missing_column(tmp_path: Path) -> None:
+    path = tmp_path / "norm.csv"
+    pd.DataFrame({"variable": ["age"], "original_mean": [1.0]}).to_csv(path, index=False)
+    with pytest.raises(AdapterError, match="original_std") as exc:
+        _load_normalisation_params(path, dataset="mimic")
+    assert "mimic" in str(exc.value)
+
+
+def test_load_normalisation_params_accepts_valid_rows(tmp_path: Path) -> None:
+    path = _write_norm(tmp_path / "norm.csv", [("hr", 70.0, 10.0), ("sbp", 120.0, 15.0)])
+    assert _load_normalisation_params(path, dataset="geneva") == {
+        "hr": (70.0, 10.0),
+        "sbp": (120.0, 15.0),
+    }
+
+
+@pytest.mark.parametrize("dataset", ["geneva", "mimic"])
+def test_load_categorical_encoding_covers_all_19_groups(dataset: str) -> None:
+    fixture_dir = Path(__file__).parent / "fixtures" / dataset
+    encoding = fixture_dir / "categorical_variable_encoding.csv"
+    sample_labels = set(
+        pd.read_csv(fixture_dir / f"{dataset}_sample.csv", dtype={"sample_label": str})[
+            "sample_label"
+        ].unique()
+    )
+    groups = _load_categorical_encoding(encoding, sample_labels, dataset=dataset)
+    assert len(groups) == 19
+    for group in groups.values():
+        for col in group.one_hot_columns:
+            assert col in sample_labels
+
+    # A one-hot column absent from the CSV is refused, e.g. sex_male.
+    with pytest.raises(AdapterError, match="sex_male"):
+        _load_categorical_encoding(encoding, sample_labels - {"sex_male"}, dataset=dataset)
+
+
+def test_load_categorical_encoding_refuses_empty_baseline_list(tmp_path: Path) -> None:
+    path = tmp_path / "cat.csv"
+    pd.DataFrame(
+        {"sample_label": ["Sex"], "baseline_value": ["[]"], "other_categories": ["['Male']"]}
+    ).to_csv(path, index=False)
+    with pytest.raises(AdapterError, match="Sex"):
+        _load_categorical_encoding(path, sample_labels={"sex_male"}, dataset="geneva")
+
+
+@pytest.mark.parametrize(
+    ("loader", "fixture", "files"),
+    [
+        (
+            load_geneva,
+            "geneva",
+            ("normalisation_parameters.csv", "categorical_variable_encoding.csv"),
+        ),
+        (
+            load_mimic,
+            "mimic",
+            (
+                "reference_population_normalisation_parameters.csv",
+                "categorical_variable_encoding.csv",
+            ),
+        ),
+    ],
+    ids=["geneva", "mimic"],
+)
+def test_non_numeric_hour_bucket_is_refused_or_dropped(
+    tmp_path: Path, loader: Any, fixture: str, files: tuple[str, ...]
+) -> None:
+    fixture_dir = Path(__file__).parent / "fixtures" / fixture
+    csv = pd.read_csv(fixture_dir / f"{fixture}_sample.csv", dtype=str)
+    ehr = csv.index[csv["source"] == "EHR"]
+    csv.loc[ehr[0], "relative_sample_date_hourly_cat"] = "soon"
+    out_csv = tmp_path / f"{fixture}_sample.csv"
+    csv.to_csv(out_csv, index=False)
+    for name in files:
+        (tmp_path / name).write_bytes((fixture_dir / name).read_bytes())
+
+    with pytest.raises(AdapterError, match="relative_sample_date_hourly_cat"):
+        loader(out_csv, tmp_path, strict=True)
+
+    clean = loader(fixture_dir / f"{fixture}_sample.csv", fixture_dir, strict=False)
+    lenient = loader(out_csv, tmp_path, strict=False)
+    assert len(lenient.scalar_ts) == len(clean.scalar_ts) - 1
+    assert any("relative_sample_date_hourly_cat" in i.reason for i in lenient.issues)

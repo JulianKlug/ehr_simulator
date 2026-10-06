@@ -10,27 +10,20 @@ writes nothing::
                 completed  └─► incomplete
 
 Timestamps are supplied by the caller (the service's injected clock) and
-stored as UTC ``YYYY-MM-DD HH:MM:SS`` like every ``CURRENT_TIMESTAMP``
-column. ``commit=False`` leaves a write in the caller's transaction.
+stored as UTC text (``db/_timestamps.py``). ``commit=False`` leaves a write in
+the caller's transaction.
 """
 
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 from enum import StrEnum
 
+from ehr_simulator.db._timestamps import _as_utc, to_db_timestamp
 from ehr_simulator.db.exceptions import CaseLifecycleError
-
-_DB_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
-
-
-class CaseState(StrEnum):
-    ACTIVE = "active"
-    PAUSED = "paused"
-    COMPLETED = "completed"
-    INCOMPLETE = "incomplete"
+from ehr_simulator.domain_types import CaseState
 
 
 class IncompleteReason(StrEnum):
@@ -78,30 +71,13 @@ _COLUMNS = (
 )
 
 
-def to_db_timestamp(moment: datetime) -> str:
-    """Aware or naive-UTC datetime → the stored UTC text form."""
-    if moment.tzinfo is not None:
-        moment = moment.astimezone(UTC).replace(tzinfo=None)
-    return moment.strftime(_DB_TIMESTAMP_FORMAT)
-
-
-def _as_utc(value: datetime | str | None) -> datetime | None:
-    # PARSE_DECLTYPES yields naive datetimes; a raw string can still come back
-    # from a connection opened without it. Both are UTC.
-    if value is None:
-        return None
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
-
-
 def _row(row: tuple) -> CaseLifecycle:
     return CaseLifecycle(
         clinician_id=row[0],
         patient_id=row[1],
         state=CaseState(row[2]),
-        state_changed_at=_as_utc(row[3]),  # type: ignore[arg-type]
-        last_seen_at=_as_utc(row[4]),  # type: ignore[arg-type]
+        state_changed_at=_as_utc(row[3]),
+        last_seen_at=_as_utc(row[4]),
         paused_at=_as_utc(row[5]),
         completed_at=_as_utc(row[6]),
         incomplete_at=_as_utc(row[7]),
@@ -205,16 +181,21 @@ def _transition(
     commit: bool,
 ) -> None:
     """Compare-and-set ``UPDATE`` guarded on ``expected``; a miss writes nothing."""
+    joined = conn.in_transaction
     cursor = conn.execute(
         f"UPDATE case_lifecycle SET {assignments} "
         "WHERE clinician_id = ? AND patient_id = ? AND state = ?",
         (*params, clinician_id, patient_id, expected),
     )
-    if commit:
-        # Also ends the empty transaction a missed UPDATE opened.
-        conn.commit()
     if cursor.rowcount == 1:
+        if commit:
+            conn.commit()
         return
+
+    # A miss never commits the caller's pending writes; it only ends the
+    # empty transaction its own UPDATE opened.
+    if commit and not joined:
+        conn.rollback()
 
     current = fetch(conn, clinician_id, patient_id)
     found = "no lifecycle row" if current is None else f"state {current.state}"

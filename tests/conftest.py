@@ -26,7 +26,6 @@ and ``POST …/answer`` has a config to validate against.
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from collections.abc import Iterator
 from enum import StrEnum
@@ -36,6 +35,64 @@ import pytest
 
 from ehr_simulator.ingestion.synthetic import SyntheticDataset, load_synthetic
 from ehr_simulator.logging import reset_request_context
+from tests.support.telemetry import TAB_ID
+
+# Test stages, selected with ``-m``. Every collected test gets exactly one:
+#   unit        — pure logic + SQLite DAOs, no app boot (seconds)
+#   integration — boots the FastAPI app or the CLI (default for new modules)
+#   slow        — full Phase 2 study walks; deselected locally, run in CI
+# e2e / real_data tests keep their own markers and get no stage.
+UNIT_MODULES = frozenset(
+    {
+        "test_answer_capture",
+        "test_answer_codec",
+        "test_behavioral_timing",
+        "test_canonical",
+        "test_charts",
+        "test_config",
+        "test_config_history",
+        "test_data_contract",
+        "test_db",
+        "test_db_backup",
+        "test_db_integrity",
+        "test_divergence",
+        "test_export",
+        "test_gating",
+        "test_geneva",
+        "test_geneva_ai",
+        "test_logging",
+        "test_mimic",
+        "test_panels",
+        "test_pseudonym",
+        "test_randomisation",
+        "test_shared",
+        "test_static_assets",
+        "test_study_session",
+        "test_synthetic",
+        "test_timing",
+    }
+)
+SLOW_MODULES = frozenset({"test_export_phase2", "test_phase2_integration"})
+UNSTAGED_MARKERS = ("e2e", "real_data")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Tag each test with its stage marker from its module name."""
+    for item in items:
+        if any(item.get_closest_marker(name) for name in UNSTAGED_MARKERS):
+            continue
+
+        module = item.path.stem
+        if module in SLOW_MODULES:
+            item.add_marker(pytest.mark.slow)
+            continue
+
+        if module in UNIT_MODULES:
+            item.add_marker(pytest.mark.unit)
+            continue
+
+        item.add_marker(pytest.mark.integration)
 
 
 @pytest.fixture(scope="session")
@@ -89,6 +146,16 @@ def db(tmp_db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def drop_append_only_triggers(conn: sqlite3.Connection) -> None:
+    """Let a test tamper with the append-only tables (migration 15) to
+    simulate out-of-band corruption."""
+    from ehr_simulator.db.migrations import _APPEND_ONLY_TABLES
+
+    for table in _APPEND_ONLY_TABLES:
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_no_update")
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_no_delete")
+
+
 def _seed_clinician(tmp_db_path: Path, *, study_id: str | None = None) -> str:
     """Insert ``Dr. Test`` into a fresh DB; return the canonical id.
 
@@ -96,21 +163,14 @@ def _seed_clinician(tmp_db_path: Path, *, study_id: str | None = None) -> str:
     study BEFORE the clinician row is seeded — S11a refuses to claim a DB
     that already holds application data, so seeding must follow binding.
     """
-    from ehr_simulator.db import apply_migrations, connect, study_identity
+    from ehr_simulator.db import apply_migrations, clinicians, connect, study_identity
 
-    name = "Dr. Test"
-    name_normalized = " ".join(name.casefold().split())
-    clinician_id = hashlib.sha256(name_normalized.encode("utf-8")).hexdigest()[:16]
     tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
     seed_conn = connect(tmp_db_path)
     apply_migrations(seed_conn)
     if study_id is not None:
         study_identity.bind(seed_conn, study_id)
-    seed_conn.execute(
-        "INSERT INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
-        (clinician_id, name_normalized),
-    )
-    seed_conn.commit()
+    clinician_id = clinicians.lookup_or_create(seed_conn, "Dr. Test")
     seed_conn.close()
     return clinician_id
 
@@ -351,7 +411,7 @@ def seed_progress(
 # ---------------------------------------------------------------------------
 
 #: The tab every test client claims as (a lowercase UUID v4).
-TEST_TAB_ID = "0b6f7c1e-3f5a-4c2d-9e8b-7a6d5c4b3a21"
+TEST_TAB_ID = TAB_ID
 
 
 def _claim_view(client: object, response: object) -> None:

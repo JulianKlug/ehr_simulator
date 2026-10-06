@@ -39,6 +39,7 @@ import contextlib
 import json
 from enum import StrEnum
 
+import numpy as np
 import pandas as pd
 import pandera.pandas as pa
 
@@ -86,14 +87,17 @@ def _is_valid_json_list_or_null(val: object) -> bool:
 
 _non_empty_str = pa.Check.str_length(min_value=1)
 _non_negative = pa.Check.ge(0)
+# Rejects +/-inf (NaN is the null check's business): inf t_minutes would
+# sort after every timepoint, an inf value would render as "inf".
+_finite = pa.Check(np.isfinite, error="must be finite")
 
 
 SCALAR_TS_SCHEMA: pa.DataFrameSchema = pa.DataFrameSchema(
     columns={
         "patient_id": pa.Column(str, checks=_non_empty_str, nullable=False),
-        "t_minutes": pa.Column(float, checks=_non_negative, nullable=False),
+        "t_minutes": pa.Column(float, checks=[_non_negative, _finite], nullable=False),
         "variable": pa.Column(str, checks=_non_empty_str, nullable=False),
-        "value": pa.Column(float, nullable=True),
+        "value": pa.Column(float, checks=_finite, nullable=True),
         "unit": pa.Column(str, nullable=True),
         "source": pa.Column(str, checks=_non_empty_str, nullable=False),
     },
@@ -117,7 +121,7 @@ ADMISSION_SCHEMA: pa.DataFrameSchema = pa.DataFrameSchema(
 IMAGING_SCHEMA: pa.DataFrameSchema = pa.DataFrameSchema(
     columns={
         "patient_id": pa.Column(str, checks=_non_empty_str, nullable=False),
-        "t_minutes": pa.Column(float, checks=_non_negative, nullable=False),
+        "t_minutes": pa.Column(float, checks=[_non_negative, _finite], nullable=False),
         "modality": pa.Column(str, checks=_non_empty_str, nullable=False),
         "report_text": pa.Column(str, nullable=True),
         "image_refs": pa.Column(
@@ -139,7 +143,7 @@ IMAGING_SCHEMA: pa.DataFrameSchema = pa.DataFrameSchema(
 AI_OUTPUT_SCHEMA: pa.DataFrameSchema = pa.DataFrameSchema(
     columns={
         "patient_id": pa.Column(str, checks=_non_empty_str, nullable=False),
-        "t_minutes": pa.Column(float, checks=_non_negative, nullable=False),
+        "t_minutes": pa.Column(float, checks=[_non_negative, _finite], nullable=False),
         "model_id": pa.Column(str, checks=_non_empty_str, nullable=False),
         "output_json": pa.Column(
             str,

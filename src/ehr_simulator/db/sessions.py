@@ -19,7 +19,7 @@ import sqlite3
 from dataclasses import dataclass
 from uuid import uuid4
 
-from ehr_simulator.db.answers import _require_version_provenance
+from ehr_simulator.db._provenance import _require_version_provenance
 from ehr_simulator.db.observation import ObservationMode
 
 
