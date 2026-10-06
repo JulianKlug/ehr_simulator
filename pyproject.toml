@@ -46,8 +46,11 @@ packages = ["src/ehr_simulator"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-n auto --strict-markers -m 'not e2e and not real_data'"
+addopts = "-n auto --dist loadgroup --strict-markers -m 'not e2e and not real_data and not slow'"
 markers = [
+    "unit: pure logic + SQLite DAOs, no app boot (tagged in tests/conftest.py)",
+    "integration: boots the FastAPI app or the CLI (tagged in tests/conftest.py)",
+    "slow: full Phase 2 study walks; deselected by default, run in CI",
     "e2e: end-to-end Playwright tests (require chromium installed)",
     "real_data: opt-in smoke tests against the real Geneva CSV (~1.5 GB)",
 ]

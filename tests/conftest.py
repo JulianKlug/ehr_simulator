@@ -37,6 +37,63 @@ from ehr_simulator.ingestion.synthetic import SyntheticDataset, load_synthetic
 from ehr_simulator.logging import reset_request_context
 from tests.support.telemetry import TAB_ID
 
+# Test stages, selected with ``-m``. Every collected test gets exactly one:
+#   unit        — pure logic + SQLite DAOs, no app boot (seconds)
+#   integration — boots the FastAPI app or the CLI (default for new modules)
+#   slow        — full Phase 2 study walks; deselected locally, run in CI
+# e2e / real_data tests keep their own markers and get no stage.
+UNIT_MODULES = frozenset(
+    {
+        "test_answer_capture",
+        "test_answer_codec",
+        "test_behavioral_timing",
+        "test_canonical",
+        "test_charts",
+        "test_config",
+        "test_config_history",
+        "test_data_contract",
+        "test_db",
+        "test_db_backup",
+        "test_db_integrity",
+        "test_divergence",
+        "test_export",
+        "test_gating",
+        "test_geneva",
+        "test_geneva_ai",
+        "test_logging",
+        "test_mimic",
+        "test_panels",
+        "test_pseudonym",
+        "test_randomisation",
+        "test_shared",
+        "test_static_assets",
+        "test_study_session",
+        "test_synthetic",
+        "test_timing",
+    }
+)
+SLOW_MODULES = frozenset({"test_export_phase2", "test_phase2_integration"})
+UNSTAGED_MARKERS = ("e2e", "real_data")
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Tag each test with its stage marker from its module name."""
+    for item in items:
+        if any(item.get_closest_marker(name) for name in UNSTAGED_MARKERS):
+            continue
+
+        module = item.path.stem
+        if module in SLOW_MODULES:
+            item.add_marker(pytest.mark.slow)
+            continue
+
+        if module in UNIT_MODULES:
+            item.add_marker(pytest.mark.unit)
+            continue
+
+        item.add_marker(pytest.mark.integration)
+
 
 @pytest.fixture(scope="session")
 def dataset() -> SyntheticDataset:

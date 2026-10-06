@@ -29,7 +29,8 @@ jobs:
       - name: Format check
         run: uv run ruff format --check .
       - name: Test
-        run: uv run pytest
+        # Overrides the default -m so the slow stage runs too.
+        run: uv run pytest -m 'not e2e and not real_data'
       - name: Data-contract drift check
         run: uv run python scripts/gen_data_contract.py --check
       - name: Geneva fixture sidecar drift check

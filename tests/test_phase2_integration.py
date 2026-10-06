@@ -44,6 +44,9 @@ from tests.support.pseudonym import TEST_SECRET
 from tests.support.tab_guard import TAB_A, _answer_all, _claim, _owner, _page, _post
 from tests.support.telemetry import _event
 
+# One worker builds the module-scoped walked study once (else once per worker).
+pytestmark = pytest.mark.xdist_group("phase2_integration")
+
 CONFIGS = Path(__file__).parents[1] / "configs"
 HTTP_OK = 200
 HTTP_NO_CONTENT = 204
