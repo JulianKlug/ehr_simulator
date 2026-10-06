@@ -1,13 +1,12 @@
+{% import "_panel_macros.html" as m %}
 <section class="panel panel-vitals panel-state-{{ state }}"
-         aria-label="vitals panel — {{ state }}"
+         aria-label="vitals panel — {{ m.aria_state(state) }}"
          data-panel="vitals"
          data-state="{{ state }}">
     <header>Vitals</header>
     <div class="panel-content" data-panel-content>
-    {% if state == "empty-expected" %}
-        <p class="empty">No vitals recorded for this patient.</p>
-    {% elif state == "empty-unexpected" %}
-        <p class="empty">No vitals at this timepoint yet (data exists later).</p>
+    {% if state.startswith("empty") %}
+        {{ m.empty_message("vitals") }}
     {% elif state == "error" %}
         <p class="error">Render failed: {{ error }}</p>
     {% else %}
@@ -90,23 +89,16 @@
                     {% for row in pivot_rows %}
                     <tr{% if row.is_current %} class="row-current" aria-current="time"{% endif %}>
                         <th scope="row">{{ "%.0f"|format(row.t) }}</th>
-                        {% for v in row.cells %}
+                        {% for c in row.cells %}
                         <td class="cell-{{ variables[loop.index0] }}{% if variables[loop.index0] in ['sbp', 'dbp'] %} cell-bp{% endif %}"
-                            title="{{ variables[loop.index0] }} at t={{ '%.0f'|format(row.t) }} min">{% if v is none %}—{% else %}{{ "%.2f"|format(v) }}{% endif %}</td>
+                            title="{{ variables[loop.index0] }} at t={{ '%.0f'|format(row.t) }} min">{{ m.range_cell(c) }}</td>
                         {% endfor %}
                     </tr>
                     {% endfor %}
                 </tbody>
             </table>
             {% endif %}
-            <table class="a11y-fallback" aria-label="vitals timeline data">
-                <thead><tr><th>t (min)</th><th>variable</th><th>value</th><th>unit</th></tr></thead>
-                <tbody>
-                    {% for row in fallback_rows %}
-                    <tr><td>{{ row.t }}</td><td>{{ row.variable }}</td><td>{{ row.value }}</td><td>{{ row.unit }}</td></tr>
-                    {% endfor %}
-                </tbody>
-            </table>
+            {{ m.fallback_table(fallback_rows, "vitals") }}
         </figure>
     {% endif %}
     </div>

@@ -45,8 +45,8 @@
     <div class="summary-row">
         <span class="summary-pid"><strong>{{ patient_slice.patient_id }}</strong></span>
         <span class="summary-meta">
-            age {{ admission_facts.get("age", "?") }} ·
-            sex {{ admission_facts.get("sex", "?") }}
+            age {{ summary_age or "?" }} ·
+            sex {{ summary_sex or "?" }}
         </span>
         <span class="summary-time">
             t = {{ "%.1f"|format(patient_slice.t_minutes) }} min

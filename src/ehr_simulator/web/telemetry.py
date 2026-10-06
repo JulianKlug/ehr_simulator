@@ -70,7 +70,7 @@ _TAB_ID_PATTERN = re.compile(
 _RENDER_ID_PATTERN = re.compile(r"^[0-9a-f]{32}$")
 
 #: Mirrors ``panel_exposure.PANEL_IDS`` (a lockstep test pins the two).
-PanelId = Literal["admission", "vitals", "labs", "imaging", "ai"]
+PanelId = Literal["admission", "vitals", "neuro_support", "labs", "imaging", "ai"]
 PanelState = Literal[
     "loading", "empty-expected", "empty-unexpected", "partial", "error", "unavailable"
 ]

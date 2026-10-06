@@ -1,19 +1,55 @@
+{% import "_panel_macros.html" as m %}
 <section class="panel panel-imaging panel-state-{{ state }}"
-         aria-label="imaging panel — {{ state }}"
+         aria-label="imaging panel — {{ m.aria_state(state) }}"
          data-panel="imaging"
          data-state="{{ state }}">
     <header>Imaging</header>
     <div class="panel-content" data-panel-content>
-    {% if state == "empty-expected" %}
-        <p class="empty">No imaging recorded for this patient.</p>
-    {% elif state == "empty-unexpected" %}
-        <p class="empty">No imaging at this timepoint yet (data exists later).</p>
+    {% if state.startswith("empty") %}
+        {{ m.empty_message("imaging") }}
     {% elif state == "error" %}
         <p class="error">Render failed: {{ error }}</p>
     {% else %}
         {% if state == "partial" %}
             <p class="flash-warn">Imaging present but report text incomplete.</p>
         {% endif %}
+        {% if perfusion_rows %}
+        <h3>Perfusion volumes</h3>
+        <div class="table-scroll">
+        <table class="values-table perfusion-table" aria-label="perfusion volumes by timepoint">
+            <thead>
+                <tr>
+                    <th scope="col" class="sticky-col">Volume</th>
+                    {% for t in perfusion_times %}
+                    <th scope="col"{% if t == current_t %} class="col-current" aria-current="time"{% endif %}>t = {{ "%.0f"|format(t) }} min</th>
+                    {% endfor %}
+                </tr>
+            </thead>
+            <tbody>
+                {% for row in perfusion_rows %}
+                <tr>
+                    <th scope="row" class="sticky-col">{{ row.label }}{% if row.unit %} <small>({{ row.unit }})</small>{% endif %}</th>
+                    {% for v in row.cells %}
+                    {% set t = perfusion_times[loop.index0] %}
+                    <td title="{{ row.label }} at t={{ '%.0f'|format(t) }} min"{% if t == current_t %} class="cell-current"{% endif %}>{{ m.number(v) }}</td>
+                    {% endfor %}
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        </div>
+        {% endif %}
+        {% if findings %}
+        <h3>Imaging / vascular findings</h3>
+        <table class="values-table imaging-findings" aria-label="imaging and vascular findings">
+            <tbody>
+                {% for fact in findings %}
+                <tr><th scope="row">{{ fact.label }}</th><td>{{ fact.value }}</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+        {% if rows %}
         <ul class="imaging-list">
             {% for row in rows %}
             <li>
@@ -22,6 +58,7 @@
             </li>
             {% endfor %}
         </ul>
+        {% endif %}
     {% endif %}
     </div>
 </section>

@@ -1,0 +1,30 @@
+{#- S8 shared panel bits. §9.2: both empty states read identically; the
+    precise state survives only in data-state (S11k telemetry). -#}
+{% macro aria_state(state) -%}
+{{ "empty" if state.startswith("empty") else state }}
+{%- endmacro %}
+
+{% macro empty_message(label) -%}
+<p class="empty">No {{ label }} data up to this timepoint.</p>
+{%- endmacro %}
+
+{% macro number(v) -%}
+{% if v is none %}—{% else %}{{ "%.2f"|format(v) }}{% endif %}
+{%- endmacro %}
+
+{#- A value and, when the family has any, its bounds: "70.00 (60.00–90.00)". -#}
+{% macro range_cell(c) -%}
+{{ number(c.value) }}{% if c.low is not none or c.high is not none %} <small class="range">({{ number(c.low) }}–{{ number(c.high) }})</small>{% endif %}
+{%- endmacro %}
+
+{#- Non visual equivalent of a chart: min, value, max per observation. -#}
+{% macro fallback_table(rows, label) -%}
+<table class="a11y-fallback" aria-label="{{ label }} timeline data">
+    <thead><tr><th>t (min)</th><th>variable</th><th>min</th><th>value</th><th>max</th><th>unit</th></tr></thead>
+    <tbody>
+        {% for row in rows %}
+        <tr><td>{{ row.t }}</td><td>{{ row.variable }}</td><td>{{ number(row.cell.low) }}</td><td>{{ number(row.cell.value) }}</td><td>{{ number(row.cell.high) }}</td><td>{{ row.unit }}</td></tr>
+        {% endfor %}
+    </tbody>
+</table>
+{%- endmacro %}

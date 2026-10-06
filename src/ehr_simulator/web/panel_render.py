@@ -17,8 +17,23 @@ import pandas as pd
 from fastapi import Request
 
 from ehr_simulator.config.study import BackwardNavigation
-from ehr_simulator.ingestion.canonical import LAB_VAR_SET, VITAL_VAR_SET
+from ehr_simulator.ingestion.canonical import (
+    AGGREGATE_BOUNDS,
+    IMAGING_DERIVED_VAR_SET,
+    LAB_VAR_SET,
+    NEURO_SUPPORT_VAR_SET,
+    VITAL_VAR_SET,
+)
 from ehr_simulator.logging import get_logger
+from ehr_simulator.web.clinical_fields import (
+    DisplayGroup,
+    SummaryFact,
+    admission_sections,
+    imaging_findings,
+    ordered_ids,
+    scalar_label,
+    summary_fact,
+)
 from ehr_simulator.web.panels import (
     LEGACY_INTERVENTION,
     InterventionContext,
@@ -80,6 +95,8 @@ def _render_summary(
         timepoint_count=timepoint_count,
         show_next=show_next,
         resume_t_index=resume_t_index,
+        summary_age=summary_fact(admission_facts, SummaryFact.AGE),
+        summary_sex=summary_fact(admission_facts, SummaryFact.SEX),
         show_ai_count=intervention_mode is InterventionMode.LEGACY,
         show_prev=backward is BackwardNavigation.ALLOW_READONLY,
     )
@@ -113,6 +130,7 @@ def _render_panels(
     out: dict[str, str] = {}
     renderers: list[tuple[str, Callable[[PatientSlice, Request], str]]] = [
         ("vitals", _render_vitals),
+        ("neuro_support", _render_neuro_support),
         ("labs", _render_labs),
         ("admission", _render_admission),
         ("imaging", _render_imaging),
@@ -143,18 +161,20 @@ def _render_panels(
     return out
 
 
-# Round-03 layout: BP grouped on shared mmHg, then HR, RR; SpO2/Temp below.
-# Order is fixed (clinician reading order); only present vitals get rendered,
-# but the order they appear within each figure stays stable.
-_VITALS_TABLE_ORDER: tuple[str, ...] = ("sbp", "dbp", "hr", "rr", "spo2", "temp")
+# Round-03 layout: BP grouped on shared mmHg, then MAP (S8), HR, RR;
+# SpO2/Temp below. Order is fixed (clinician reading order); only present
+# vitals get rendered, but the order they appear within each figure stays
+# stable. A family is present when any of its members (median or bound) is.
+_VITALS_TABLE_ORDER: tuple[str, ...] = ("sbp", "dbp", "map", "hr", "rr", "spo2", "temp")
 _BP_PANEL_VARS: frozenset[str] = frozenset({"sbp", "dbp"})
 _BP_GROUP_VARS_ORDERED: tuple[str, ...] = ("sbp", "dbp")
-_UPPER_SINGLE_VARS: tuple[str, ...] = ("hr", "rr")
+_UPPER_SINGLE_VARS: tuple[str, ...] = ("map", "hr", "rr")
 _LOWER_SINGLE_VARS: tuple[str, ...] = ("spo2", "temp")
+_NEURO_ORDER: tuple[str, ...] = ("nihss", "gcs", "fio2")
 _BP_GROUP = "bp"
 _BP_LABEL = "BP"
 _BP_UNIT = "mmHg"
-_VITAL_LABELS: dict[str, str] = {"spo2": "SpO₂"}  # else the upper-cased variable
+_VITAL_LABELS: dict[str, str] = {"spo2": "SpO₂", "fio2": "FiO₂"}  # else the upper-cased variable
 
 
 @dataclass(frozen=True)
@@ -177,6 +197,15 @@ class _VitalsPanelSpec:
         return self.variable is None
 
 
+@dataclass(frozen=True)
+class _Cell:
+    """One table cell: a value plus its aggregate bounds (``None`` = absent)."""
+
+    value: float | None
+    low: float | None = None
+    high: float | None = None
+
+
 def _single_vital_spec(variable: str, units: dict[str, str]) -> _VitalsPanelSpec:
     return _VitalsPanelSpec(
         group=variable,
@@ -186,20 +215,113 @@ def _single_vital_spec(variable: str, units: dict[str, str]) -> _VitalsPanelSpec
     )
 
 
-def _render_vitals_figure(
+def _family_members(variable: str) -> tuple[str, ...]:
+    """``hr`` → ``("hr", "hr_min", "hr_max")``; a plain variable → itself."""
+    return (variable, *AGGREGATE_BOUNDS.get(variable, ()))
+
+
+def _present_families(rows: pd.DataFrame, order: tuple[str, ...]) -> list[str]:
+    present = set(rows["variable"].astype(str))
+    return [v for v in order if present.intersection(_family_members(v))]
+
+
+def _family_units(rows: pd.DataFrame, families: list[str]) -> dict[str, str]:
+    """Unit per family, read from whichever member row comes first."""
+    units: dict[str, str] = {}
+    for family in families:
+        members = rows.loc[rows["variable"].isin(_family_members(family)), "unit"]
+        if not members.empty:
+            units[family] = str(members.iloc[0])
+    return units
+
+
+def _has_bounds(rows: pd.DataFrame, variable: str) -> bool:
+    return variable in AGGREGATE_BOUNDS and rows["variable"].isin(AGGREGATE_BOUNDS[variable]).any()
+
+
+def _cells_by_time(rows: pd.DataFrame, family: str) -> dict[float, _Cell]:
+    """Per observation time: the family's median and bounds (never interpolated)."""
+    from ehr_simulator.web.charts import family_frame
+
+    if family not in AGGREGATE_BOUNDS:
+        values = rows.loc[rows["variable"] == family]
+        return {float(r.t_minutes): _Cell(float(r.value)) for r in values.itertuples(index=False)}
+
+    low, high = AGGREGATE_BOUNDS[family]
+    frame = family_frame(rows, min_var=low, median_var=family, max_var=high)
+    return {
+        float(r.t_minutes): _Cell(_maybe(r.median), _maybe(r.low), _maybe(r.high))
+        for r in frame.itertuples(index=False)
+    }
+
+
+def _maybe(value: float) -> float | None:
+    return None if pd.isna(value) else float(value)
+
+
+def _scalar_tables(
+    rows: pd.DataFrame, families: list[str], units: dict[str, str], current_t: float
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Values pivot (one row per time, one cell per family) + a11y fallback
+    rows (time, variable, min, value, max, unit)."""
+    by_family = {family: _cells_by_time(rows, family) for family in families}
+    times = sorted({t for cells in by_family.values() for t in cells})
+    empty = _Cell(None)
+
+    pivot_rows = [
+        {
+            "t": t,
+            "is_current": t == current_t,
+            "cells": [by_family[family].get(t, empty) for family in families],
+        }
+        for t in times
+    ]
+    fallback_rows = [
+        {
+            "t": t,
+            "variable": scalar_label(family),
+            "cell": by_family[family][t],
+            "unit": units.get(family, ""),
+        }
+        for t in times
+        for family in families
+        if t in by_family[family]
+    ]
+    return pivot_rows, fallback_rows
+
+
+def _render_scalar_figure(
     specs: list[_VitalsPanelSpec],
     sorted_rows: pd.DataFrame,
     x_range: tuple[float, float],
 ) -> list[dict[str, object]]:
-    """Render one stacked figure; only its bottom panel carries tick labels."""
-    from ehr_simulator.web.charts import render_grouped_bp_svg, render_timeline_svg
+    """Render one stacked figure; only its bottom panel carries tick labels.
 
+    An aggregate family with bounds (or bounds only) gets range bars (S8).
+    """
+    from ehr_simulator.web.charts import (
+        render_grouped_bp_svg,
+        render_range_timeline_svg,
+        render_timeline_svg,
+    )
+
+    medians = set(sorted_rows["variable"].astype(str))
     rendered: list[dict[str, object]] = []
     for idx, spec in enumerate(specs):
         is_bottom = idx == len(specs) - 1
         if spec.variable is None:
             svg = render_grouped_bp_svg(
                 sorted_rows, present_vars=spec.present_bp, x_range=x_range, is_bottom=is_bottom
+            )
+        elif _has_bounds(sorted_rows, spec.variable) or spec.variable not in medians:
+            low, high = AGGREGATE_BOUNDS[spec.variable]
+            svg = render_range_timeline_svg(
+                sorted_rows,
+                min_var=low,
+                median_var=spec.variable,
+                max_var=high,
+                x_range=x_range,
+                is_bottom=is_bottom,
             )
         else:
             svg = render_timeline_svg(
@@ -220,13 +342,21 @@ def _render_vitals_figure(
     return rendered
 
 
+def _x_range(rows: pd.DataFrame) -> tuple[float, float]:
+    """Shared time window of the sliced rows (never beyond t)."""
+    all_t = rows["t_minutes"].astype(float)
+    t_lo = float(all_t.min())
+    t_hi = float(all_t.max())
+    return (t_lo - 1.0, t_hi + 1.0) if t_lo == t_hi else (t_lo, t_hi)
+
+
 def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
     """Vitals: two stacked figures.
 
     Round-03 layout (`specs/feedback/session-02-feedback.md` round-03):
 
     - **Upper figure** (hemodynamics): BP grouped on a shared mmHg y-scale,
-      then HR, then RR — top to bottom.
+      then MAP (S8), HR, then RR — top to bottom.
     - **Lower figure** (oxygenation/metabolic): SpO₂, then Temp.
     - All panels in a figure share the same x-range; tick labels render on
       the bottom-most panel only.
@@ -234,6 +364,7 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
       panel renders a faint dashed expected band at the missing variable's
       reference range and the panel-level note "DBP missing at this
       timepoint." appears below the BP panel.
+    - S8: Geneva min/max bounds render as per-bucket range bars.
 
     Round-02 lineage (FINDING-007 / FINDING-008): per-variable rendering
     instead of ``facet_wrap`` because plotnine's facet strip text rendered
@@ -254,25 +385,20 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
     current_t = float(patient_slice.t_minutes)
 
     if state in {"loading", "partial"} and not rows.empty:
-        present_set = set(rows["variable"].astype(str).unique().tolist())
-        for r in rows.itertuples(index=False):
-            units.setdefault(r.variable, str(r.unit))
-        # Stable column order for the values table (matches the panel reading
-        # order: BP → HR → RR → SpO₂ → Temp).
-        variables_present = [v for v in _VITALS_TABLE_ORDER if v in present_set]
+        variables_present = _present_families(rows, _VITALS_TABLE_ORDER)
+        present_set = set(variables_present)
+        units = _family_units(rows, variables_present)
 
-        all_t = rows["t_minutes"].astype(float)
-        t_lo = float(all_t.min())
-        t_hi = float(all_t.max())
-        x_range = (t_lo - 1.0, t_hi + 1.0) if t_lo == t_hi else (t_lo, t_hi)
+        x_range = _x_range(rows)
         sorted_rows = rows.sort_values(["variable", "t_minutes"])
 
-        present_bp: frozenset[str] = frozenset(present_set & _BP_PANEL_VARS)
+        medians = set(rows["variable"].astype(str))
+        present_bp: frozenset[str] = frozenset(medians & _BP_PANEL_VARS)
         bp_missing = [v for v in _BP_GROUP_VARS_ORDERED if v not in present_bp]
 
-        # Compose upper figure (BP → HR → RR), then lower (SpO₂ → Temp).
+        # Compose upper figure (BP → MAP → HR → RR), then lower (SpO₂ → Temp).
         upper_specs: list[_VitalsPanelSpec] = []
-        if present_bp:
+        if present_set & _BP_PANEL_VARS:
             upper_specs.append(
                 _VitalsPanelSpec(
                     group=_BP_GROUP,
@@ -287,8 +413,8 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
         ]
         lower_specs = [_single_vital_spec(v, units) for v in _LOWER_SINGLE_VARS if v in present_set]
 
-        upper_panels = _render_vitals_figure(upper_specs, sorted_rows, x_range)
-        lower_panels = _render_vitals_figure(lower_specs, sorted_rows, x_range)
+        upper_panels = _render_scalar_figure(upper_specs, sorted_rows, x_range)
+        lower_panels = _render_scalar_figure(lower_specs, sorted_rows, x_range)
 
         if bp_missing and present_bp:
             # Specific to round-03: the BP panel internally annotates which
@@ -297,26 +423,7 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
             missing_label = ", ".join(v.upper() for v in bp_missing)
             bp_partial_note = f"{missing_label} missing at this timepoint."
 
-        fallback_rows = [
-            {
-                "t": float(r.t_minutes),
-                "variable": r.variable,
-                "value": float(r.value),
-                "unit": r.unit,
-            }
-            for r in rows.sort_values(["t_minutes", "variable"]).itertuples(index=False)
-        ]
-        pivot: dict[float, dict[str, float]] = {}
-        for r in rows.itertuples(index=False):
-            pivot.setdefault(float(r.t_minutes), {})[r.variable] = float(r.value)
-        for t in sorted(pivot.keys()):
-            pivot_rows.append(
-                {
-                    "t": t,
-                    "is_current": t == current_t,
-                    "cells": [pivot[t].get(var) for var in variables_present],
-                }
-            )
+        pivot_rows, fallback_rows = _scalar_tables(rows, variables_present, units, current_t)
 
     return templates.get_template("_panel_vitals.html").render(
         request=request,
@@ -333,36 +440,84 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
     )
 
 
+def _render_neuro_support(patient_slice: PatientSlice, request: Request) -> str:
+    """Neurological / support (S8): NIHSS range bars, GCS and FiO₂ timelines."""
+    templates = request.app.state.templates
+    state = patient_slice.panel_states["neuro_support"]
+    rows = patient_slice.scalar_ts.loc[patient_slice.scalar_ts.variable.isin(NEURO_SUPPORT_VAR_SET)]
+
+    panels: list[dict[str, object]] = []
+    variables_present: list[str] = []
+    units: dict[str, str] = {}
+    pivot_rows: list[dict[str, object]] = []
+    fallback_rows: list[dict[str, object]] = []
+    current_t = float(patient_slice.t_minutes)
+
+    if state in {"loading", "partial"} and not rows.empty:
+        variables_present = _present_families(rows, _NEURO_ORDER)
+        units = _family_units(rows, variables_present)
+        specs = [_single_vital_spec(v, units) for v in variables_present]
+        panels = _render_scalar_figure(
+            specs, rows.sort_values(["variable", "t_minutes"]), _x_range(rows)
+        )
+        pivot_rows, fallback_rows = _scalar_tables(rows, variables_present, units, current_t)
+
+    return templates.get_template("_panel_neuro_support.html").render(
+        request=request,
+        state=state,
+        error=patient_slice.panel_errors.get("neuro_support"),
+        panels=panels,
+        variables=variables_present,
+        labels=[_VITAL_LABELS.get(v, v.upper()) for v in variables_present],
+        units=units,
+        pivot_rows=pivot_rows,
+        fallback_rows=fallback_rows,
+    )
+
+
+def _observation_table(
+    rows: pd.DataFrame, order: tuple[str, ...]
+) -> tuple[list[float], list[dict[str, object]]]:
+    """Variable × observation time table over sliced rows, registry order.
+
+    Columns are the distinct ``t_minutes`` of these rows (never the study
+    timepoints: binning would change values, D21); a variable gets a row
+    only when measured at or before ``t``.
+    """
+    timepoints = sorted({float(t) for t in rows["t_minutes"].tolist()})
+    present = set(rows["variable"].astype(str))
+    pivot: dict[str, dict[float, float]] = {}
+    units: dict[str, str] = {}
+    for r in rows.itertuples(index=False):
+        units.setdefault(r.variable, str(r.unit))
+        pivot.setdefault(r.variable, {})[float(r.t_minutes)] = float(r.value)
+    table_rows = [
+        {
+            "variable": variable,
+            "label": scalar_label(variable),
+            "unit": units.get(variable, ""),
+            "cells": [pivot[variable].get(t) for t in timepoints],
+        }
+        for variable in order
+        if variable in present
+    ]
+    return timepoints, table_rows
+
+
 def _render_labs(patient_slice: PatientSlice, request: Request) -> str:
     """Labs: variable-by-timepoint table (FINDING-005). Tabular form is the
     clinical standard for labs; charts add visual noise without aiding the
-    point-in-time read."""
+    point-in-time read. S8: registry order + labels, scrolling columns."""
     templates = request.app.state.templates
     state = patient_slice.panel_states["labs"]
     rows = patient_slice.scalar_ts.loc[patient_slice.scalar_ts.variable.isin(LAB_VAR_SET)]
 
     timepoints: list[float] = []
-    variables_present: list[str] = []
-    units: dict[str, str] = {}
     table_rows: list[dict[str, object]] = []
     current_t = float(patient_slice.t_minutes)
 
     if state in {"loading", "partial"} and not rows.empty:
-        timepoints = sorted({float(t) for t in rows["t_minutes"].tolist()})
-        variables_present = sorted(rows["variable"].unique().tolist())
-        for r in rows.itertuples(index=False):
-            units.setdefault(r.variable, str(r.unit))
-        pivot: dict[str, dict[float, float]] = {}
-        for r in rows.itertuples(index=False):
-            pivot.setdefault(r.variable, {})[float(r.t_minutes)] = float(r.value)
-        for variable in variables_present:
-            table_rows.append(
-                {
-                    "variable": variable,
-                    "unit": units.get(variable, ""),
-                    "cells": [pivot[variable].get(t) for t in timepoints],
-                }
-            )
+        timepoints, table_rows = _observation_table(rows, ordered_ids(DisplayGroup.LABS))
 
     return templates.get_template("_panel_labs.html").render(
         request=request,
@@ -375,22 +530,24 @@ def _render_labs(patient_slice: PatientSlice, request: Request) -> str:
     )
 
 
+def _admission_facts(patient_slice: PatientSlice) -> dict[str, object]:
+    return {row.field: row.value for row in patient_slice.admission.itertuples(index=False)}
+
+
 def _render_admission(patient_slice: PatientSlice, request: Request) -> str:
+    """S8: registry sections (baseline, treatment), unregistered fields under Other."""
     templates = request.app.state.templates
     state = patient_slice.panel_states["admission"]
-    facts = [
-        {"field": row.field, "value": row.value}
-        for row in patient_slice.admission.itertuples(index=False)
-    ]
     return templates.get_template("_panel_admission.html").render(
         request=request,
         state=state,
         error=patient_slice.panel_errors.get("admission"),
-        facts=facts,
+        sections=admission_sections(_admission_facts(patient_slice)),
     )
 
 
 def _render_imaging(patient_slice: PatientSlice, request: Request) -> str:
+    """S8: perfusion volume table, binary findings, then canonical reports."""
     templates = request.app.state.templates
     state = patient_slice.panel_states["imaging"]
     rows = [
@@ -401,11 +558,24 @@ def _render_imaging(patient_slice: PatientSlice, request: Request) -> str:
         }
         for r in patient_slice.imaging.itertuples(index=False)
     ]
+    perfusion = patient_slice.scalar_ts.loc[
+        patient_slice.scalar_ts.variable.isin(IMAGING_DERIVED_VAR_SET)
+    ]
+    perfusion_times: list[float] = []
+    perfusion_rows: list[dict[str, object]] = []
+    if not perfusion.empty:
+        perfusion_times, perfusion_rows = _observation_table(
+            perfusion, ordered_ids(DisplayGroup.IMAGING)
+        )
     return templates.get_template("_panel_imaging.html").render(
         request=request,
         state=state,
         error=patient_slice.panel_errors.get("imaging"),
         rows=rows,
+        perfusion_times=perfusion_times,
+        perfusion_rows=perfusion_rows,
+        findings=imaging_findings(_admission_facts(patient_slice)),
+        current_t=float(patient_slice.t_minutes),
     )
 
 

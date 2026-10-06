@@ -1,21 +1,29 @@
+{% import "_panel_macros.html" as m %}
 <section class="panel panel-admission panel-state-{{ state }}"
-         aria-label="admission panel — {{ state }}"
+         aria-label="admission panel — {{ m.aria_state(state) }}"
          data-panel="admission"
          data-state="{{ state }}">
     <header>Admission</header>
     {#- S11k: the viewport observer targets only this content, never the header. -#}
     <div class="panel-content" data-panel-content>
-    {% if state == "empty-expected" %}
-        <p class="empty">No admission record for this patient.</p>
+    {% if state.startswith("empty") %}
+        {{ m.empty_message("admission") }}
     {% elif state == "error" %}
         <p class="error">Render failed: {{ error }}</p>
     {% else %}
-        <dl class="admission-facts">
-            {% for fact in facts %}
-            <dt>{{ fact.field }}</dt>
-            <dd>{{ fact.value }}</dd>
-            {% endfor %}
-        </dl>
+        {#- S8: registry sections; treatment is set apart from the baseline. -#}
+        {% for section in sections %}
+        <div role="group" class="admission-section{% if section.title == 'Treatment / presentation' %} admission-treatment{% endif %}"
+                 aria-labelledby="admission-section-{{ loop.index }}">
+            <h3 id="admission-section-{{ loop.index }}">{{ section.title }}</h3>
+            <dl class="admission-facts">
+                {% for fact in section.facts %}
+                <dt>{{ fact.label }}</dt>
+                <dd>{{ fact.value }}</dd>
+                {% endfor %}
+            </dl>
+        </div>
+        {% endfor %}
     {% endif %}
     </div>
 </section>

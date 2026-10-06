@@ -148,3 +148,65 @@ def test_render_timeline_svg_is_bottom_false_suppresses_x_axis_title() -> None:
     # The bottom panel renders "t (min)" as the x-axis title; upper doesn't.
     assert "t (min)" in bottom
     assert "t (min)" not in upper
+
+
+# ---------------------------------------------------------------------------
+# S8: aggregate families (min / median / max)
+# ---------------------------------------------------------------------------
+
+
+def _family_rows(rows: list[tuple[float, str, float]]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [{"t_minutes": t, "variable": v, "value": x, "unit": "bpm"} for t, v, x in rows]
+    )
+
+
+def test_range_renderer_complete_rows_valid_svg() -> None:
+    from ehr_simulator.web.charts import family_frame, render_range_timeline_svg
+
+    frame = _family_rows(
+        [
+            (t, v, x)
+            for t in (0.0, 60.0)
+            for v, x in (("hr_min", 60.0), ("hr", 70.0), ("hr_max", 90.0))
+        ]
+    )
+    out = render_range_timeline_svg(frame, min_var="hr_min", median_var="hr", max_var="hr_max")
+    assert out.lstrip().startswith(("<?xml", "<svg"))
+    assert 'data-variable="hr"' in out and 'data-range="true"' in out
+    family = family_frame(frame, min_var="hr_min", median_var="hr", max_var="hr_max")
+    assert family[["low", "median", "high"]].values.tolist() == [[60.0, 70.0, 90.0]] * 2
+
+
+def test_range_renderer_missing_bound_never_invented() -> None:
+    from ehr_simulator.web.charts import _range_bars, family_frame, render_range_timeline_svg
+
+    frame = _family_rows(
+        [(0.0, "hr", 70.0), (0.0, "hr_max", 90.0), (60.0, "hr_min", 50.0), (120.0, "hr", 75.0)]
+    )
+    family = family_frame(frame, min_var="hr_min", median_var="hr", max_var="hr_max")
+    bars = _range_bars(family)
+    # t=0: median → max only; t=60: bound without median → no bar; t=120: no bounds.
+    assert bars[["t_minutes", "ymin", "ymax"]].values.tolist() == [[0.0, 70.0, 90.0]]
+    assert pd.isna(family.loc[family.t_minutes == 0.0, "low"]).all()
+    out = render_range_timeline_svg(frame, min_var="hr_min", median_var="hr", max_var="hr_max")
+    assert 'data-variable="hr"' in out
+
+
+def test_range_line_breaks_at_gap_over_one_bucket() -> None:
+    from ehr_simulator.web.charts import _segments
+
+    t = pd.Series([0.0, 60.0, 180.0, 240.0])
+    assert _segments(t).tolist() == [0, 0, 1, 1]
+
+
+def test_grouped_bp_with_bounds_renders() -> None:
+    frame = _family_rows(
+        [
+            (t, v, x)
+            for t in (0.0, 60.0)
+            for v, x in (("sbp_min", 120.0), ("sbp", 140.0), ("sbp_max", 170.0), ("dbp", 80.0))
+        ]
+    )
+    out = render_grouped_bp_svg(frame, present_vars=frozenset({"sbp", "dbp"}), x_range=(0.0, 60.0))
+    assert 'data-group="bp"' in out
