@@ -345,6 +345,18 @@ def _per_protocol(reached: bool, is_ai: bool, arm: _ArmExposure) -> tuple[bool |
     return not arm.leakage, True
 
 
+def _episode_count(ai_summary: PanelSummary | None, ai_exposable: bool) -> int | None:
+    """AI viewing episodes; unmeasured is ``None``, never a zero.
+
+    Zero needs evidence: a telemetry summary, or a view that could not show
+    AI (no AI arm without leakage). Example: an AI case pinned to a config
+    without ``telemetry`` has no summary, so its count is unknown.
+    """
+    if ai_summary is not None:
+        return ai_summary.episode_count
+    return None if ai_exposable else 0
+
+
 def _observation(
     inputs: CaseInputs,
     t_index: int,
@@ -375,7 +387,7 @@ def _observation(
         ai_exposure_seconds=arm.exposure,
         ai_viewed=arm.viewed,
         ai_viewing_status=arm.viewing_status,
-        ai_episode_count=ai_summary.episode_count if ai_summary is not None else 0,
+        ai_episode_count=_episode_count(ai_summary, is_ai or arm.leakage),
         pp_compliant=pp_compliant,
         pp_determinate=determinate,
         integrity_warnings=warnings,

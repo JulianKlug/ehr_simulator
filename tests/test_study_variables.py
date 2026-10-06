@@ -349,6 +349,16 @@ def test_case_summary_is_indeterminate_when_an_observation_is() -> None:
     assert summary.all_reached_pp_compliant is None
 
 
+def test_ai_case_without_telemetry_has_unknown_episodes() -> None:
+    """REGRESSION: no telemetry exported a measured-looking zero AI episodes."""
+    renders = tuple(_render(f"r{i + 1}", i) for i in range(len(TIMEPOINTS)))
+    variables = derive_case_variables(_inputs(renders=renders, telemetry=None))
+
+    assert all(o.reached for o in variables.observations)
+    assert {o.ai_episode_count for o in variables.observations} == {None}
+    assert variables.summary.ai_episode_count is None
+
+
 def test_no_ai_case_summary_has_zero_exposure() -> None:
     renders = tuple(_render(f"r{i + 1}", i, ai="none") for i in range(len(TIMEPOINTS)))
     summary = derive_case_variables(_inputs(arm=NO_AI, renders=renders)).summary
