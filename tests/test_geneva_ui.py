@@ -24,6 +24,7 @@ from tests.support.geneva_ui import (
     PATIENT,
     SPARSE_PATIENT,
     geneva_shaped_dataset,
+    stub_request,
 )
 
 LEAK_T_INDEX = 2
@@ -262,17 +263,6 @@ def test_geneva_ai_html_is_not_the_shap_dictionary(geneva_client: TestClient) ->
     assert "Weight" not in html  # sixth negative contributor
 
 
-def _stub_request():
-    from types import SimpleNamespace
-
-    from fastapi.templating import Jinja2Templates
-
-    from ehr_simulator.web.app import _TEMPLATES_DIR
-
-    templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
-    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(templates=templates)))
-
-
 @pytest.mark.parametrize(
     ("label", "heading"),
     [(None, "Predicted probability"), ("poor outcome", "Predicted probability of poor outcome")],
@@ -296,7 +286,7 @@ def test_measured_heading_uses_pinned_outcome_label(label: str | None, heading: 
     ctx = InterventionContext(InterventionMode.AI, configured, dataset.ai_provenance)
     sliced = slice_to_timepoint(dataset, PATIENT, 60.0, 1)
     soup = BeautifulSoup(
-        _render_measured_ai(sliced, _stub_request(), intervention=ctx), "html.parser"
+        _render_measured_ai(sliced, stub_request(), intervention=ctx), "html.parser"
     )
 
     assert soup.h3.get_text(strip=True) == heading
@@ -341,3 +331,77 @@ def test_exposed_field_ids_match_new_panels() -> None:
         "scalar:crp",  # first measured after t
     ):
         assert field not in exposed, field
+
+
+# ---------------------------------------------------------------------------
+# Timepoint locality (§9)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("chrome", ["dense", "epic"])
+@pytest.mark.parametrize("t_index", [0, 1, LEAK_T_INDEX])
+def test_no_future_value_reaches_any_surface(
+    geneva_client: TestClient, chrome: str, t_index: int
+) -> None:
+    """DATA LEAK REGRESSION: tables, charts, fallbacks, AI and summary."""
+    from tests.support.geneva_ui import FUTURE_FEATURE
+
+    html = geneva_client.get(f"/patient/{PATIENT}/timepoint/{t_index}?chrome={chrome}").text
+    for future in (
+        "7777.",  # every scalar after LEAK_T (tables, chart labels, fallbacks)
+        "86.4",  # AI probability after LEAK_T
+        FUTURE_FEATURE,
+        "proBNP",  # its label
+        "CRP",  # lab first drawn at 240
+        "CBV",  # perfusion volume at 300
+        "t = 180 min",
+        "t = 240 min",
+        "t = 300 min",
+    ):
+        assert future not in html, (t_index, future)
+
+
+def test_slice_never_holds_rows_after_t() -> None:
+    from ehr_simulator.web.panels import slice_to_timepoint
+
+    dataset = geneva_shaped_dataset()
+    for t in (0.0, 60.0, 120.0):
+        sliced = slice_to_timepoint(dataset, PATIENT, t, 0)
+        for frame in (sliced.scalar_ts, sliced.imaging, sliced.ai_output):
+            assert (frame["t_minutes"] <= t).all()
+
+
+def test_study_timepoints_stay_authoritative(
+    tmp_path: Path, study_fixture_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Six dataset timepoints, four study ones: the walk has four."""
+    from ehr_simulator.config import load_study_config
+    from ehr_simulator.web.app import app_from_study_config
+    from tests.conftest import _activate_configuration
+
+    study_yaml = study_fixture_dir / "study_geneva.yaml"
+    questions_yaml = study_fixture_dir / "questions.yaml"
+    db_path = tmp_path / "ehr.db"
+    study = load_study_config(study_yaml)
+    clinician_id = _seed_clinician(db_path, study_id=study.study_id)
+    _activate_configuration(
+        db_path, study_yaml, questions_yaml, version="v1", description="S8 geneva"
+    )
+    monkeypatch.setattr(
+        "ehr_simulator.cli_support.build_dataset_loader",
+        lambda *_a, **_k: geneva_shaped_dataset,
+    )
+    app = app_from_study_config(
+        study_yaml,
+        questions_yaml,
+        log_dir=tmp_path / "logs",
+        db_path=db_path,
+        backup_dir=tmp_path / "backups",
+    )
+    with TestClient(app) as client:
+        client.cookies.set("ehrsim_clinician_id", clinician_id)
+        soup = _soup(client, PATIENT, 0)
+
+    position = soup.select_one(".tp-position").get_text(" ", strip=True)
+    assert " ".join(position.split()) == "t = 0 min (1/4)"
+    assert _panel(soup, "vitals")["data-state"] == "loading"

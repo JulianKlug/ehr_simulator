@@ -204,12 +204,13 @@ def walk_preflight(
                 )
             continue
 
-        for t in study.timepoints_minutes:
+        for t_index, t in enumerate(study.timepoints_minutes):
             sliced = slice_to_timepoint(
                 dataset,
                 patient_id,
                 t_minutes=t,
-                timepoint_index=0,
+                timepoint_index=t_index,
+                timepoints=study.timepoints_minutes,
             )
             if sliced.scalar_ts.empty:
                 rows.append(
@@ -377,8 +378,14 @@ def render_preview(
     if patient_id not in known_pids:
         raise ConfigError(f"patient {patient_id!r} not found in dataset")
 
-    for t in study.timepoints_minutes:
-        sliced = slice_to_timepoint(dataset, patient_id, t_minutes=t, timepoint_index=0)
+    for t_index, t in enumerate(study.timepoints_minutes):
+        sliced = slice_to_timepoint(
+            dataset,
+            patient_id,
+            t_minutes=t,
+            timepoint_index=t_index,
+            timepoints=study.timepoints_minutes,
+        )
         counts: dict[str, int] = {
             "scalar_ts": int(len(sliced.scalar_ts)),
             "admission": int(len(sliced.admission)),

@@ -152,3 +152,12 @@ def test_admission_imaging_findings_make_imaging_present() -> None:
     )
     sliced = slice_to_timepoint(dataset, "p", 0.0, 0)
     assert sliced.panel_states["imaging"] == "loading"
+
+
+def test_slice_timepoints_are_the_explicit_walk(synthetic) -> None:
+    """S8 §9.1: the study sequence, never the patient's whole stay."""
+    study = (0.0, 60.0)
+    sliced = slice_to_timepoint(synthetic, "synth_001", 60.0, 1, timepoints=study)
+    assert sliced.timepoints == study
+    fallback = slice_to_timepoint(synthetic, "synth_001", 60.0, 1)
+    assert fallback.timepoints == (0.0, 60.0, 180.0)

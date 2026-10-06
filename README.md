@@ -84,9 +84,20 @@ test subset (preflight FAILs a missing AI row). The `geneva_ai` paths are part
 of the configuration hash: moving the files needs a new `--version`. Only point
 it at the trusted local artifact — the files are pickles.
 
-Not yet clinician ready: S7 delivers the data and its provenance only. The AI
-panel still expects the synthetic payload keys, so a Geneva row renders as
-"AI payload incomplete" with raw SHAP values until S8 adapts the presentation.
+The AI panel (S8) shows the predicted probability and the five strongest
+contributions of each sign. Set `ai_intervention.outcome_label` (e.g.
+`poor functional outcome at 3 months`) to name the outcome in the heading;
+preflight WARNs a Phase 2 study without it.
+
+**Presentation versioning (S8).** Rendering code is not part of the
+configuration snapshot, so a pinned case shows whatever the deployed code
+renders. Before collecting measured cases:
+
+1. set `ai_intervention.intervention_build_id` to the deployed commit;
+2. bump `ai_intervention.presentation_version` whenever AI panel rendering changes;
+3. `activate-config` a new version before collecting further measured cases.
+
+Nothing enforces this; it is the operator's record of what clinicians saw.
 
 - **One database per study.** The server refuses a database of another `study_id`.
 - **Configuration changes are explicit.** Editing the YAML changes its hash;
@@ -145,30 +156,30 @@ regression test on every commit.
 
 ---
 
-## The five panels
+## The six panels
 
 | Panel | What's in it |
 |---|---|
-| **Vitals** | HR, SBP, DBP, SpO₂, temp — one timeline per variable |
-| **Labs** | hgb, sodium, creatinine, glucose — one timeline per variable |
-| **Admission** | static facts: age, sex, NIHSS on admission, stroke location, time of onset |
-| **Imaging** | per-timepoint imaging entries (modality + report text) |
-| **AI** | the precomputed model output for this patient at each revealed timepoint |
+| **Admission** | static facts, grouped: demographics, prestroke medication, medical history, stroke context, then treatment / presentation; anything unregistered under *Other* |
+| **Vitals** | BP (SBP + DBP), mean BP, HR, RR, SpO₂, temp — one timeline per variable; Geneva hourly min–max as a bar per bucket around the median line |
+| **Neuro / Support** | NIHSS (with min–max bars), GCS, FiO₂ |
+| **Labs** | every lab measured so far, one row per lab, one column per observation time |
+| **Imaging** | perfusion volumes (Tmax, CBF, CBV), imaging / vascular findings, and report entries when a dataset has them |
+| **AI** | the precomputed model output; for Geneva the predicted probability and its top contributors |
 
-Each panel can be in one of five states. The state is shown in the panel's
-`aria-label` and via a small italicized note when relevant:
+Each panel can be in one of these states, shown as a small italicized note
+when relevant:
 
 - **Loading** — data is present and rendered. The default for a healthy panel.
-- **Empty (expected)** — this patient simply has no data of this kind. You are
-  not missing anything.
-- **Empty (unexpected)** — the dataset has rows for this patient at *later*
-  timepoints, but none yet. A signal that something will arrive.
-- **Partial** — some data is here, some isn't yet. The panel will tell you so.
-- **Error** — the panel itself failed to render. The other four panels are
+- **Empty** — nothing of this kind up to this timepoint: `No labs data up to
+  this timepoint.` The panel never says whether more will come.
+- **Partial** — what is shown is internally incomplete (e.g. an hourly max
+  without its median). Sparse sampling is normal and never partial.
+- **Error** — the panel itself failed to render. The other panels are
   unaffected; the page does not crash.
 
-If a panel is empty-expected for a patient (e.g., an outpatient with no head
-CT), that's not a bug — that patient really has no data of that kind.
+An empty panel is not a bug: either that patient has no data of that kind, or
+none has been recorded yet.
 
 ---
 
@@ -230,7 +241,7 @@ The same data, two different layouts. Pick whichever feels more natural —
 during the embedded-clinician sessions we want feedback on which one you'd
 actually use day-to-day.
 
-- **`?chrome=dense`** — single scrollable page, all five panels visible at
+- **`?chrome=dense`** — single scrollable page, all six panels visible at
   once, tighter type. Optimized for "see everything."
 - **`?chrome=epic`** — tabbed interface (one panel at a time), larger type and
   more whitespace, layout closer to Epic's conventions. Optimized for

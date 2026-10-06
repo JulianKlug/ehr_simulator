@@ -12,6 +12,7 @@ before ``LEAK_T`` must never contain it.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pandas as pd
 
@@ -172,3 +173,13 @@ def geneva_shaped_dataset(*, with_ai: bool = True) -> GenevaDataset:
         ai_output=ai_output,
         ai_provenance=provenance,
     )
+
+
+def stub_request() -> SimpleNamespace:
+    """The one ``Request`` attribute panel renderers read: the templates."""
+    from fastapi.templating import Jinja2Templates
+
+    from ehr_simulator.web.app import _TEMPLATES_DIR
+
+    templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(templates=templates)))

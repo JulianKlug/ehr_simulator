@@ -121,6 +121,8 @@ def slice_to_timepoint(
     patient_id: str,
     t_minutes: float,
     timepoint_index: int,
+    *,
+    timepoints: Sequence[float] | None = None,
 ) -> PatientSlice:
     """Filter every frame to ``patient_id`` AND ``t_minutes <= t``, then derive
     panel states by inspecting the unsliced dataset (the only function authorized
@@ -128,6 +130,9 @@ def slice_to_timepoint(
 
     ADMISSION has no ``t_minutes`` column → filter only by ``patient_id``.
     Returns a frozen dataclass; renderers consume sliced frames + state labels only.
+
+    ``timepoints`` (S8): the sequence the walk uses (study mode always passes
+    it). Absent → the dataset derived fallback, which spans the whole stay.
     """
     pid = patient_id
     t = float(t_minutes)
@@ -175,7 +180,11 @@ def slice_to_timepoint(
         patient_id=pid,
         t_minutes=t,
         timepoint_index=timepoint_index,
-        timepoints=patient_timepoints(dataset, pid),
+        timepoints=(
+            tuple(float(tp) for tp in timepoints)
+            if timepoints is not None
+            else patient_timepoints(dataset, pid)
+        ),
         scalar_ts=scalar_at_or_before,
         admission=admission_pid,
         imaging=imaging_at_or_before,

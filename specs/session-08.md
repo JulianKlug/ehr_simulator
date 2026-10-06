@@ -1287,3 +1287,26 @@ then:
 `/ship` (only when the user asks; it pushes)
 
 Deploying is out of scope (project rule: no deploy or push without the user).
+
+---
+
+# 22. Review notes (implementation)
+
+## 22.1 Performance measurements
+
+Machine: **development workstation, not the baseline laptop** (§12.2). Intel Xeon W-2275 (14 cores / 28 threads, 3.3 GHz), 61 GB RAM, Linux 6.14, Python 3.11.14, headless Chromium 147.0.7727.15.
+
+Real Geneva patient `1014413_2451` (test split, most scalar rows of the first five), `t_index` 23 (t = 1380 min) on the dataset hourly timeline, epic chrome, legacy AI (latest row with contributors + probability history):
+
+| Measure | Value |
+|---|---|
+| Server response (5 warm runs) | 1.08–1.15 s |
+| HTML response | 262 KB |
+| Inline SVG | 8 charts, 192 KB |
+| Chromium `loadEventEnd` (3 runs) | 1.15–1.30 s |
+
+The page is server bound: 9 plotnine renders at ~100–120 ms each, serialised by `_PANEL_RENDER_LOCK`. TTI on this machine is under 2 s; the baseline laptop trace (item 41) is still to be recorded.
+
+## 22.2 §12.3 SLA conflict (open)
+
+`test_geneva_real.py::test_render_walk_sla` (30 patients × 12 timepoints through `_render_panels_locked`, measured AI) takes **357 s** on this machine against the 10 s target. 10 s / 360 pages is ~28 ms per page, below the cost of a single plotnine chart, so no optimisation within §12.2's candidates (no client side charts) reaches it. A per-process SVG cache does not help a cold walk. Needs a decision: e.g. apply the 10 s budget to the slicing walk (preflight, the original S8 meaning) and set a per-page render budget instead.

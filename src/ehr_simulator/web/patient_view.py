@@ -230,7 +230,9 @@ async def _render_patient_view(
     timepoint_count = len(resolved.timepoints)
     at_last = t_index == timepoint_count - 1
 
-    patient_slice = slice_to_timepoint(state.dataset, patient_id, t_minutes, t_index)
+    patient_slice = slice_to_timepoint(
+        state.dataset, patient_id, t_minutes, t_index, timepoints=resolved.timepoints
+    )
     intervention = LEGACY_INTERVENTION
     if ctx is not None:
         intervention = resolve_intervention(
