@@ -1151,6 +1151,56 @@ def test_replace_keeps_old_keyfile_when_the_bundle_fails(
     assert not _leftovers(xh)
 
 
+def _fail_keyfile_dir_fsync(monkeypatch: pytest.MonkeyPatch, key_dir: Path) -> None:
+    """Fail the fsync that follows the keyfile install (bundle already published)."""
+    from ehr_simulator import export_bundle
+
+    real_fsync_dir = export_bundle._fsync_dir
+
+    def fsync_dir(path: Path) -> None:
+        if path == key_dir:
+            raise OSError("fsync failed")
+        real_fsync_dir(path)
+
+    monkeypatch.setattr(export_bundle, "_fsync_dir", fsync_dir)
+
+
+def test_replace_restores_old_keyfile_when_install_fails(
+    xh: LifecycleHarness, walked: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """REGRESSION: a failure after the keyfile swap left old bundle + new keyfile."""
+    bundle = _bundle(xh, keyfile=KeyfileRequest.REQUESTED)
+    out, key = xh.tmp_path / "bundle", xh.tmp_path / "keys" / "key.csv"
+    write_bundle(bundle, out, keyfile=key)
+    key.write_text("old keyfile")
+    before = sorted(p.name for p in out.iterdir())
+
+    _fail_keyfile_dir_fsync(monkeypatch, key.parent)
+    with pytest.raises(OSError, match="fsync failed"):
+        write_bundle(bundle, out, overwrite=Overwrite.REPLACE, keyfile=key)
+
+    assert key.read_text() == "old keyfile"
+    assert sorted(p.name for p in out.iterdir()) == before
+    assert sorted(p.name for p in key.parent.iterdir()) == ["key.csv"]
+    assert not _leftovers(xh)
+
+
+def test_new_keyfile_removed_when_install_fails(
+    xh: LifecycleHarness, walked: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A failed first export leaves neither a bundle nor an orphan keyfile."""
+    bundle = _bundle(xh, keyfile=KeyfileRequest.REQUESTED)
+    out, key = xh.tmp_path / "bundle", xh.tmp_path / "keys" / "key.csv"
+
+    _fail_keyfile_dir_fsync(monkeypatch, key.parent)
+    with pytest.raises(OSError, match="fsync failed"):
+        write_bundle(bundle, out, keyfile=key)
+
+    assert not out.exists()
+    assert list(key.parent.iterdir()) == []
+    assert not _leftovers(xh)
+
+
 def test_replace_swaps_the_keyfile(xh: LifecycleHarness, walked: dict) -> None:
     bundle = _bundle(xh, keyfile=KeyfileRequest.REQUESTED)
     out, key = xh.tmp_path / "bundle", xh.tmp_path / "key.csv"

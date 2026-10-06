@@ -6,7 +6,7 @@
            ─► <parent>/.<name>.staging-<id>/   every CSV, manifest.json last (fsynced)
            ─► keyfile staged beside its target   (0600, before any swap)
            ─► rename to <parent>/<name>/        (--force: old one aside first)
-           ─► keyfile linked / replaced         (parents fsynced)
+           ─► keyfile linked / replaced         (--force: old one linked aside first)
 
 Keyfile preconditions are checked before anything is written. A failure
 (interrupts included) removes the staging files and puts any previous
@@ -93,7 +93,9 @@ def write_bundle(
     staging = out_dir.parent / f".{out_dir.name}.staging-{token}"
     aside = out_dir.parent / f".{out_dir.name}.previous-{token}"
     staged_key = keyfile.parent / f".{keyfile.name}.staging-{token}" if keyfile else None
+    key_aside = keyfile.parent / f".{keyfile.name}.previous-{token}" if keyfile else None
     published = False
+    key_published = False
     staging.mkdir()
     try:
         _write_staging(bundle, staging)
@@ -106,13 +108,18 @@ def write_bundle(
         published = True
         _fsync_dir(out_dir.parent)
 
-        if keyfile is not None and staged_key is not None:
-            _install_keyfile(staged_key, keyfile, overwrite)
+        if keyfile is not None and staged_key is not None and key_aside is not None:
+            _publish_keyfile(staged_key, keyfile, key_aside, overwrite)
+            key_published = True
+            staged_key.unlink(missing_ok=True)
+            _fsync_dir(keyfile.parent)
     except BaseException:
         # Interrupts too: never strand the previous bundle under its aside name.
         shutil.rmtree(staging, ignore_errors=True)
         if staged_key is not None:
             staged_key.unlink(missing_ok=True)
+        if keyfile is not None and key_aside is not None:
+            _restore_keyfile(keyfile, key_aside, key_published)
         if published:
             shutil.rmtree(out_dir, ignore_errors=True)
         if aside.exists() and not out_dir.exists():
@@ -120,6 +127,8 @@ def write_bundle(
         raise
 
     shutil.rmtree(aside, ignore_errors=True)
+    if key_aside is not None:
+        key_aside.unlink(missing_ok=True)
     return out_dir
 
 
@@ -163,16 +172,32 @@ def _stage_keyfile(bundle: Phase2Bundle, keyfile: Path, staged: Path) -> None:
         raise BundleWriteError(f"the keyfile was not written: {exc}") from exc
 
 
-def _install_keyfile(staged: Path, keyfile: Path, overwrite: Overwrite) -> None:
+def _publish_keyfile(staged: Path, keyfile: Path, aside: Path, overwrite: Overwrite) -> None:
+    """Put the staged keyfile at ``keyfile``; a replaced one stays linked at ``aside``.
+
+    The old mapping is the only way back to the clinicians of the previous
+    bundle, so it survives until the whole publish succeeds.
+    """
     if overwrite is Overwrite.REPLACE:
+        if keyfile.exists():
+            os.link(keyfile, aside)
         os.replace(staged, keyfile)
-    else:
-        try:
-            os.link(staged, keyfile)  # no clobber: a keyfile created since the check wins
-        except FileExistsError as exc:
-            raise BundleWriteError(f"keyfile {keyfile} appeared during the export") from exc
-        staged.unlink()
-    _fsync_dir(keyfile.parent)
+        return
+
+    try:
+        os.link(staged, keyfile)  # no clobber: a keyfile created since the check wins
+    except FileExistsError as exc:
+        raise BundleWriteError(f"keyfile {keyfile} appeared during the export") from exc
+
+
+def _restore_keyfile(keyfile: Path, aside: Path, published: bool) -> None:
+    """Undo a keyfile publish: the old mapping back, or no new one left behind."""
+    if aside.exists():
+        os.replace(aside, keyfile)
+        return
+
+    if published:
+        keyfile.unlink(missing_ok=True)
 
 
 def _write_synced(path: Path, content: bytes) -> None:
