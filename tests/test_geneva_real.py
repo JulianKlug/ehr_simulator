@@ -43,3 +43,36 @@ def test_load_geneva_real_csv_smoke() -> None:
         f"real-data load: {elapsed:.1f}s, scalar patients={n_scalar_patients}, "
         f"admission patients={n_admission_patients}, issues={len(dataset.issues)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# S8 §1.3: every inventory label arrives in its expected frame
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def real_geneva():
+    if not REAL_CSV.is_file() or not REAL_PARAMS_DIR.is_dir():
+        pytest.skip(f"real Geneva data not available at {REAL_CSV}")
+    return load_geneva(REAL_CSV, REAL_PARAMS_DIR, strict=False)
+
+
+@pytest.mark.real_data
+def test_inventory_labels_arrive_in_expected_frames(real_geneva) -> None:
+    from ehr_simulator.ingestion.canonical import IMAGING_FINDING_FIELDS
+    from ehr_simulator.ingestion.geneva import _VARIABLE_RENAMES
+    from tests.test_clinical_fields import GENEVA_EHR_LABELS
+
+    variables = set(real_geneva.scalar_ts["variable"].astype(str))
+    expected = {_VARIABLE_RENAMES.get(label, label) for label in GENEVA_EHR_LABELS}
+    assert expected <= variables, sorted(expected - variables)
+
+    fields = real_geneva.admission.loc[real_geneva.admission["field"] == "weight"]
+    assert not fields.empty
+
+    # §1.3.1: the binary imaging findings are registry (ADMISSION) fields.
+    admission = real_geneva.admission
+    for name in IMAGING_FINDING_FIELDS:
+        values = set(admission.loc[admission["field"] == name, "value"])
+        assert values and values <= {"True", "False"}, (name, values)
+        assert name not in variables

@@ -66,7 +66,12 @@ from ehr_simulator.config import (
 from ehr_simulator.db import answers, arm_assignments
 from ehr_simulator.db.observation import ObservationMode
 from ehr_simulator.export import ExportError, read_snapshot
-from ehr_simulator.ingestion.canonical import LAB_VAR_SET, VITAL_VAR_SET
+from ehr_simulator.ingestion.canonical import (
+    AGGREGATE_BOUND_VAR_SET,
+    IMAGING_DERIVED_VAR_SET,
+    LAB_VAR_SET,
+    VITAL_VAR_SET,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -136,7 +141,9 @@ def newly_visible_summary(
 
     Counts only, canonical category, fixed order: ``admission`` (first
     timepoint only), ``vitals``, ``labs``, ``other scalar`` (any scalar
-    variable outside the vitals/lab sets), ``AI``, ``imaging``.
+    variable outside the vitals/lab/imaging sets), ``AI``, ``imaging``
+    (canonical rows + imaging derived scalars, S8). Aggregate bounds
+    (``hr_min``, …) are not counted: a bucket is one observation.
     Categories with zero new rows are omitted; an all-empty interval
     renders ``"no new data"``. Otherwise the annotation is prefixed
     ``"new: "`` (spec §7 example): ``new: vitals 6 · labs 4 · AI 1``.
@@ -149,11 +156,12 @@ def newly_visible_summary(
     imaging_pid = dataset.imaging.loc[dataset.imaging.patient_id == patient_id]
     ai_pid = dataset.ai_output.loc[dataset.ai_output.patient_id == patient_id]
 
+    scalar_pid = scalar_pid.loc[~scalar_pid.variable.isin(AGGREGATE_BOUND_VAR_SET)]
     vitals = scalar_pid.loc[scalar_pid.variable.isin(VITAL_VAR_SET)]
     labs = scalar_pid.loc[scalar_pid.variable.isin(LAB_VAR_SET)]
-    other_scalar = scalar_pid.loc[
-        ~scalar_pid.variable.isin(VITAL_VAR_SET) & ~scalar_pid.variable.isin(LAB_VAR_SET)
-    ]
+    imaging_scalar = scalar_pid.loc[scalar_pid.variable.isin(IMAGING_DERIVED_VAR_SET)]
+    classified = VITAL_VAR_SET | LAB_VAR_SET | IMAGING_DERIVED_VAR_SET
+    other_scalar = scalar_pid.loc[~scalar_pid.variable.isin(classified)]
 
     out: list[str] = []
     for i, t_i in enumerate(timepoints_minutes):
@@ -166,11 +174,13 @@ def newly_visible_summary(
             ("labs", labs),
             ("other scalar", other_scalar),
             ("AI", ai_pid),
-            ("imaging", imaging_pid),
         ):
             n = _count_visible(frame, low, t_i)
             if n:
                 parts.append(f"{label} {n}")
+        n_imaging = _count_visible(imaging_pid, low, t_i) + _count_visible(imaging_scalar, low, t_i)
+        if n_imaging:
+            parts.append(f"imaging {n_imaging}")
         out.append(("new: " + " · ".join(parts)) if parts else "no new data")
     return out
 

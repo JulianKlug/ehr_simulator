@@ -49,6 +49,7 @@ UNIT_MODULES = frozenset(
         "test_behavioral_timing",
         "test_canonical",
         "test_charts",
+        "test_clinical_fields",
         "test_config",
         "test_config_history",
         "test_data_contract",

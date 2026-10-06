@@ -203,6 +203,20 @@ Commit 1 adds a `real_data` test asserting, on the real CSV, that:
 
 If any assertion fails, stop and amend this spec before building panels on it.
 
+### 1.3.1 Result on the real CSV (amendment)
+
+Assertions 1 and 2 hold. Assertion 3 **fails**: the four binary imaging variables are `stroke_registry` rows, present at `t=0` only (`hypoperfusion_*` 1901 patients, `vascular_*` 2502). The adapter (`strict=False`, the app's load mode) routes them to `ADMISSION` through the flat binary tier, as `"True"`/`"False"`.
+
+Amended contract:
+
+1. The four findings stay in `ADMISSION`, under their raw names. No adapter change.
+2. They render **only** in the imaging panel (*Imaging / vascular findings*, §5.1), never in the admission panel (D13: one location each).
+3. Their preflight id is `admission:<name>` (§15.1); "every admission field" still covers them.
+4. Imaging panel state counts them as imaging data present from `t=0` (§10.1).
+5. Divergence is unchanged for them: admission is already counted once at the first timepoint.
+
+Also observed: `weight` has `stroke_registry` rows in buckets 0–7; `ADMISSION` keeps the `t=0` row only, so a patient whose weight was first recorded later has none. Accepted, out of scope.
+
 ---
 
 # 2. Neurological and respiratory support panel
@@ -403,7 +417,7 @@ Render:
 3. Vascular occlusion
 4. Vascular stenosis > 50%
 
-Corresponding Geneva variables (real label list in `tests/test_geneva.py`; **not** in the committed fixture, see §1.3):
+Corresponding Geneva variables (real label list in `tests/test_geneva.py`; **not** in the committed fixture, see §1.3). Perfusion volumes are `SCALAR_TS` ids; the four findings are `ADMISSION` fields (§1.3.1):
 
 `tmax_gt_4`, `tmax_gt_6`, `tmax_gt_8`, `tmax_gt_10`
 
@@ -509,6 +523,11 @@ Rules:
 SHAP feature names are model features, not canonical variables (fixture: `avg_heart_rate`, `lag2_glucose`, `timestep_idx`, `ALAT`).
 
 1. Commit 3 first enumerates the real `shap_feature_names.pkl` and records its naming grammar (prefixes such as `avg_`, `lagN_`, `min_`/`max_`/`median_`, and specials such as `timestep_idx`) in this spec.
+
+   **Recorded grammar** (1134 names): `feature = [transform "_"] source_label | "timestep_idx"`.
+   - `source_label`: one of the 103 non imputed Geneva `sample_label`s, raw (`max_heart_rate`, `glucose`, `sex_male`, `categorical_ivt_<90min`, `prestroke_disability_(rankin)_2.0`, …). 83 names are a bare label (incl. `timestep_idx`).
+   - `transform`: `avg`, `min`, `max`, `std`, `diff`, `lag2`, `lag3`, `rolling_mean`, `rolling_std`, `rolling_trend` (103 names each; `min`/`max` 110 because `min_NIHSS`/`max_*` are also bare labels).
+   - Resolution: exact label first (so `max_heart_rate` is the bare label, `max_max_heart_rate` the `max` transform of it), else one transform prefix stripped.
 2. `clinical_fields.py` resolves a feature to `<transform> <clinical label>` when the base name maps to a registry entry. Example: `lag2_glucose` → `Glucose (2 h earlier)`. `timestep_idx` → `Time since admission`.
 3. An unresolved feature renders its raw name in `<code>`. It is never dropped.
 4. A registry test asserts the share of resolved real feature names (`real_data`) and lists the unresolved ones in the failure message.
@@ -968,7 +987,7 @@ This preserves the existing S10 output structure while avoiding the misleading c
 The variable sets live in `ingestion/canonical.py` and are dataset agnostic.
 
 1. **Synthetic**: ids unchanged; it renders as before except the §9.2 empty state wording and the §10.1 `partial` rules.
-2. **MIMIC**: has no rename map, so its vitals and labs stay unmatched as today (out of scope). It ships the same imaging derived ids (`cbf_lt_30`, `tmax_gt_6`, …, `mimic.py` docstring), so the S8 imaging panel **also renders for MIMIC**. This is accepted and covered by one test.
+2. **MIMIC**: has no rename map, so its vitals and labs stay unmatched as today (out of scope). It ships the same imaging derived ids (`cbf_lt_30`, `tmax_gt_6`, …, `mimic.py` docstring), so the S8 imaging panel **also renders for MIMIC**. This is accepted and covered by one test. (The real MIMIC CSV ships none of these ids, contrary to the docstring; the test uses a constructed `MimicDataset`.)
 
 ---
 

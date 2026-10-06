@@ -179,6 +179,22 @@ def test_summary_includes_ai_and_imaging() -> None:
     assert got[2] == "new: imaging 1"
 
 
+def test_geneva_bucket_counts_once_and_perfusion_is_imaging() -> None:
+    """S8 §16: bounds are not counted; perfusion volumes count as imaging."""
+    ds = _fake_dataset(admitted=False)
+    rows = [
+        (variable, 0.0)
+        for variable in ("hr_min", "hr", "hr_max", "nihss_min", "nihss", "nihss_max")
+    ] + [("tmax_gt_6", 0.0), ("cbf_lt_30", 0.0), ("hct", 0.0)]
+    ds.scalar_ts = pd.DataFrame(
+        [{"patient_id": PID, "variable": v, "t_minutes": t} for v, t in rows]
+    )
+    ds.imaging = pd.DataFrame({"patient_id": [PID], "t_minutes": [0.0]})
+
+    got = divergence.newly_visible_summary(ds, PID, [0.0])
+    assert got == ["new: vitals 1 · labs 1 · other scalar 1 · imaging 3"]
+
+
 def test_rows_beyond_last_timepoint_are_excluded() -> None:
     ds = _fake_dataset(admitted=False, vitals=[500.0], ai=[1000.0])
     got = divergence.newly_visible_summary(ds, PID, [0.0, 60.0, 180.0])

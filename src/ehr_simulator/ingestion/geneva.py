@@ -94,30 +94,55 @@ _LAYOUT = _FeatureLayout(
     registry_source=_REGISTRY_SOURCE,
 )
 
-# Map Geneva's per-hour-aggregate variable names to the canonical short codes
-# the panel layer (web/panels.py) filters on. Geneva ships min/median/max
-# triplets per vital per hour bucket; for now we surface the median under the
-# canonical name so the vitals panel renders. min_* and max_* rows pass
-# through unchanged — they stay in scalar_ts but won't match the vitals
-# filter, leaving room for an S8 band-rendering pass.
-#
-# Lab renames map French Geneva names to the canonical English short codes
-# the labs panel expects (hgb, na, cr, glucose, wbc, plt). `glucose` maps to
-# itself.
+# Map Geneva source labels to the canonical ids the panel layer filters on.
+# Per-hour aggregate triplets become one family (S8): the median keeps the
+# bare id, the bounds get ``_min``/``_max``, e.g. ``min_heart_rate`` →
+# ``hr_min``. Lab renames map French Geneva names to English short codes.
+# Imaging derived ids (``tmax_gt_6``, …) and ``glucose``/``lactate``/
+# ``triglycerides`` are already canonical and pass through.
+_AGGREGATE_SOURCES: dict[str, str] = {
+    "heart_rate": "hr",
+    "mean_blood_pressure": "map",
+    "systolic_blood_pressure": "sbp",
+    "diastolic_blood_pressure": "dbp",
+    "oxygen_saturation": "spo2",
+    "respiratory_rate": "rr",
+    "NIHSS": "nihss",
+}
 _VARIABLE_RENAMES: dict[str, str] = {
-    # Vitals
-    "median_heart_rate": "hr",
-    "median_systolic_blood_pressure": "sbp",
-    "median_diastolic_blood_pressure": "dbp",
-    "median_respiratory_rate": "rr",
-    "median_oxygen_saturation": "spo2",
+    **{f"median_{src}": canonical for src, canonical in _AGGREGATE_SOURCES.items()},
+    **{f"min_{src}": f"{canonical}_min" for src, canonical in _AGGREGATE_SOURCES.items()},
+    **{f"max_{src}": f"{canonical}_max" for src, canonical in _AGGREGATE_SOURCES.items()},
+    # Vitals + neuro/support
     "temperature": "temp",
+    "Glasgow Coma Scale": "gcs",
+    "FIO2": "fio2",
     # Labs
+    "hematocrite": "hct",
     "hemoglobine": "hgb",
-    "sodium": "na",
+    "hemoglobine glyquee": "hba1c",
     "creatinine": "cr",
+    "potassium": "k",
+    "sodium": "na",
+    "chlore": "cl",
+    "uree": "urea",
+    "calcium corrige": "calcium",
+    "phosphates": "phosphate",
+    "ALAT": "alt",
+    "ASAT": "ast",
+    "bilirubine totale": "bilirubin",
+    "cholesterol HDL": "hdl",
+    "LDL cholesterol calcule": "ldl",
+    "cholesterol total": "cholesterol",
     "leucocytes": "wbc",
     "thrombocytes": "plt",
+    "erythrocytes": "rbc",
+    "neutrophiles-nb abs": "neutrophils",
+    "INR": "inr",
+    "PTT": "ptt",
+    "fibrinogene": "fibrinogen",
+    "proBNP": "probnp",
+    "proteine C-reactive": "crp",
 }
 
 

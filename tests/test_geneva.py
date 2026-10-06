@@ -571,9 +571,69 @@ def test_load_geneva_renames_median_vitals_and_french_labs_to_canonical(
         assert canonical in variables, (
             f"expected canonical {canonical!r} after rename, missing from scalar_ts"
         )
-    # min_* and max_* aggregates pass through unchanged (they're real data
-    # the panel layer just doesn't render today; S8 band rendering TODO).
-    assert "max_heart_rate" in variables  # baseline fixture row, untouched
+    # S8: the baseline fixture's max_heart_rate is an aggregate bound now.
+    assert "hr_max" in variables
+
+
+def _load_with_ehr_labels(geneva_fixture_dir: Path, tmp_path: Path, labels: list[str]):
+    """Load the fixture extended with one ``t=0`` EHR row per label."""
+    base = pd.read_csv(geneva_fixture_dir / "geneva_sample.csv")
+    extra = pd.DataFrame(
+        {
+            "relative_sample_date_hourly_cat": 0,
+            "case_admission_id": "geneva_fixture_001",
+            "sample_label": labels,
+            "source": "EHR",
+            "value": 0.0,
+        }
+    )
+    path = tmp_path / "geneva_extended.csv"
+    pd.concat([base, extra], ignore_index=True).to_csv(path, index=False)
+    return load_geneva(path, geneva_fixture_dir, strict=False)
+
+
+def test_heart_rate_triplet_maps_to_one_family(geneva_fixture_dir: Path, tmp_path: Path) -> None:
+    from ehr_simulator.ingestion.geneva import _VARIABLE_RENAMES
+
+    assert _VARIABLE_RENAMES["min_heart_rate"] == "hr_min"
+    assert _VARIABLE_RENAMES["median_heart_rate"] == "hr"
+    assert _VARIABLE_RENAMES["max_heart_rate"] == "hr_max"
+
+    labels = ["min_heart_rate", "median_heart_rate", "max_heart_rate"]
+    dataset = _load_with_ehr_labels(geneva_fixture_dir, tmp_path, labels)
+    variables = set(dataset.scalar_ts["variable"].astype(str))
+    assert {"hr_min", "hr", "hr_max"} <= variables
+    assert not variables & set(labels)
+
+
+@pytest.mark.parametrize(
+    ("source", "canonical"),
+    [
+        ("mean_blood_pressure", "map"),
+        ("systolic_blood_pressure", "sbp"),
+        ("diastolic_blood_pressure", "dbp"),
+        ("oxygen_saturation", "spo2"),
+        ("respiratory_rate", "rr"),
+        ("NIHSS", "nihss"),
+    ],
+)
+def test_aggregate_triplets_map_to_families(
+    geneva_fixture_dir: Path, tmp_path: Path, source: str, canonical: str
+) -> None:
+    labels = [f"min_{source}", f"median_{source}", f"max_{source}"]
+    dataset = _load_with_ehr_labels(geneva_fixture_dir, tmp_path, labels)
+    variables = set(dataset.scalar_ts["variable"].astype(str))
+    assert {f"{canonical}_min", canonical, f"{canonical}_max"} <= variables
+
+
+def test_every_rename_target_is_a_registered_scalar() -> None:
+    from ehr_simulator.ingestion.geneva import _VARIABLE_RENAMES
+    from ehr_simulator.web.clinical_fields import scalar_field
+
+    for source, canonical in _VARIABLE_RENAMES.items():
+        field = scalar_field(canonical)
+        assert field is not None, canonical
+        assert field.source == source
 
 
 # ---------------------------------------------------------------------------

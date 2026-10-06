@@ -57,8 +57,81 @@ class CanonicalShape(StrEnum):
 #: SCALAR_TS panel (S2). Public so tooling on both sides of the UI/web
 #: boundary (the patient panels, the S10 divergence annotations) can
 #: classify a canonical observation without importing the other layer.
-VITAL_VAR_SET = frozenset({"hr", "sbp", "dbp", "rr", "spo2", "temp"})
-LAB_VAR_SET = frozenset({"hgb", "na", "cr", "glucose", "wbc", "plt"})
+#: S8: aggregate measurement families. The median keeps the bare id; the
+#: hourly bounds are ``<median>_min`` / ``<median>_max``. Example: Geneva's
+#: ``min/median/max_heart_rate`` → ``hr_min``, ``hr``, ``hr_max``.
+VITAL_AGGREGATE_FAMILIES: tuple[str, ...] = ("hr", "map", "sbp", "dbp", "spo2", "rr")
+NEURO_AGGREGATE_FAMILIES: tuple[str, ...] = ("nihss",)
+AGGREGATE_BOUNDS: dict[str, tuple[str, str]] = {
+    median: (f"{median}_min", f"{median}_max")
+    for median in VITAL_AGGREGATE_FAMILIES + NEURO_AGGREGATE_FAMILIES
+}
+#: Bound ids: one aggregate bucket is one observation, never three (S10 counts).
+AGGREGATE_BOUND_VAR_SET = frozenset(bound for pair in AGGREGATE_BOUNDS.values() for bound in pair)
+
+
+def _with_bounds(medians: tuple[str, ...]) -> frozenset[str]:
+    return frozenset(medians) | {bound for m in medians for bound in AGGREGATE_BOUNDS[m]}
+
+
+VITAL_VAR_SET = _with_bounds(VITAL_AGGREGATE_FAMILIES) | {"temp"}
+NEURO_SUPPORT_VAR_SET = _with_bounds(NEURO_AGGREGATE_FAMILIES) | {"gcs", "fio2"}
+LAB_VAR_SET = frozenset(
+    {
+        "hct",
+        "hgb",
+        "hba1c",
+        "cr",
+        "k",
+        "na",
+        "cl",
+        "urea",
+        "calcium",
+        "phosphate",
+        "alt",
+        "ast",
+        "bilirubin",
+        "triglycerides",
+        "hdl",
+        "ldl",
+        "cholesterol",
+        "wbc",
+        "plt",
+        "rbc",
+        "neutrophils",
+        "inr",
+        "ptt",
+        "fibrinogen",
+        "probnp",
+        "crp",
+        "lactate",
+        "glucose",
+    }
+)
+#: S8: imaging derived perfusion volumes, stored as SCALAR_TS rows.
+IMAGING_DERIVED_VAR_SET = frozenset(
+    {
+        "tmax_gt_4",
+        "tmax_gt_6",
+        "tmax_gt_8",
+        "tmax_gt_10",
+        "cbf_lt_20",
+        "cbf_lt_30",
+        "cbf_lt_34",
+        "cbf_lt_38",
+        "cbv_lt_34",
+        "cbv_lt_38",
+        "cbv_lt_42",
+    }
+)
+#: S8: binary imaging findings. Geneva ships them as ``stroke_registry``
+#: rows at t=0, so they are ADMISSION fields, shown in the imaging panel.
+IMAGING_FINDING_FIELDS: tuple[str, ...] = (
+    "hypoperfusion_with_mismatch",
+    "hypoperfusion_without_mismatch",
+    "vascular_occlusion",
+    "vascular_stenosis_over_50p",
+)
 
 
 def _is_valid_json(val: object) -> bool:
