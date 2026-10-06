@@ -19,23 +19,31 @@ Two-step normalize-after-validate is load-bearing:
 :func:`_validate_and_collect` so pandera's ``coerce=True`` can drop a
 malformed-string row in lenient mode before normalization eats it. This
 depends on the canonical SCALAR_TS schema having no range check on
-``value`` (``canonical.py`` line 88, nullable, no checks); a future schema
-change adding e.g. ``value >= 0`` would break both adapters.
+``value`` (nullable, finite only); a future schema change adding e.g.
+``value >= 0`` would break both adapters.
 """
 
 from __future__ import annotations
 
 import ast
+import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
 import structlog
 
-from ehr_simulator.ingestion.canonical import CanonicalShape, validate
+from ehr_simulator.ingestion.canonical import CanonicalShape, empty_frame, validate
 from ehr_simulator.ingestion.exceptions import AdapterError, IngestionIssue
 
 _LOG = structlog.get_logger("ehr_simulator")
+
+#: Hour bucket → minutes: ``t_minutes = relative_sample_date_hourly_cat * 60``.
+_MINUTES_PER_HOUR = 60.0
+
+#: Source CSV column holding the hour bucket.
+_HOUR_BUCKET_COLUMN = "relative_sample_date_hourly_cat"
 
 __all__ = [
     "CategoricalGroup",
@@ -70,6 +78,18 @@ class CategoricalGroup:
     one_hot_columns: tuple[str, ...]
 
 
+def _adapter_error(
+    dataset: str,
+    reason: str,
+    *,
+    patient_id: str | None = None,
+    row_idx: int | None = None,
+) -> AdapterError:
+    """One-issue :class:`AdapterError`: message ``[dataset] reason``, same reason."""
+    issue = IngestionIssue(dataset=dataset, patient_id=patient_id, row_idx=row_idx, reason=reason)
+    return AdapterError(f"[{dataset}] {reason}", issues=[issue])
+
+
 def _drop_imputed(frame: pd.DataFrame) -> pd.DataFrame:
     if frame.empty:
         return frame.reset_index(drop=True)
@@ -96,17 +116,7 @@ def _path_traversal_guard(path: Path, root: Path | None, *, dataset: str) -> Pat
     root_resolved = root.resolve(strict=False)
     if not resolved.is_relative_to(root_resolved):
         reason = f"path traversal: {resolved} not under EHR_SIM_DATA_ROOT={root_resolved}"
-        raise AdapterError(
-            f"[{dataset}] {reason}",
-            issues=[
-                IngestionIssue(
-                    dataset=dataset,
-                    patient_id=None,
-                    row_idx=None,
-                    reason=reason,
-                )
-            ],
-        )
+        raise _adapter_error(dataset, reason)
     return resolved
 
 
@@ -116,39 +126,35 @@ def _load_normalisation_params(path: Path, *, dataset: str) -> dict[str, tuple[f
     Wraps :class:`FileNotFoundError` as :class:`AdapterError` so a missing
     file surfaces a clean error with ``dataset`` flowing into the issue,
     not a raw pandas trace.
+
+    Refuses a duplicated variable (would silently last-win), a non-finite
+    mean and a non-finite or non-positive std (inverse normalization would
+    show NaN, inf or a constant).
     """
+    name = Path(path).name
     try:
         df = pd.read_csv(path)
     except FileNotFoundError as exc:
-        raise AdapterError(
-            f"[{dataset}] {Path(path).name} not found at {path}",
-            issues=[
-                IngestionIssue(
-                    dataset=dataset,
-                    patient_id=None,
-                    row_idx=None,
-                    reason=f"{Path(path).name} not found at {path}",
-                )
-            ],
-        ) from exc
+        raise _adapter_error(dataset, f"{name} not found at {path}") from exc
     required = {"variable", "original_mean", "original_std"}
     missing = required - set(df.columns)
     if missing:
-        raise AdapterError(
-            f"[{dataset}] {Path(path).name} missing columns: {sorted(missing)}",
-            issues=[
-                IngestionIssue(
-                    dataset=dataset,
-                    patient_id=None,
-                    row_idx=None,
-                    reason=f"missing columns in {Path(path).name}: {sorted(missing)}",
-                )
-            ],
-        )
-    return {
-        str(row.variable): (float(row.original_mean), float(row.original_std))
-        for row in df.itertuples(index=False)
-    }
+        raise _adapter_error(dataset, f"{name} missing columns: {sorted(missing)}")
+
+    params: dict[str, tuple[float, float]] = {}
+    for idx, row in enumerate(df.itertuples(index=False)):
+        variable = str(row.variable)
+        mean, std = float(row.original_mean), float(row.original_std)
+        if variable in params:
+            raise _adapter_error(dataset, f"{name}: duplicate variable {variable}", row_idx=idx)
+        if not math.isfinite(mean):
+            raise _adapter_error(dataset, f"{name}: {variable} mean {mean} not finite", row_idx=idx)
+        if not math.isfinite(std) or std <= 0:
+            raise _adapter_error(
+                dataset, f"{name}: {variable} std {std} must be finite and > 0", row_idx=idx
+            )
+        params[variable] = (mean, std)
+    return params
 
 
 def _load_categorical_encoding(
@@ -170,65 +176,32 @@ def _load_categorical_encoding(
     ``dataset`` so a missing file surfaces a clean error, not a raw pandas
     trace.
     """
+    name = Path(path).name
     try:
         df = pd.read_csv(path)
     except FileNotFoundError as exc:
-        raise AdapterError(
-            f"[{dataset}] {Path(path).name} not found at {path}",
-            issues=[
-                IngestionIssue(
-                    dataset=dataset,
-                    patient_id=None,
-                    row_idx=None,
-                    reason=f"{Path(path).name} not found at {path}",
-                )
-            ],
-        ) from exc
+        raise _adapter_error(dataset, f"{name} not found at {path}") from exc
     required = {"sample_label", "baseline_value", "other_categories"}
     missing = required - set(df.columns)
     if missing:
-        raise AdapterError(
-            f"[{dataset}] {Path(path).name} missing columns: {sorted(missing)}",
-            issues=[
-                IngestionIssue(
-                    dataset=dataset,
-                    patient_id=None,
-                    row_idx=None,
-                    reason=f"missing columns in {Path(path).name}: {sorted(missing)}",
-                )
-            ],
-        )
+        raise _adapter_error(dataset, f"{name} missing columns: {sorted(missing)}")
 
     groups: dict[str, CategoricalGroup] = {}
     naming_drift: list[str] = []
     for idx, row in df.iterrows():
         group_name = str(row["sample_label"])
         raw_baseline = str(row["baseline_value"])
+        cell_at = f"{name} row {idx} ({group_name})"
         try:
-            if raw_baseline.startswith("["):
-                parsed_baseline = ast.literal_eval(raw_baseline)
-            else:
-                try:
-                    parsed_baseline = ast.literal_eval(raw_baseline)
-                except (SyntaxError, ValueError):
-                    parsed_baseline = raw_baseline
+            parsed_baseline = _parse_baseline(raw_baseline)
             other_list = ast.literal_eval(str(row["other_categories"]))
         except (SyntaxError, ValueError) as exc:
-            raise AdapterError(
-                f"[{dataset}] {Path(path).name} row {idx} ({group_name}): malformed cell — {exc}",
-                issues=[
-                    IngestionIssue(
-                        dataset=dataset,
-                        patient_id=None,
-                        row_idx=int(idx),
-                        reason=(
-                            f"malformed categorical-encoding cell at row {idx} "
-                            f"({group_name}): {exc}"
-                        ),
-                    )
-                ],
+            raise _adapter_error(
+                dataset, f"{cell_at}: malformed cell — {exc}", row_idx=int(idx)
             ) from exc
 
+        if parsed_baseline == []:
+            raise _adapter_error(dataset, f"{cell_at}: empty baseline list", row_idx=int(idx))
         if isinstance(parsed_baseline, list):
             baseline = str(parsed_baseline[0])
         else:
@@ -246,23 +219,27 @@ def _load_categorical_encoding(
         )
 
     if naming_drift:
-        raise AdapterError(
-            f"[{dataset}] categorical naming-convention drift: "
-            f"{naming_drift} not in CSV sample_label",
-            issues=[
-                IngestionIssue(
-                    dataset=dataset,
-                    patient_id=None,
-                    row_idx=None,
-                    reason=(
-                        f"categorical naming-convention drift: {naming_drift} "
-                        "not in CSV sample_label"
-                    ),
-                )
-            ],
+        raise _adapter_error(
+            dataset,
+            f"categorical naming-convention drift: {naming_drift} not in CSV sample_label",
         )
 
     return groups
+
+
+def _parse_baseline(raw: str) -> object:
+    """Parse one ``baseline_value`` cell.
+
+    A list cell must be a valid literal; any other cell falls back to the
+    bare label. Example: ``"['Female']"`` → ``['Female']``, ``"Female"`` →
+    ``"Female"``, ``"[oops"`` → raises.
+    """
+    try:
+        return ast.literal_eval(raw)
+    except (SyntaxError, ValueError):
+        if raw.startswith("["):
+            raise
+        return raw
 
 
 def _decode_categorical(
@@ -287,17 +264,7 @@ def _decode_categorical(
     if rows_for_group.empty:
         reason = f"empty rows for categorical group {group.group_name}"
         if strict:
-            raise AdapterError(
-                f"[{dataset}] {reason}",
-                issues=[
-                    IngestionIssue(
-                        dataset=dataset,
-                        patient_id=patient_id,
-                        row_idx=None,
-                        reason=reason,
-                    )
-                ],
-            )
+            raise _adapter_error(dataset, reason, patient_id=patient_id)
         return group.baseline, IngestionIssue(
             dataset=dataset,
             patient_id=patient_id,
@@ -321,17 +288,7 @@ def _decode_categorical(
         f"ambiguous categorical decode for {group.group_name}: {n_above} candidates >=0.5"
     )
     if strict:
-        raise AdapterError(
-            f"[{dataset}] {reason_strict}",
-            issues=[
-                IngestionIssue(
-                    dataset=dataset,
-                    patient_id=patient_id,
-                    row_idx=None,
-                    reason=reason_strict,
-                )
-            ],
-        )
+        raise _adapter_error(dataset, reason_strict, patient_id=patient_id)
 
     argmax_idx = values.idxmax()
     picked_label = label_for_column[labels.loc[argmax_idx]]
@@ -388,17 +345,7 @@ def _read_features_csv(
     header = pd.read_csv(csv_path, nrows=0)
     missing = set(required_columns) - set(header.columns)
     if missing:
-        raise AdapterError(
-            f"[{dataset}] CSV missing required columns: {sorted(missing)}",
-            issues=[
-                IngestionIssue(
-                    dataset=dataset,
-                    patient_id=None,
-                    row_idx=None,
-                    reason=f"missing required columns: {sorted(missing)}",
-                )
-            ],
-        )
+        raise _adapter_error(dataset, f"CSV missing required columns: {sorted(missing)}")
 
     known = set(known_sources)
     issues: list[IngestionIssue] = []
@@ -459,6 +406,7 @@ def _build_scalar_ts(
     norm_params: dict[str, tuple[float, float]],
     *,
     units: dict[str, str] | None = None,
+    strict: bool,
     dataset: str,
 ) -> tuple[pd.DataFrame, list[IngestionIssue]]:
     """Build a SCALAR_TS frame with the raw (z-scored) value column.
@@ -471,6 +419,10 @@ def _build_scalar_ts(
     ``units=None`` means "every output row gets ``unit=None``" (MIMIC's
     case — no upstream units source). ``units={...}`` means "look up unit
     per variable, fall back to ``None`` when missing" (Geneva's case).
+
+    A variable missing from ``norm_params`` would reach clinicians as a raw
+    z-score with a real unit (e.g. "0.42 mmHg"): strict raises, lenient
+    drops its rows and records one issue per variable.
     """
     issues: list[IngestionIssue] = []
     if ehr_rows.empty:
@@ -481,17 +433,16 @@ def _build_scalar_ts(
             issues,
         )
 
-    variables = ehr_rows["sample_label"].astype(str).to_numpy()
-    missing_vars = sorted({v for v in variables if v not in norm_params})
+    labels = ehr_rows["sample_label"].astype(str)
+    missing_vars = sorted(set(labels) - set(norm_params))
     for var in missing_vars:
-        issues.append(
-            IngestionIssue(
-                dataset=dataset,
-                patient_id=None,
-                row_idx=None,
-                reason=f"variable {var} missing from normalisation_parameters",
-            )
-        )
+        reason = f"variable {var} missing from normalisation_parameters"
+        if strict:
+            raise _adapter_error(dataset, reason)
+        issues.append(IngestionIssue(dataset=dataset, patient_id=None, row_idx=None, reason=reason))
+
+    ehr_rows = ehr_rows[~labels.isin(missing_vars)]
+    variables = labels[~labels.isin(missing_vars)].to_numpy()
 
     if units is None:
         unit_col: list[str | None] = [None] * len(ehr_rows)
@@ -650,3 +601,133 @@ def _validate_and_collect(
         if adapter_error is not None:
             issues.extend(adapter_error.issues)
     return validated
+
+
+def _hour_buckets_to_minutes(
+    frame: pd.DataFrame,
+    *,
+    strict: bool,
+    dataset: str,
+) -> tuple[pd.DataFrame, list[IngestionIssue]]:
+    """Add ``t_minutes`` from the hour bucket (``2`` → ``120.0``).
+
+    A non-numeric or blank bucket: strict raises, lenient drops the row and
+    records one issue per row.
+    """
+    hours = pd.to_numeric(frame[_HOUR_BUCKET_COLUMN], errors="coerce")
+    bad = hours.isna()
+    issues: list[IngestionIssue] = []
+    for idx in frame.index[bad]:
+        patient_id = str(frame.at[idx, "case_admission_id"])
+        reason = f"non-numeric {_HOUR_BUCKET_COLUMN} {frame.at[idx, _HOUR_BUCKET_COLUMN]!r}"
+        if strict:
+            raise _adapter_error(dataset, reason, patient_id=patient_id, row_idx=int(idx))
+        issues.append(
+            IngestionIssue(dataset=dataset, patient_id=patient_id, row_idx=int(idx), reason=reason)
+        )
+
+    out = frame[~bad].copy()
+    out["t_minutes"] = hours[~bad] * _MINUTES_PER_HOUR
+    return out, issues
+
+
+@dataclass(frozen=True)
+class _FeatureLayout:
+    """What differs between the Geneva and MIMIC preprocessed-features CSVs."""
+
+    dataset: str
+    norm_params_filename: str
+    categorical_encoding_filename: str
+    required_columns: tuple[str, ...]
+    known_sources: tuple[str, ...]
+    registry_source: str
+
+
+@dataclass(frozen=True)
+class _FeatureFrames:
+    """The four canonical frames + accumulated lenient-mode issues."""
+
+    scalar_ts: pd.DataFrame
+    admission: pd.DataFrame
+    imaging: pd.DataFrame
+    ai_output: pd.DataFrame
+    issues: list[IngestionIssue]
+
+
+#: ``source`` value routed to SCALAR_TS by both adapters.
+_EHR_SOURCE = "EHR"
+
+
+def _load_feature_frames(
+    csv_path: Path,
+    params_dir: Path,
+    layout: _FeatureLayout,
+    *,
+    units: dict[str, str] | None,
+    strict: bool,
+    patient_ids: tuple[str, ...] | None,
+) -> _FeatureFrames:
+    """Shared Geneva/MIMIC pipeline::
+
+    guard paths ─► read CSV ─► params + encoding ─► hour → minutes
+      ─► EHR rows → SCALAR_TS (validate, then inverse-normalize)
+      ─► registry rows → ADMISSION ─► empty IMAGING / AI_OUTPUT
+    """
+    dataset = layout.dataset
+    root_str = os.environ.get("EHR_SIM_DATA_ROOT") or None
+    root = Path(root_str) if root_str else None
+    csv_path = _path_traversal_guard(Path(csv_path), root, dataset=dataset)
+    params_dir = _path_traversal_guard(Path(params_dir), root, dataset=dataset)
+
+    issues: list[IngestionIssue] = []
+
+    frame, read_issues = _read_features_csv(
+        csv_path,
+        required_columns=layout.required_columns,
+        dataset=dataset,
+        known_sources=layout.known_sources,
+        patient_ids=patient_ids,
+    )
+    issues.extend(read_issues)
+    norm_params = _load_normalisation_params(
+        params_dir / layout.norm_params_filename, dataset=dataset
+    )
+    sample_labels = set(frame["sample_label"].unique().tolist())
+    cat_groups = _load_categorical_encoding(
+        params_dir / layout.categorical_encoding_filename, sample_labels, dataset=dataset
+    )
+
+    frame, hour_issues = _hour_buckets_to_minutes(frame, strict=strict, dataset=dataset)
+    issues.extend(hour_issues)
+    frame = frame.rename(columns={"case_admission_id": "patient_id"})
+
+    ehr_rows = frame[frame["source"] == _EHR_SOURCE]
+    registry_rows = frame[frame["source"] == layout.registry_source]
+
+    scalar_ts, scalar_issues = _build_scalar_ts(
+        ehr_rows, norm_params, units=units, strict=strict, dataset=dataset
+    )
+    issues.extend(scalar_issues)
+
+    admission, admission_issues = _build_admission(
+        registry_rows, norm_params, cat_groups, strict=strict, dataset=dataset
+    )
+    issues.extend(admission_issues)
+
+    imaging = empty_frame(CanonicalShape.IMAGING)
+    ai_output = empty_frame(CanonicalShape.AI_OUTPUT)
+
+    scalar_ts = _validate_and_collect(
+        scalar_ts, CanonicalShape.SCALAR_TS, strict=strict, issues=issues, dataset=dataset
+    )
+    scalar_ts = _apply_scalar_ts_inverse_normalize(scalar_ts, norm_params)
+    admission = _validate_and_collect(
+        admission, CanonicalShape.ADMISSION, strict=strict, issues=issues, dataset=dataset
+    )
+    imaging = _validate_and_collect(
+        imaging, CanonicalShape.IMAGING, strict=strict, issues=issues, dataset=dataset
+    )
+    ai_output = _validate_and_collect(
+        ai_output, CanonicalShape.AI_OUTPUT, strict=strict, issues=issues, dataset=dataset
+    )
+    return _FeatureFrames(scalar_ts, admission, imaging, ai_output, issues)

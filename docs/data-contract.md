@@ -41,9 +41,9 @@ The public entry point is :func:`validate`.
 | column | dtype | nullable | constraints |
 |---|---|---|---|
 | `patient_id` | `string[python]` | no | str_length(min_value=1) |
-| `t_minutes` | `float64` | no | greater_than_or_equal_to(min_value=0) |
+| `t_minutes` | `float64` | no | greater_than_or_equal_to(min_value=0); isfinite — must be finite |
 | `variable` | `string[python]` | no | str_length(min_value=1) |
-| `value` | `float64` | yes | — |
+| `value` | `float64` | yes | isfinite — must be finite |
 | `unit` | `string[python]` | yes | — |
 | `source` | `string[python]` | no | str_length(min_value=1) |
 
@@ -62,7 +62,7 @@ The public entry point is :func:`validate`.
 | column | dtype | nullable | constraints |
 |---|---|---|---|
 | `patient_id` | `string[python]` | no | str_length(min_value=1) |
-| `t_minutes` | `float64` | no | greater_than_or_equal_to(min_value=0) |
+| `t_minutes` | `float64` | no | greater_than_or_equal_to(min_value=0); isfinite — must be finite |
 | `modality` | `string[python]` | no | str_length(min_value=1) |
 | `report_text` | `string[python]` | yes | — |
 | `image_refs` | `string[python]` | yes | <lambda> — image_refs must be a JSON list of strings when present |
@@ -74,7 +74,7 @@ The public entry point is :func:`validate`.
 | column | dtype | nullable | constraints |
 |---|---|---|---|
 | `patient_id` | `string[python]` | no | str_length(min_value=1) |
-| `t_minutes` | `float64` | no | greater_than_or_equal_to(min_value=0) |
+| `t_minutes` | `float64` | no | greater_than_or_equal_to(min_value=0); isfinite — must be finite |
 | `model_id` | `string[python]` | no | str_length(min_value=1) |
 | `output_json` | `string[python]` | no | <lambda> — output_json must be a valid JSON string |
 

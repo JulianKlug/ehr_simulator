@@ -10,6 +10,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from ehr_simulator.config import (
     CategoricalQuestion,
@@ -740,3 +741,153 @@ def test_study_id_alone_changes_config_hash(tmp_path: Path) -> None:
     b_study = _BASE_STUDY.replace("study_id: cfg_test", "study_id: cfg_test_v2")
     b_s, b_q = _write_pair(b_dir, b_study, _BASE_QUESTIONS)
     assert compute_config_hash(a_s, a_q) != compute_config_hash(b_s, b_q)
+
+
+# ---------------------------------------------------------------------------
+# Validation hardening (code review)
+# ---------------------------------------------------------------------------
+
+_AI_INTERVENTION = {
+    "model_id": "xgb_v1",
+    "model_system_version": "sys_1",
+    "prediction_artifact_sha256": "a" * 64,
+    "presentation_version": "p1",
+    "intervention_build_id": "b1",
+}
+
+_GATE_QUESTION = {
+    "question_id": "q1",
+    "prompt": "gate",
+    "response_type": "categorical",
+    "options": ["A", "B"],
+}
+
+
+def _study_dict(**changes: object) -> dict[str, object]:
+    data: dict[str, object] = {
+        "schema_version": "2",
+        "study_id": "cfg_test",
+        "dataset": "synthetic",
+        "patient_ids": ["synth_001"],
+        "time_unit": "minutes",
+        "timepoints": [0, 60],
+    }
+    data.update(changes)
+    return data
+
+
+def _questions_dict(*questions: dict[str, object], version: str = "2") -> dict[str, object]:
+    return {"schema_version": version, "questions": list(questions)}
+
+
+def _likert(**changes: object) -> dict[str, object]:
+    question: dict[str, object] = {
+        "question_id": "q2",
+        "prompt": "hi",
+        "response_type": "likert",
+        "scale_min": -2,
+        "scale_max": 2,
+    }
+    question.update(changes)
+    return question
+
+
+def _auto_value(value: str) -> dict[str, object]:
+    return {"when": {"question_id": "q1", "equals": "A"}, "value": value}
+
+
+@pytest.mark.parametrize("bad", [float("nan"), float("inf")], ids=["nan", "inf"])
+def test_study_config_rejects_non_finite_timepoint(bad: float) -> None:
+    with pytest.raises(ValueError, match="finite"):
+        StudyConfig.model_validate(_study_dict(timepoints=[0, bad]))
+
+
+def test_question_id_rejects_trailing_newline() -> None:
+    question = {"question_id": "abc\n", "prompt": "hi", "response_type": "free-text"}
+    with pytest.raises(ValueError, match="question_id"):
+        Questions.model_validate(_questions_dict(question, version="1"))
+
+
+def test_geneva_ai_model_id_must_match_ai_intervention() -> None:
+    geneva_ai = {
+        "predictions_path": "/p.pkl",
+        "patient_ids_path": "/ids.csv",
+        "model_path": "/m.model",
+        "model_id": "other_model",
+    }
+    data = _study_dict(dataset="geneva", ai_intervention=_AI_INTERVENTION, geneva_ai=geneva_ai)
+    with pytest.raises(ValueError, match="model_id"):
+        StudyConfig.model_validate(data)
+
+    geneva_ai["model_id"] = _AI_INTERVENTION["model_id"]
+    assert StudyConfig.model_validate(data).geneva_ai is not None
+
+
+def test_yaml_randomised_geneva_ai_without_explanations_refused(tmp_path: Path) -> None:
+    # SHAP alignment is the only check against a reordered positional sidecar.
+    geneva_ai = {
+        "predictions_path": "/p.pkl",
+        "patient_ids_path": "/ids.csv",
+        "model_path": "/m.model",
+        "model_id": _AI_INTERVENTION["model_id"],
+    }
+    data = _study_dict(
+        dataset="geneva",
+        ai_intervention=_AI_INTERVENTION,
+        geneva_ai=geneva_ai,
+        randomisation={"master_seed": 1, "block_length": 1, "block_sequence": ["start", "other"]},
+    )
+    path = tmp_path / "study.yaml"
+    path.write_text(yaml.safe_dump(data))
+
+    with pytest.raises(ConfigError, match="explanations_dir"):
+        load_study_config(path)
+
+    # A stored snapshot without explanations still parses.
+    stored = StudyConfig.model_validate(data)
+    assert stored.geneva_ai is not None
+    assert stored.geneva_ai.explanations_dir is None
+
+    geneva_ai["explanations_dir"] = "/shap"
+    path.write_text(yaml.safe_dump(data))
+    assert load_study_config(path).geneva_ai is not None
+
+
+@pytest.mark.parametrize("value", ["-2", "0", "2"])
+def test_likert_auto_value_accepts_negative_scale(value: str) -> None:
+    question = _likert(auto_value=_auto_value(value))
+    parsed = Questions.model_validate(_questions_dict(_GATE_QUESTION, question))
+    assert parsed.questions[1].auto_value.value == value  # type: ignore[union-attr]
+
+
+@pytest.mark.parametrize("value", ["-3", "3", "+1", "01", "-0", " 1"])
+def test_likert_auto_value_rejects_out_of_range_or_non_canonical(value: str) -> None:
+    question = _likert(auto_value=_auto_value(value))
+    with pytest.raises(ValueError, match="auto_value"):
+        Questions.model_validate(_questions_dict(_GATE_QUESTION, question))
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [{"scale_min": True}, {"scale_max": "5"}, {"scale_min": 1.0}],
+    ids=["bool", "str", "float"],
+)
+def test_likert_scale_bounds_are_strict_ints(changes: dict[str, object]) -> None:
+    with pytest.raises(ValueError, match="scale_m"):
+        Questions.model_validate(_questions_dict(_likert(**changes), version="1"))
+
+
+def test_yaml_on_off_options_stay_strings(tmp_path: Path) -> None:
+    path = tmp_path / "questions.yaml"
+    path.write_text(
+        """schema_version: "1"
+questions:
+  - question_id: q1
+    prompt: hi
+    response_type: categorical
+    options: [On, Off, yes, no]
+""",
+        encoding="utf-8",
+    )
+    question = load_questions(path).questions[0]
+    assert question.options == ["On", "Off", "yes", "no"]  # type: ignore[union-attr]

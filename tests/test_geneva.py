@@ -413,9 +413,10 @@ def test_load_categorical_encoding_raises_on_malformed_cell(tmp_path: Path) -> N
     assert "Sex" in str(exc.value) or "row 0" in str(exc.value)
 
 
-def test_inverse_normalize_passthrough_emits_issue(
+def test_variable_missing_from_params_is_dropped_with_issue(
     geneva_fixture_dir: Path, tmp_path: Path
 ) -> None:
+    """A raw z-score must never reach clinicians with a real unit."""
     csv = pd.read_csv(geneva_fixture_dir / "geneva_sample.csv", dtype=str)
     fake_label = "made_up_lab_xyz"
     extra = pd.DataFrame(
@@ -435,13 +436,12 @@ def test_inverse_normalize_passthrough_emits_issue(
     for fname in ("normalisation_parameters.csv", "categorical_variable_encoding.csv"):
         (tmp_path / fname).write_bytes((geneva_fixture_dir / fname).read_bytes())
 
+    with pytest.raises(AdapterError, match=fake_label):
+        load_geneva(out_csv, tmp_path, strict=True)
+
     dataset = load_geneva(out_csv, tmp_path, strict=False)
-    row = dataset.scalar_ts[
-        (dataset.scalar_ts["patient_id"] == "geneva_fixture_001")
-        & (dataset.scalar_ts["variable"] == fake_label)
-    ]
-    assert len(row) == 1
-    assert math.isclose(float(row["value"].iloc[0]), 0.5, abs_tol=1e-9)
+    assert fake_label not in dataset.scalar_ts["variable"].tolist()
+    assert not dataset.scalar_ts.empty
     assert any(
         i.reason == f"variable {fake_label} missing from normalisation_parameters"
         for i in dataset.issues

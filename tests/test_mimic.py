@@ -15,7 +15,6 @@ drifts the sidecar still gets caught.
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 
 import pandas as pd
@@ -155,10 +154,10 @@ def test_path_traversal_guard_rejects_outside_root_mimic(tmp_path: Path) -> None
     assert "path traversal" in exc.value.issues[0].reason
 
 
-def test_inverse_normalize_passthrough_emits_issue_mimic(
+def test_variable_missing_from_params_is_dropped_with_issue_mimic(
     mimic_fixture_dir: Path, tmp_path: Path
 ) -> None:
-    """An EHR row with sample_label not in norm_params keeps its z-score and emits an issue."""
+    """An EHR row with sample_label not in norm_params: strict raises, lenient drops + issue."""
     csv = pd.read_csv(mimic_fixture_dir / "mimic_sample.csv", dtype=str)
     fake_label = "made_up_lab_xyz"
     extra = pd.DataFrame(
@@ -181,13 +180,12 @@ def test_inverse_normalize_passthrough_emits_issue_mimic(
     ):
         (tmp_path / fname).write_bytes((mimic_fixture_dir / fname).read_bytes())
 
+    with pytest.raises(AdapterError, match=fake_label):
+        load_mimic(out_csv, tmp_path, strict=True)
+
     dataset = load_mimic(out_csv, tmp_path, strict=False)
-    row = dataset.scalar_ts[
-        (dataset.scalar_ts["patient_id"] == "mimic_fixture_001")
-        & (dataset.scalar_ts["variable"] == fake_label)
-    ]
-    assert len(row) == 1
-    assert math.isclose(float(row["value"].iloc[0]), 0.5, abs_tol=1e-9)
+    assert fake_label not in dataset.scalar_ts["variable"].tolist()
+    assert not dataset.scalar_ts.empty
     assert any(
         i.dataset == "mimic"
         and i.reason == f"variable {fake_label} missing from normalisation_parameters"

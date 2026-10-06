@@ -38,6 +38,7 @@ from pydantic import (
     Field,
     SerializerFunctionWrapHandler,
     StrictBool,
+    StrictInt,
     field_validator,
     model_serializer,
     model_validator,
@@ -124,7 +125,7 @@ class _QuestionBase(BaseModel):
     def _question_id_format(cls, v: str) -> str:
         if not v:
             raise ValueError("question_id must be non-empty")
-        if not _QUESTION_ID_RE.match(v):
+        if not _QUESTION_ID_RE.fullmatch(v):
             raise ValueError(
                 f"question_id {v!r} must match [a-z0-9_]+ (lowercase, digits, underscore)"
             )
@@ -140,8 +141,8 @@ class _QuestionBase(BaseModel):
 
 class LikertQuestion(_QuestionBase):
     response_type: Literal["likert"]
-    scale_min: int
-    scale_max: int
+    scale_min: StrictInt
+    scale_max: StrictInt
     scale_min_label: str | None = None
     scale_max_label: str | None = None
     scale_labels: list[str] | None = None  # S11h: one label per point, scale order
@@ -165,11 +166,9 @@ class LikertQuestion(_QuestionBase):
 def _coerce_option(value: object) -> str:
     """Coerce one option value to str.
 
-    YAML 1.1 (pyyaml's default) parses bare ``Yes``/``No``/``On``/``Off`` as
-    booleans, so ``options: [Yes, No, Unknown]`` would otherwise reach
-    Pydantic as ``[True, False, "Unknown"]`` and fail. Coerce numerics +
-    booleans to their canonical YAML token (``Yes``/``No``) here so the
-    user-friendly fixture syntax round-trips unchanged.
+    The config loader keeps ``Yes``/``No``/``On``/``Off`` as strings (YAML
+    1.2 booleans only); a bare ``true``/``false`` still arrives as a bool
+    and maps to ``Yes``/``No``. Numerics become their string form.
     """
     if isinstance(value, bool):
         return "Yes" if value else "No"
@@ -324,7 +323,12 @@ def _check_auto_value(question: Question) -> None:
         if isinstance(question, LikertQuestion)
         else _PROBABILITY_RANGE
     )
-    if not (value.isdigit() and str(int(value)) == value and lo <= int(value) <= hi):
+    # Canonical base 10 integers only, like ``answer_codec`` ("-2" yes, "+1"/"01" no).
+    try:
+        parsed = int(value, 10)
+    except ValueError:
+        parsed = None
+    if parsed is None or str(parsed) != value or not lo <= parsed <= hi:
         raise ValueError(
             f"question {owner!r}: auto_value {value!r} is not an integer in {lo}..{hi}"
         )

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Any
 
 import pandas as pd
 import pytest
@@ -32,6 +33,8 @@ from ehr_simulator.ingestion._shared import (
     _read_features_csv,
 )
 from ehr_simulator.ingestion.exceptions import AdapterError
+from ehr_simulator.ingestion.geneva import load_geneva
+from ehr_simulator.ingestion.mimic import load_mimic
 
 _REQUIRED_COLUMNS: tuple[str, ...] = (
     "relative_sample_date_hourly_cat",
@@ -453,3 +456,93 @@ def test_build_admission_non_binary_orphan_still_emits_issue() -> None:
 
     assert "mystery_continuous" not in admission["field"].tolist()
     assert any(i.reason == "orphan registry variable: mystery_continuous" for i in issues)
+
+
+# ---------------------------------------------------------------------------
+# Validation hardening (code review)
+# ---------------------------------------------------------------------------
+
+_NORM_COLUMNS = ("variable", "original_mean", "original_std")
+
+
+def _write_norm(path: Path, rows: list[tuple[str, float, float]]) -> Path:
+    pd.DataFrame(rows, columns=list(_NORM_COLUMNS)).to_csv(path, index=False)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("rows", "reason"),
+    [
+        ([("hr", 70.0, 10.0), ("hr", 71.0, 10.0)], "duplicate"),
+        ([("hr", float("nan"), 10.0)], "mean"),
+        ([("hr", float("inf"), 10.0)], "mean"),
+        ([("hr", 70.0, float("nan"))], "std"),
+        ([("hr", 70.0, float("inf"))], "std"),
+        ([("hr", 70.0, 0.0)], "std"),
+        ([("hr", 70.0, -1.0)], "std"),
+    ],
+    ids=["duplicate", "nan_mean", "inf_mean", "nan_std", "inf_std", "zero_std", "negative_std"],
+)
+def test_load_normalisation_params_refuses_bad_rows(
+    tmp_path: Path, rows: list[tuple[str, float, float]], reason: str
+) -> None:
+    path = _write_norm(tmp_path / "norm.csv", rows)
+    with pytest.raises(AdapterError, match=reason):
+        _load_normalisation_params(path, dataset="geneva")
+
+
+def test_load_normalisation_params_accepts_valid_rows(tmp_path: Path) -> None:
+    path = _write_norm(tmp_path / "norm.csv", [("hr", 70.0, 10.0), ("sbp", 120.0, 15.0)])
+    assert _load_normalisation_params(path, dataset="geneva") == {
+        "hr": (70.0, 10.0),
+        "sbp": (120.0, 15.0),
+    }
+
+
+def test_load_categorical_encoding_refuses_empty_baseline_list(tmp_path: Path) -> None:
+    path = tmp_path / "cat.csv"
+    pd.DataFrame(
+        {"sample_label": ["Sex"], "baseline_value": ["[]"], "other_categories": ["['Male']"]}
+    ).to_csv(path, index=False)
+    with pytest.raises(AdapterError, match="Sex"):
+        _load_categorical_encoding(path, sample_labels={"sex_male"}, dataset="geneva")
+
+
+@pytest.mark.parametrize(
+    ("loader", "fixture", "files"),
+    [
+        (
+            load_geneva,
+            "geneva",
+            ("normalisation_parameters.csv", "categorical_variable_encoding.csv"),
+        ),
+        (
+            load_mimic,
+            "mimic",
+            (
+                "reference_population_normalisation_parameters.csv",
+                "categorical_variable_encoding.csv",
+            ),
+        ),
+    ],
+    ids=["geneva", "mimic"],
+)
+def test_non_numeric_hour_bucket_is_refused_or_dropped(
+    tmp_path: Path, loader: Any, fixture: str, files: tuple[str, ...]
+) -> None:
+    fixture_dir = Path(__file__).parent / "fixtures" / fixture
+    csv = pd.read_csv(fixture_dir / f"{fixture}_sample.csv", dtype=str)
+    ehr = csv.index[csv["source"] == "EHR"]
+    csv.loc[ehr[0], "relative_sample_date_hourly_cat"] = "soon"
+    out_csv = tmp_path / f"{fixture}_sample.csv"
+    csv.to_csv(out_csv, index=False)
+    for name in files:
+        (tmp_path / name).write_bytes((fixture_dir / name).read_bytes())
+
+    with pytest.raises(AdapterError, match="relative_sample_date_hourly_cat"):
+        loader(out_csv, tmp_path, strict=True)
+
+    clean = loader(fixture_dir / f"{fixture}_sample.csv", fixture_dir, strict=False)
+    lenient = loader(out_csv, tmp_path, strict=False)
+    assert len(lenient.scalar_ts) == len(clean.scalar_ts) - 1
+    assert any("relative_sample_date_hourly_cat" in i.reason for i in lenient.issues)

@@ -918,6 +918,12 @@ def test_geneva_ai_without_explanations_loads_and_passes_preflight(
     block = _geneva_ai_block(ai_dir, Explanations.WITHOUT)
     extra = _phase2_extra(output.provenance)
     assert "explanation_artifact_sha256" not in extra["ai_intervention"]
+
+    # Randomised: SHAP alignment is the only sidecar-order check, so required.
+    with pytest.raises(ConfigError, match="explanations_dir"):
+        load_study_config(_study_yaml(tmp_path, geneva_ai=block, extra=extra))
+
+    del extra["randomisation"]
     study = load_study_config(_study_yaml(tmp_path, geneva_ai=block, extra=extra))
     report = walk_preflight(study, load_questions(QUESTIONS_PATH), build_dataset_loader(study)())
     assert not report.has_fail, [r.message for r in report.rows if r.status == "FAIL"]
