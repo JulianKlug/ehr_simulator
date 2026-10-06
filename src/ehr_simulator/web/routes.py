@@ -1,25 +1,35 @@
-"""HTTP routes: index + ``/patient/{id}/timepoint/{t}`` + ``/login``/``/logout``.
+"""HTTP routes: index + ``/patient/{id}/timepoint/{t}`` (GET, ``/answer``,
+``/advance``); the other endpoints live in their own routers.
+
+Module layout (``router`` here includes the two sub-routers; ``app.py``
+includes ``router`` only)::
+
+    app.py ──► routes.router ─┬─ GET  /                                  index
+                              ├─ GET  /patient/{pid}/timepoint/{t}       view
+                              ├─ POST /patient/{pid}/timepoint/{t}/answer
+                              ├─ POST /patient/{pid}/timepoint/{t}/advance
+                              ├─ auth_routes.router   /login /logout /profile
+                              └─ case_routes.router   /case/start /practice/start
+                                                      /case/{pid}/heartbeat|pause|resume
+                                                      /case/{pid}/tab/claim|release
+                                                      /telemetry/events
+    helpers (no routes):
+      case_request   the case preamble (cookie → unactivated → case → contact
+                     → tab lease → timepoint), refusals per RefusalShape
+      patient_view   view composition, questions pane, advance response
+      panel_render   panels + summary card (templates + charts, no DB)
+      route_support  HTMX/redirect/flash helpers, cookie check, display name
+    services below: study_session, case_start, case_contact, tab_guard,
+      gating, answer_capture, clinician_session, telemetry → db DAOs
 
 The HX-Request header switches between the full ``<html>`` document and the
 inner partial. Out-of-range / unknown patient renders an HTML error body
 shaped for the swap target (Decisions **D6**, **D10**).
 
-Per-panel renderer exceptions are contained inside the route handler
-(Decision **D9**): a failed panel renders with the error visual treatment;
-the per-request log line stays ``page.render``/``panel.swap``.
-
-S6 protected-route preamble (``_require_clinician``): every clinician-
-facing route resolves the cookie against ``app.state.known_clinicians``
-(zero-DB-cost cache, review-fix R11) and HTMX-aware-redirects to
-``/login`` on miss (review-fix R10).
-
-S9a answer capture: ``POST /patient/{pid}/timepoint/{t}/answer`` shares
-``_require_clinician`` + ``_resolve_timepoint`` with the GET route and
-always answers with the ``_answer_status.html`` fragment. Both patient
-routes are ``async def`` on purpose — the app owns one shared
-``sqlite3.Connection`` and event-loop serialization is what keeps its
-writes ordered. New code goes routes → ``answer_capture`` /
-``study_session`` → DAOs; the S6 ``/login`` DAO calls are left as they are.
+Both patient POST routes are ``async def`` on purpose — the app owns one
+shared ``sqlite3.Connection`` and event-loop serialization is what keeps
+its writes ordered; their only await (the form read) precedes the case
+checks.
 
 S9b gating: the GET route reads the walk frontier (``read_frontier``, a pure
 read) and bounces any ``t_index`` past it **before** slicing or writing
@@ -28,95 +38,34 @@ refuses timepoints that are not the open one. HTMX partials carry
 ``HX-Push-Url`` so the address bar tracks the timepoint; a history-restore
 request gets the full document back.
 
-S11d Phase 2 study mode: ``POST /case/start`` is the only way a case begins.
-A patient without an activated assignment is bounced to the index (GET) or
-refused with 409 (answer/advance) before anything is resolved or written;
-the index and jumper list only the clinician's cases.
-
-S11e lifecycle: every case route runs ``case_contact.check`` right after the
-case resolves — a timed-out case is made incomplete there (one commit) and
-the request is refused; a paused case renders only the Resume interstitial
-and refuses answer/advance. A successful contact touches ``last_seen_at``.
-``POST /case/{pid}/heartbeat|pause|resume`` are the lifecycle endpoints.
-
-S11g intervention: a measured case renders by its stored arm — a no AI case
-gets no AI panel, tab or count; an AI case gets the pinned model's row for
-exactly the current timepoint. Phase 1 and non study mode are unchanged.
-
 S11i backward navigation follows the case's pinned policy: ``prohibit``
 bounces any non-frontier GET like the forward gate; ``allow_readonly``
 renders it read-only, marked ``data-visit-kind="revisit"``, and records one
-``timepoint.revisit``. ``POST /practice/start`` is the separate practice
-entry point; a practice pair is a case for every case route.
-
-S11j: a render whose case pins ``telemetry`` carries a ``render_id``,
-recorded as ``timepoint.render`` after the response is built;
-``POST /telemetry/events`` binds browser batches to those renders
-(``web/telemetry.py``).
-
-S11m: an active measured case pinned to ``telemetry`` is guarded — its
-answer, advance, heartbeat and pause need the tab lease
-(``web/tab_guard.py``; ``POST /case/{pid}/tab/claim|release``). A refusal
-is 409 + ``X-Ehrsim-Tab: conflict`` and writes nothing else.
+``timepoint.revisit``.
 """
 
 from __future__ import annotations
 
-import json
-from collections.abc import Callable
-from dataclasses import dataclass, replace
-from enum import StrEnum
-from functools import partial
-from typing import Any, Literal
+from fastapi import APIRouter, Request, Response, status
+from fastapi.responses import HTMLResponse
 
-from fastapi import APIRouter, Form, Request, Response, status
-from fastapi.responses import HTMLResponse, RedirectResponse
-
-from ehr_simulator.clinician_profile import FIELDS as PROFILE_FIELDS
-from ehr_simulator.clinician_profile import MAX_YEARS_OF_PRACTICE, ProfileValidationError
-from ehr_simulator.config.questions import Questions
-from ehr_simulator.config.study import BackwardNavigation
-from ehr_simulator.db import arm_assignments, clinicians, cookies, events, practice
-from ehr_simulator.db.clinician_profiles import ProfileLockedError
-from ehr_simulator.db.exceptions import (
-    CaseLifecycleError,
-    ConfigurationProvenanceError,
-    RandomisationIntegrityError,
-    StaleConfigurationError,
-)
-from ehr_simulator.db.observation import ObservationMode
+from ehr_simulator.db.exceptions import CaseLifecycleError, ConfigurationProvenanceError
 from ehr_simulator.logging import get_logger, update_request_context
-from ehr_simulator.question_branching import evaluate
-from ehr_simulator.randomisation import ScheduleIncompatibleError
-from ehr_simulator.web import case_contact, tab_guard
+from ehr_simulator.web import auth_routes, case_routes, tab_guard
 from ehr_simulator.web.answer_capture import (
-    FREE_TEXT_AUTOSAVE_DELAY_MS,
-    FREE_TEXT_MAX_CHARS,
-    PROBABILITY_MAX,
-    PROBABILITY_MIN,
     AnswerValidationError,
     QuestionNotEditableError,
     record_answer,
     saved_answers,
 )
-from ehr_simulator.web.case_contact import CaseAccess, ContactResult
-from ehr_simulator.web.case_start import (
-    CaseStartRefusedError,
-    case_patient_ids,
-    case_states,
-    index_state,
-    profile_missing,
-    replacement_markers,
-    start_next_case,
+from ehr_simulator.web.case_request import (
+    RefusalShape,
+    _backward_policy,
+    _case_request,
+    _touch_contact,
 )
-from ehr_simulator.web.clinician_profile_page import (
-    ProfileContext,
-    profile_config,
-    profile_context,
-    save_profile,
-)
+from ehr_simulator.web.case_start import case_states, index_state, replacement_markers
 from ehr_simulator.web.gating import (
-    AdvanceResult,
     PatientProgress,
     advance,
     completeness,
@@ -124,378 +73,42 @@ from ehr_simulator.web.gating import (
     pane_mode,
     progress_overview,
 )
-from ehr_simulator.web.panels import (
-    LEGACY_INTERVENTION,
-    InterventionContext,
-    InterventionMode,
-    PatientSlice,
-    ai_delivery,
-    measured_ai_state,
-    patient_timepoints,
-    select_measured_ai,
-    slice_to_timepoint,
+from ehr_simulator.web.patient_view import (
+    _advance_response,
+    _case_patient_ids,
+    _full_document,
+    _record_view,
+    _render_advance_cta,
+    _render_changed_slots,
+    _render_patient_view,
+    _study_bootstrap,
 )
-from ehr_simulator.web.practice_start import (
-    PracticeRefusedError,
-    practice_index_state,
-    start_practice_case,
+from ehr_simulator.web.practice_start import practice_index_state
+from ehr_simulator.web.route_support import (
+    Chrome,
+    _answer_status,
+    _error_flash,
+    _form_str,
+    _htmx_aware_redirect,
+    _is_history_restore,
+    _is_htmx,
+    _logged_in_name,
+    _require_clinician,
+    _timepoint_url,
 )
 from ehr_simulator.web.study_session import (
-    CaseConfiguration,
-    CaseNotActivatedError,
-    Frontier,
     SessionContext,
-    bootstrap_session,
     is_phase2_mode,
+    pinned_timepoint_counts,
     read_frontier,
-    resolve_case_configuration,
-    resolve_intervention,
-)
-from ehr_simulator.web.tab_guard import ReleaseReason, TabGuardError
-from ehr_simulator.web.telemetry import (
-    TelemetryValidationError,
-    UnclaimedRenderError,
-    UnknownRenderError,
-    parse_batch,
-    parse_tab_request,
-    record_batch,
-)
-from ehr_simulator.web.timing_events import (
-    VisitKind,
-    new_render_id,
-    record_enter,
-    record_render,
-    record_revisit,
 )
 
 router = APIRouter()
+router.include_router(auth_routes.router)
+router.include_router(case_routes.router)
 
-_NO_QUESTIONS_MSG = "No questions configured (start with --config/--questions)"
 _MISSING_QUESTION_ID_MSG = "Missing question_id"
 _TIMEPOINT_LOCKED_MSG = "Timepoint locked"
-_NOT_ACTIVATED_MSG = "This patient is not an activated case; start a case from the study index"
-_CASE_START_INTEGRITY_MSG = "Start case refused: stored allocation integrity check failed"
-_CASE_PAUSED_MSG = "This case is paused; resume it from the study index"
-_CASE_CLOSED_MSG = "This case is closed and accepts no further answers"
-_CASE_NOT_ACTIVE_MSG = "This case is not active"
-_CASE_NOT_PAUSED_MSG = "This case is not paused"
-_PAUSE_DISABLED_MSG = "Pausing is not enabled for this study"
-_HX_REQUEST_HEADER = "hx-request"
-_HX_HISTORY_RESTORE_HEADER = "hx-history-restore-request"
-_INDEX_URL = "/"
-_PROFILE_URL = "/profile"
-_NO_PROFILE_MSG = "This study does not collect clinician profiles"
-_HTTP_UNPROCESSABLE = status.HTTP_422_UNPROCESSABLE_CONTENT
-_TELEMETRY_URL = "/telemetry/events"
-
-Chrome = Literal["dense", "epic"]
-
-
-class RenderTracking(StrEnum):
-    """S11j: whether a rendered view may carry a telemetry ``render_id``."""
-
-    TRACKED = "tracked"
-    WRITE_FREE = "write_free"  # the S9b 412 stale view: nothing is written
-
-
-@dataclass(frozen=True)
-class RenderedView:
-    """A rendered ``#patient-view``. ``render_id`` is set only when the case's
-    pinned config enables telemetry (S11j); ``ai_delivery`` is the S11l
-    evidence recorded with it."""
-
-    html: str
-    t_index: int
-    t_minutes: float
-    visit_kind: VisitKind
-    render_id: str | None
-    ai_delivery: dict[str, str]
-    tab_guard: bool = False  # S11m: its tab must hold the case lease
-
-
-def _is_htmx(request: Request) -> bool:
-    return request.headers.get(_HX_REQUEST_HEADER, "").lower() == "true"
-
-
-def _is_history_restore(request: Request) -> bool:
-    return request.headers.get(_HX_HISTORY_RESTORE_HEADER, "").lower() == "true"
-
-
-def _timepoint_url(patient_id: str, t_index: int, chrome: str) -> str:
-    return f"/patient/{patient_id}/timepoint/{t_index}?chrome={chrome}"
-
-
-def _try_resolve_case(
-    request: Request, clinician_id: str, patient_id: str
-) -> tuple[CaseConfiguration | None, str | None, int]:
-    """Resolve the pinned case, or the active snapshot for a new case (S11b).
-
-    Non-study mode resolves to ``None``. Returns ``(case, message, status)``:
-    a message means the route must refuse — ``StaleConfigurationError`` is a
-    409 (restart required), a provenance mismatch is an integrity error (500).
-    """
-    state = request.app.state
-    if state.study is None:
-        return None, None, 200
-    try:
-        case = resolve_case_configuration(
-            state.db, state, clinician_id=clinician_id, patient_id=patient_id
-        )
-    except (StaleConfigurationError, CaseNotActivatedError) as exc:
-        return None, str(exc), status.HTTP_409_CONFLICT
-    except ConfigurationProvenanceError as exc:
-        return None, str(exc), status.HTTP_500_INTERNAL_SERVER_ERROR
-    return case, None, 200
-
-
-def _is_unactivated_phase2_patient(request: Request, clinician_id: str, patient_id: str) -> bool:
-    """Phase 2 pair with no assignment or practice case: not a case, nothing
-    may be resolved or written."""
-    state = request.app.state
-    if not is_phase2_mode(state):
-        return False
-
-    if practice.fetch(state.db, clinician_id, patient_id) is not None:
-        return False
-    return arm_assignments.fetch_for_pair(state.db, clinician_id, patient_id) is None
-
-
-def _case_patient_ids(request: Request, clinician_id: str) -> list[str]:
-    """Index + jumper list: Phase 2 shows only the clinician's cases (S11d)."""
-    state = request.app.state
-    if is_phase2_mode(state):
-        return case_patient_ids(state.db, clinician_id)
-
-    return _transitional_patient_ids(request, clinician_id)
-
-
-def _transitional_patient_ids(request: Request, clinician_id: str) -> list[str]:
-    """S11b transitional index: active-config patients in configured order, then
-
-    this clinician's already-assigned patients that the active version no
-    longer lists (existing cases stay reachable).
-    """
-    state = request.app.state
-    active = list(getattr(state, "study_patient_ids", None) or [])
-    seen = set(active)
-    if clinician_id:
-        for assignment in arm_assignments.fetch_all(state.db):
-            if assignment.clinician_id == clinician_id and assignment.patient_id not in seen:
-                seen.add(assignment.patient_id)
-                active.append(assignment.patient_id)
-    return active
-
-
-def _htmx_aware_redirect(request: Request, url: str) -> Response:
-    """303 for browsers; 200 + ``HX-Redirect`` so htmx swaps the whole page."""
-    if _is_htmx(request):
-        return Response(status_code=status.HTTP_200_OK, headers={"HX-Redirect": url})
-    return RedirectResponse(url, status_code=status.HTTP_303_SEE_OTHER)
-
-
-def _back_to_index(response: Response) -> Response:
-    """Refusal whose ``HX-Redirect`` sends htmx back to the index (S11e)."""
-    response.headers["HX-Redirect"] = _INDEX_URL
-    return response
-
-
-def _conflict(message: str) -> HTMLResponse:
-    return HTMLResponse(content=_error_flash(message), status_code=status.HTTP_409_CONFLICT)
-
-
-def _form_refusal(request: Request, response: Response) -> Response:
-    """Start / Pause / Resume are plain forms: a refusal must not strand the
-    browser on a bare flash, so non-htmx callers get a page linking back."""
-    if _is_htmx(request):
-        return response
-
-    page = request.app.state.templates.TemplateResponse(
-        request,
-        "case_refused.html",
-        {"flash_html": bytes(response.body).decode(), "logged_in_name": _logged_in_name(request)},
-        status_code=response.status_code,
-    )
-
-    # Keep the refusal's HX-Redirect so the contract stays the same for any caller.
-    redirect = response.headers.get("HX-Redirect")
-    if redirect is not None:
-        page.headers["HX-Redirect"] = redirect
-    return page
-
-
-def _tab_refusal(
-    request: Request,
-    *,
-    clinician_id: str,
-    patient_id: str,
-    case: CaseConfiguration | None,
-    contact: ContactResult | None,
-    form: Any = None,
-) -> str | None:
-    """S11m: ``None`` when the request may write, else the refusal message.
-
-    Unguarded cases pass untouched; a guarded one needs the lease holder's
-    ``(tab_id, render_id)`` from the headers or, for plain forms, ``form``.
-    """
-    if not tab_guard.is_guarded(case, contact):
-        return None
-
-    tab_id, render_id = tab_guard.owner_identity(request.headers, form)
-    try:
-        tab_guard.require_owner(
-            request.app.state.db,
-            request.app.state,
-            clinician_id=clinician_id,
-            patient_id=patient_id,
-            tab_id=tab_id,
-            render_id=render_id,
-        )
-    except TabGuardError as exc:
-        get_logger().warning("tab guard refused", event_kind="tab.refused", error=str(exc))
-        return str(exc)
-    return None
-
-
-def _mark_tab_conflict(response: Response) -> Response:
-    response.headers[tab_guard.CONFLICT_HEADER] = tab_guard.CONFLICT_VALUE
-    return response
-
-
-def _check_contact(
-    request: Request, clinician_id: str, patient_id: str, case: CaseConfiguration | None
-) -> ContactResult:
-    state = request.app.state
-    return case_contact.check(
-        state.db, state, clinician_id=clinician_id, patient_id=patient_id, case=case
-    )
-
-
-def _touch_contact(request: Request, contact: ContactResult | None) -> None:
-    if contact is not None:
-        case_contact.touch(request.app.state.db, request.app.state, contact)
-
-
-def _case_paused_page(request: Request, patient_id: str) -> Response:
-    """Resume interstitial: no panels, no questions, nothing sliced."""
-    if _is_htmx(request):
-        # Leave the swap target: the interstitial is a whole page.
-        return Response(
-            status_code=status.HTTP_200_OK, headers={"HX-Redirect": str(request.url.path)}
-        )
-    return request.app.state.templates.TemplateResponse(
-        request,
-        "case_paused.html",
-        {"patient_id": patient_id, "logged_in_name": _logged_in_name(request)},
-    )
-
-
-def _require_clinician(request: Request) -> tuple[str | None, Response | None]:
-    """Resolve the clinician cookie or build an HTMX-aware redirect.
-
-    Returns ``(clinician_id, None)`` on success or ``(None, redirect)`` on
-    failure. The redirect is HTMX-aware:
-
-    - ``HX-Request: true`` → 200 + ``HX-Redirect: /login`` header (so HTMX
-      swaps the full page rather than dropping a 303 into the swap target).
-    - else → 303 → ``/login`` (browser follows).
-
-    Cookie validation runs against ``app.state.known_clinicians`` —
-    populated at lifespan boot, mutated by :func:`clinicians.lookup_or_create`.
-    A tampered cookie (16-hex string not in the set) misses the cache and
-    redirects to ``/login`` without touching the DB.
-    """
-    clinician_id = cookies.read_clinician_id(request)
-    known = getattr(request.app.state, "known_clinicians", set())
-    if clinician_id is None or clinician_id not in known:
-        return None, _htmx_aware_redirect(request, "/login")
-    return clinician_id, None
-
-
-def _backward_policy(case: CaseConfiguration | None) -> BackwardNavigation:
-    """S11i: the case's pinned backward navigation policy."""
-    if case is None:
-        return BackwardNavigation.ALLOW_READONLY
-    return case.study.backward_navigation
-
-
-def _logged_in_name(request: Request) -> str | None:
-    """Best-effort display name for the logged-in clinician.
-
-    The cookie carries the pseudonymized ``clinician_id``; the chrome
-    stripe wants the case-folded display name. One row lookup per page
-    render — pilot scale (≤1000 clinicians per DB) makes the cost
-    negligible.
-    """
-    clinician_id = cookies.read_clinician_id(request)
-    if clinician_id is None:
-        return None
-    db = getattr(request.app.state, "db", None)
-    if db is None:
-        return None
-    row = db.execute(
-        "SELECT name_normalized FROM clinicians WHERE clinician_id = ?",
-        (clinician_id,),
-    ).fetchone()
-    if row is None:
-        return None
-    return row[0]
-
-
-@dataclass(frozen=True)
-class ResolvedTimepoint:
-    timepoints: tuple[float, ...]
-    t_minutes: float
-
-
-def _resolve_timepoint(
-    request: Request,
-    patient_id: str,
-    t_index: int,
-    *,
-    patient_ids: list[str] | None = None,
-    timepoints: tuple[float, ...] | None = None,
-) -> tuple[ResolvedTimepoint | None, str | None]:
-    """Study-membership → dataset-membership → ``t_index`` range.
-
-    ``patient_ids``/``timepoints`` override the app-state study models with
-    the case's historical snapshot (S11b: a pinned case uses its own patient
-    list and timepoints).
-
-    Returns ``(resolved, None)`` or ``(None, message)``. Callers render the
-    message in their own shape: GET wraps it in the S2 ``error-flash`` div,
-    POST routes it through ``_answer_status.html``.
-    """
-    dataset = request.app.state.dataset
-    study_patient_ids = patient_ids
-    if study_patient_ids is None:
-        study_patient_ids = getattr(request.app.state, "study_patient_ids", None)
-    if study_patient_ids is not None and patient_id not in study_patient_ids:
-        return None, f"Patient '{patient_id}' is not part of this study"
-
-    known_pids = set(dataset.admission["patient_id"].unique().tolist())
-    if patient_id not in known_pids:
-        return None, f"Patient '{patient_id}' not found"
-
-    if timepoints is not None:
-        if t_index < 0 or t_index >= len(timepoints):
-            return None, (
-                f"Timepoint t_index={t_index} out of range (valid: 0\u2026{len(timepoints) - 1})"
-            )
-        return ResolvedTimepoint(timepoints=timepoints, t_minutes=timepoints[t_index]), None
-    study_tps = getattr(request.app.state, "study_timepoints", None)
-    timepoints = (
-        tuple(float(t) for t in study_tps)
-        if study_tps is not None
-        else patient_timepoints(dataset, patient_id)
-    )
-    if t_index < 0 or t_index >= len(timepoints):
-        return None, (f"Timepoint t_index={t_index} out of range (valid: 0…{len(timepoints) - 1})")
-
-    return ResolvedTimepoint(timepoints=timepoints, t_minutes=timepoints[t_index]), None
-
-
-def _error_flash(message: str) -> str:
-    return f'<div class="error-flash" role="alert">{message}</div>'
 
 
 async def provenance_error_response(
@@ -526,434 +139,6 @@ async def lifecycle_error_response(request: Request, exc: CaseLifecycleError) ->
     return HTMLResponse(content=_error_flash(str(exc)), status_code=status.HTTP_409_CONFLICT)
 
 
-def _answer_status(
-    request: Request,
-    *,
-    state: str,
-    question_id: str | None = None,
-    error: str | None = None,
-    status_code: int = status.HTTP_200_OK,
-    trailing_html: str = "",
-) -> HTMLResponse:
-    """The one response shape of ``POST …/answer``: the badge fragment.
-
-    ``trailing_html`` rides behind the badge — the out-of-band advance CTA
-    on a 200, nothing on an error.
-    """
-    html = request.app.state.templates.get_template("_answer_status.html").render(
-        request=request, state=state, question_id=question_id, error=error
-    )
-    return HTMLResponse(content=html + trailing_html, status_code=status_code)
-
-
-def _render_advance_cta(
-    request: Request,
-    *,
-    patient_id: str,
-    t_index: int,
-    chrome: str,
-    remaining: tuple[str, ...],
-    is_last: bool,
-    oob: bool,
-) -> str:
-    return request.app.state.templates.get_template("_advance_cta.html").render(
-        request=request,
-        patient_id=patient_id,
-        t_index=t_index,
-        chrome=chrome,
-        remaining=remaining,
-        is_last=is_last,
-        oob=oob,
-    )
-
-
-def _study_bootstrap(
-    request: Request,
-    *,
-    clinician_id: str,
-    patient_id: str,
-    frontier: Frontier,
-    case: CaseConfiguration | None = None,
-) -> SessionContext:
-    state = request.app.state
-    ctx = bootstrap_session(
-        state.db,
-        state,
-        clinician_id=clinician_id,
-        patient_id=patient_id,
-        frontier=frontier,
-        case=case,
-    )
-    update_request_context(arm=ctx.arm)
-    return ctx
-
-
-def _render_questions_pane(
-    request: Request,
-    *,
-    ctx: SessionContext,
-    clinician_id: str,
-    patient_id: str,
-    t_index: int,
-    t_minutes: float,
-    chrome: str,
-    timepoint_count: int,
-    case: CaseConfiguration | None = None,
-    contact: ContactResult | None = None,
-) -> str:
-    """Render the pre-filled pane in ``open`` or ``locked`` mode (study mode only).
-
-    S11e: an active tracked case also carries the heartbeat anchor and, when
-    its pinned policy allows it, the Pause button.
-    """
-    state = request.app.state
-    questions = case.questions if case is not None else state.questions
-    prefill = saved_answers(
-        state.db,
-        clinician_id=clinician_id,
-        patient_id=patient_id,
-        t_minutes=t_minutes,
-        questions=questions,
-        config_hash=ctx.config_hash,
-        config_version=ctx.config_version,
-    )
-    mode = pane_mode(ctx.frontier, t_index)
-    is_last = t_index == timepoint_count - 1
-    case_active = contact is not None and contact.access is CaseAccess.ACTIVE
-    cta_html = ""
-    if mode == "open":
-        comp = completeness(questions, prefill)
-        cta_html = _render_advance_cta(
-            request,
-            patient_id=patient_id,
-            t_index=t_index,
-            chrome=chrome,
-            remaining=comp.remaining,
-            is_last=is_last,
-            oob=False,
-        )
-    return state.templates.get_template("_questions_pane.html").render(
-        request=request,
-        patient_id=patient_id,
-        t_index=t_index,
-        t_minutes=t_minutes,
-        chrome=chrome,
-        evaluated=evaluate(questions, prefill).questions,
-        prefill=prefill,
-        mode=mode,
-        completed=ctx.frontier.completed,
-        unlocked_t_index=ctx.frontier.unlocked_t_index,
-        timepoint_count=timepoint_count,
-        cta_html=cta_html,
-        free_text_max_chars=FREE_TEXT_MAX_CHARS,
-        free_text_autosave_delay_ms=FREE_TEXT_AUTOSAVE_DELAY_MS,
-        probability_min=PROBABILITY_MIN,
-        probability_max=PROBABILITY_MAX,
-        heartbeat_enabled=case_active,
-        heartbeat_interval_ms=case_contact.HEARTBEAT_INTERVAL_SECONDS * 1000,
-        pause_enabled=case_active and case_contact.policy_for(case).pause_enabled,
-    )
-
-
-def _render_patient_view(
-    request: Request,
-    *,
-    clinician_id: str,
-    patient_id: str,
-    t_index: int,
-    chrome: str,
-    resolved: ResolvedTimepoint,
-    ctx: SessionContext | None,
-    case: CaseConfiguration | None = None,
-    contact: ContactResult | None = None,
-    render_tracking: RenderTracking = RenderTracking.TRACKED,
-) -> RenderedView:
-    """Slice → panels → summary → chrome → pane → ``_patient_view.html``.
-
-    Shared by the GET route and ``/advance``. ``ctx is None`` outside study
-    mode: no gate, no pane, S2 navigation. S11j: a case pinned to a
-    ``telemetry`` block gets a ``render_id`` (the caller records it after the
-    response is built); ``RenderTracking.WRITE_FREE`` keeps a view without one.
-    """
-    state = request.app.state
-    templates = state.templates
-    t_minutes = float(resolved.t_minutes)
-    timepoint_count = len(resolved.timepoints)
-    at_last = t_index == timepoint_count - 1
-
-    patient_slice = slice_to_timepoint(state.dataset, patient_id, t_minutes, t_index)
-    intervention = LEGACY_INTERVENTION
-    if ctx is not None:
-        intervention = resolve_intervention(
-            state.db, state.dataset, case=case, clinician_id=clinician_id, patient_id=patient_id
-        )
-    panels_html = _render_panels(patient_slice, request, intervention)
-
-    # Forward navigation by plain hx-get is allowed only into already
-    # unlocked timepoints; at the frontier the pane CTA is the one path.
-    show_next = not at_last
-    resume_t_index: dict[str, int] = {}
-    jumper_patient_ids: list[str] | None = None
-    questions_html = ""
-    if ctx is not None:
-        show_next = not at_last and t_index + 1 <= ctx.frontier.unlocked_t_index
-        case_list = _case_patient_ids(request, clinician_id)
-        if is_phase2_mode(state):
-            jumper_patient_ids = case_list
-        overview = progress_overview(
-            state.db,
-            clinician_id=clinician_id,
-            patient_ids=case_list,
-            timepoint_count=timepoint_count,
-        )
-        resume_t_index = {pid: p.unlocked_t_index for pid, p in overview.items()}
-        questions_html = _render_questions_pane(
-            request,
-            ctx=ctx,
-            clinician_id=clinician_id,
-            patient_id=patient_id,
-            t_index=t_index,
-            t_minutes=t_minutes,
-            chrome=chrome,
-            timepoint_count=timepoint_count,
-            case=case,
-            contact=contact,
-        )
-
-    summary_html = _render_summary(
-        patient_slice,
-        request,
-        chrome=chrome,
-        timepoint_count=timepoint_count,
-        show_next=show_next,
-        resume_t_index=resume_t_index,
-        patient_ids=jumper_patient_ids,
-        intervention_mode=intervention.mode,
-        backward=_backward_policy(case),
-    )
-    is_revisit = ctx is not None and pane_mode(ctx.frontier, t_index) != "open"
-    visit_kind = VisitKind.REVISIT if is_revisit else VisitKind.PRIMARY
-    telemetry = case.study.telemetry if case is not None and ctx is not None else None
-    tracked = telemetry is not None and render_tracking is RenderTracking.TRACKED
-    render_id = new_render_id() if tracked else None
-    guarded = tracked and tab_guard.is_guarded(case, contact)
-    logged_in_name = _logged_in_name(request)
-    template_name = "_chrome_dense.html" if chrome == "dense" else "_chrome_epic.html"
-    chrome_html = templates.get_template(template_name).render(
-        request=request,
-        patient_slice=patient_slice,
-        panels=panels_html,
-        show_ai="ai" in panels_html,
-        chrome=chrome,
-        logged_in_name=logged_in_name,
-    )
-    html = templates.get_template("_patient_view.html").render(
-        request=request,
-        patient_slice=patient_slice,
-        chrome=chrome,
-        chrome_html=chrome_html,
-        summary_html=summary_html,
-        questions_html=questions_html,
-        timepoint_count=timepoint_count,
-        logged_in_name=logged_in_name,
-        visit_kind=visit_kind,
-        observation_mode=case.observation_mode if case is not None else ObservationMode.MEASURED,
-        render_id=render_id,
-        telemetry_url=_TELEMETRY_URL,
-        viewport_threshold=telemetry.panel_viewport_threshold if telemetry else None,
-        tab_guard=guarded,
-    )
-    return RenderedView(
-        html=html,
-        t_index=t_index,
-        t_minutes=t_minutes,
-        visit_kind=visit_kind,
-        render_id=render_id,
-        ai_delivery=ai_delivery(patient_slice, intervention),
-        tab_guard=guarded,
-    )
-
-
-def _record_render(
-    request: Request, *, view: RenderedView, ctx: SessionContext, clinician_id: str, patient_id: str
-) -> None:
-    """S11j: record a telemetry view after its response is built."""
-    if view.render_id is None:
-        return
-
-    record_render(
-        request.app.state.db,
-        request.app.state,
-        ctx=ctx,
-        clinician_id=clinician_id,
-        patient_id=patient_id,
-        t_index=view.t_index,
-        t_minutes=view.t_minutes,
-        render_id=view.render_id,
-        visit_kind=view.visit_kind,
-        ai_delivery=view.ai_delivery,
-        tab_guard=view.tab_guard,
-    )
-
-
-def _full_document(
-    request: Request, *, inner: str, patient_id: str, t_index: int, chrome: str
-) -> Response:
-    templates = request.app.state.templates
-    return templates.TemplateResponse(
-        request,
-        "base.html",
-        {
-            "chrome": chrome,
-            "inner": inner,
-            "patient_id": patient_id,
-            "t_index": t_index,
-            "logged_in_name": _logged_in_name(request),
-        },
-    )
-
-
-@router.get("/login", response_class=HTMLResponse)
-async def login_get(request: Request) -> HTMLResponse:
-    templates = request.app.state.templates
-    return templates.TemplateResponse(
-        request,
-        "login.html",
-        {"error": None},
-    )
-
-
-@router.post("/login")
-async def login_post(
-    request: Request,
-    clinician_name: str = Form(""),
-) -> Response:
-    raw_name = clinician_name.strip()
-    if not raw_name:
-        templates = request.app.state.templates
-        return templates.TemplateResponse(
-            request,
-            "login.html",
-            {"error": "Name required."},
-            status_code=400,
-        )
-    clinician_id = clinicians.lookup_or_create(
-        request.app.state.db,
-        raw_name,
-        known_clinicians=request.app.state.known_clinicians,
-    )
-    update_request_context(clinician_id=clinician_id)
-    events.append(
-        request.app.state.db,
-        session_id=None,
-        clinician_id=clinician_id,
-        patient_id=None,
-        timepoint=None,
-        kind="clinician.login",
-        payload={},  # S11m: the row's clinician_id is the only identity
-        app_state=request.app.state,
-    )
-    # S11p: a clinician without the required profile fills it in first.
-    state = request.app.state
-    target = _PROFILE_URL if profile_missing(state.db, state, clinician_id) else _INDEX_URL
-    response: Response = RedirectResponse(target, status_code=303)
-    cookies.set_clinician_cookie(response, clinician_id)
-    return response
-
-
-def _profile_page(
-    request: Request,
-    ctx: ProfileContext,
-    *,
-    form: dict[str, str] | None = None,
-    errors: dict[str, str] | None = None,
-    status_code: int = status.HTTP_200_OK,
-) -> Response:
-    """The form prefilled from the submission, else the stored profile."""
-    stored = ctx.stored
-    values = dict.fromkeys(PROFILE_FIELDS, "")
-    if stored is not None:
-        values.update(
-            professional_role=stored.professional_role,
-            years_of_practice=f"{stored.years_of_practice:g}",
-            country_of_practice=stored.country_of_practice,
-            primary_specialty=stored.primary_specialty or "",
-        )
-    values.update(form or {})
-    return request.app.state.templates.TemplateResponse(
-        request,
-        "profile.html",
-        {
-            "ctx": ctx,
-            "values": values,
-            "errors": errors or {},
-            "max_years": f"{MAX_YEARS_OF_PRACTICE:g}",
-        },
-        status_code=status_code,
-    )
-
-
-@router.get(_PROFILE_URL, response_class=HTMLResponse)
-async def profile_get(request: Request) -> Response:
-    """S11p: the clinician characteristics form (404 when not collected)."""
-    clinician_id, redirect = _require_clinician(request)
-    if redirect is not None:
-        return redirect
-    config = profile_config(request.app.state)
-    if config is None:
-        return HTMLResponse(content=_error_flash(_NO_PROFILE_MSG), status_code=404)
-    return _profile_page(request, profile_context(request.app.state.db, config, clinician_id or ""))
-
-
-@router.post(_PROFILE_URL)
-async def profile_post(request: Request) -> Response:
-    """S11p: store the characteristics; 422 invalid, 409 locked, 303 saved."""
-    clinician_id, redirect = _require_clinician(request)
-    if redirect is not None:
-        return redirect
-    update_request_context(clinician_id=clinician_id)
-    state = request.app.state
-    config = profile_config(state)
-    if config is None:
-        return HTMLResponse(content=_error_flash(_NO_PROFILE_MSG), status_code=404)
-
-    raw = await request.form()
-    form = {name: str(raw.get(name) or "") for name in PROFILE_FIELDS}
-    try:
-        save_profile(state.db, state, clinician_id=clinician_id or "", config=config, form=form)
-    except ProfileValidationError as exc:
-        ctx = profile_context(state.db, config, clinician_id or "")
-        return _profile_page(
-            request, ctx, form=form, errors=exc.errors, status_code=_HTTP_UNPROCESSABLE
-        )
-    except ProfileLockedError:
-        ctx = profile_context(state.db, config, clinician_id or "")
-        return _profile_page(request, ctx, status_code=status.HTTP_409_CONFLICT)
-    return RedirectResponse(_INDEX_URL, status_code=status.HTTP_303_SEE_OTHER)
-
-
-@router.post("/logout")
-async def logout_post(request: Request) -> Response:
-    clinician_id = cookies.read_clinician_id(request)
-    if clinician_id is not None and clinician_id in getattr(
-        request.app.state, "known_clinicians", set()
-    ):
-        tab_guard.release_all(request.app.state.db, request.app.state, clinician_id=clinician_id)
-        events.append(
-            request.app.state.db,
-            session_id=None,
-            clinician_id=clinician_id,
-            patient_id=None,
-            timepoint=None,
-            kind="clinician.logout",
-            payload={},
-            app_state=request.app.state,
-        )
-    response: Response = RedirectResponse("/login", status_code=303)
-    cookies.clear_clinician_cookie(response)
-    return response
-
-
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request) -> HTMLResponse:
     clinician_id, redirect = _require_clinician(request)
@@ -981,6 +166,9 @@ async def index(request: Request) -> HTMLResponse:
             clinician_id=clinician_id or "",
             patient_ids=patient_ids,
             timepoint_count=len(state.study_timepoints),
+            timepoint_counts=pinned_timepoint_counts(
+                state.db, clinician_id=clinician_id or "", patient_ids=patient_ids
+            ),
         )
     else:
         patient_ids = sorted(dataset.admission["patient_id"].unique().tolist())
@@ -999,289 +187,6 @@ async def index(request: Request) -> HTMLResponse:
     )
 
 
-@router.post("/case/start")
-async def case_start(request: Request, chrome: Chrome = "epic") -> Response:
-    """Resume the open case or activate the next planned one (S11d).
-
-    Success redirects to the case's frontier; every refusal is a flash with
-    no arm-revealing value and leaves no assignment, session or event.
-    """
-    clinician_id, redirect = _require_clinician(request)
-    if redirect is not None:
-        return redirect
-    update_request_context(clinician_id=clinician_id)
-    state = request.app.state
-
-    try:
-        started = start_next_case(state.db, state, clinician_id=clinician_id or "")
-    except (CaseStartRefusedError, StaleConfigurationError, ScheduleIncompatibleError) as exc:
-        get_logger().warning("start case refused", event_kind="case.start.refused", error=str(exc))
-        return _form_refusal(
-            request,
-            HTMLResponse(content=_error_flash(str(exc)), status_code=status.HTTP_409_CONFLICT),
-        )
-    except RandomisationIntegrityError as exc:
-        get_logger().error(
-            "start case integrity failure", event_kind="case.start.integrity", error=str(exc)
-        )
-        return _form_refusal(
-            request,
-            HTMLResponse(
-                content=_error_flash(_CASE_START_INTEGRITY_MSG),
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            ),
-        )
-
-    update_request_context(patient_id=started.patient_id)
-    return _htmx_aware_redirect(
-        request, _timepoint_url(started.patient_id, started.resume_t_index, chrome)
-    )
-
-
-@router.post("/practice/start")
-async def practice_start(request: Request, chrome: Chrome = "epic") -> Response:
-    """Resume or start a practice case (S11i); never a measured allocation."""
-    clinician_id, redirect = _require_clinician(request)
-    if redirect is not None:
-        return redirect
-    update_request_context(clinician_id=clinician_id)
-    state = request.app.state
-
-    try:
-        started = start_practice_case(state.db, state, clinician_id=clinician_id or "")
-    except (PracticeRefusedError, StaleConfigurationError) as exc:
-        get_logger().warning(
-            "practice start refused", event_kind="practice.start.refused", error=str(exc)
-        )
-        return _form_refusal(request, _conflict(str(exc)))
-
-    update_request_context(patient_id=started.patient_id)
-    return _htmx_aware_redirect(
-        request, _timepoint_url(started.patient_id, started.resume_t_index, chrome)
-    )
-
-
-def _lifecycle_request(
-    request: Request, clinician_id: str, patient_id: str
-) -> tuple[ContactResult | None, CaseConfiguration | None, Response | None]:
-    """Shared preamble of the S11e case endpoints: a tracked Phase 2 case or a refusal."""
-    state = request.app.state
-    if not is_phase2_mode(state) or _is_unactivated_phase2_patient(
-        request, clinician_id, patient_id
-    ):
-        return None, None, _conflict(_NOT_ACTIVATED_MSG)
-
-    case, case_error, case_status = _try_resolve_case(request, clinician_id, patient_id)
-    if case_error is not None:
-        return None, None, HTMLResponse(content=_error_flash(case_error), status_code=case_status)
-
-    contact = _check_contact(request, clinician_id, patient_id, case)
-    if contact.access is CaseAccess.UNTRACKED:
-        return None, None, _conflict(_NOT_ACTIVATED_MSG)
-    if contact.access in (CaseAccess.INCOMPLETE, CaseAccess.COMPLETED):
-        return None, None, _back_to_index(_conflict(_CASE_CLOSED_MSG))
-    return contact, case, None
-
-
-def _frontier_url(
-    request: Request,
-    clinician_id: str,
-    patient_id: str,
-    case: CaseConfiguration | None,
-    chrome: str,
-) -> str:
-    frontier = read_frontier(
-        request.app.state.db,
-        request.app.state,
-        clinician_id=clinician_id,
-        patient_id=patient_id,
-        timepoints=case.timepoints if case is not None else None,
-    )
-    return _timepoint_url(patient_id, frontier.unlocked_t_index, chrome)
-
-
-@router.post("/case/{patient_id}/heartbeat")
-async def case_heartbeat(request: Request, patient_id: str) -> Response:
-    """Keep an open case page alive; records nothing but ``last_seen_at``."""
-    clinician_id, redirect = _require_clinician(request)
-    if redirect is not None:
-        return redirect
-
-    contact, case, refusal = _lifecycle_request(request, clinician_id or "", patient_id)
-    if refusal is not None:
-        return refusal
-    if contact.access is not CaseAccess.ACTIVE:  # type: ignore[union-attr]
-        return _back_to_index(_conflict(_CASE_NOT_ACTIVE_MSG))
-
-    tab_error = _tab_refusal(
-        request, clinician_id=clinician_id or "", patient_id=patient_id, case=case, contact=contact
-    )
-    if tab_error is not None:
-        return _mark_tab_conflict(_conflict(tab_error))
-
-    _touch_contact(request, contact)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-def _known_clinician(request: Request) -> str | None:
-    """Cookie clinician for fetch/beacon endpoints (they answer 401, never
-    the login redirect a ``fetch()`` would follow)."""
-    clinician_id = cookies.read_clinician_id(request)
-    if clinician_id is None or clinician_id not in request.app.state.known_clinicians:
-        return None
-    return clinician_id
-
-
-@router.post("/case/{patient_id}/tab/claim")
-async def case_tab_claim(request: Request, patient_id: str) -> Response:
-    """S11m: grant the case lease to the posting tab's render (204) or 409."""
-    clinician_id = _known_clinician(request)
-    if clinician_id is None:
-        return Response(status_code=status.HTTP_401_UNAUTHORIZED)
-    update_request_context(clinician_id=clinician_id, patient_id=patient_id)
-
-    try:
-        body = parse_tab_request(await request.body())
-    except TelemetryValidationError:
-        return Response(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
-
-    contact, _case, refusal = _lifecycle_request(request, clinician_id, patient_id)
-    if refusal is not None:
-        return refusal
-    if contact.access is not CaseAccess.ACTIVE:  # type: ignore[union-attr]
-        return _conflict(_CASE_NOT_ACTIVE_MSG)
-
-    try:
-        tab_guard.claim(
-            request.app.state.db,
-            request.app.state,
-            clinician_id=clinician_id,
-            patient_id=patient_id,
-            tab_id=body.tab_id,
-            render_id=body.render_id,
-        )
-    except TabGuardError as exc:
-        get_logger().warning("tab claim refused", event_kind="tab.refused", error=str(exc))
-        return _mark_tab_conflict(_conflict(str(exc)))
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@router.post("/case/{patient_id}/tab/release")
-async def case_tab_release(request: Request, patient_id: str) -> Response:
-    """S11m: drop the lease if the posting render holds it (sendBeacon, 204)."""
-    clinician_id = _known_clinician(request)
-    if clinician_id is None:
-        return Response(status_code=status.HTTP_401_UNAUTHORIZED)
-
-    try:
-        body = parse_tab_request(await request.body())
-    except TelemetryValidationError:
-        return Response(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
-
-    tab_guard.release(
-        request.app.state.db,
-        request.app.state,
-        clinician_id=clinician_id,
-        patient_id=patient_id,
-        tab_id=body.tab_id,
-        render_id=body.render_id,
-        reason=ReleaseReason.PAGEHIDE,
-    )
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@router.post(_TELEMETRY_URL)
-async def telemetry_events(request: Request) -> Response:
-    """S11j/S11k: store one browser telemetry batch (204).
-
-    401 unknown clinician, 422 malformed, 409 unknown or foreign render;
-    nothing written on any. 401 instead of the login redirect: ``fetch()``
-    follows redirects and would read the login page as a successful upload.
-    Not case contact: no lifecycle check, no ``last_seen_at`` touch.
-    """
-    clinician_id = cookies.read_clinician_id(request)
-    if clinician_id is None or clinician_id not in request.app.state.known_clinicians:
-        return Response(status_code=status.HTTP_401_UNAUTHORIZED)
-
-    try:
-        batch = parse_batch(await request.body())
-        record_batch(
-            request.app.state.db, request.app.state, clinician_id=clinician_id, batch=batch
-        )
-    except TelemetryValidationError as exc:
-        get_logger().warning(
-            "telemetry batch refused", event_kind="telemetry.refused", error=str(exc)
-        )
-        return Response(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY)
-    except (UnknownRenderError, UnclaimedRenderError) as exc:
-        get_logger().warning(
-            "telemetry batch refused", event_kind="telemetry.unknown_render", error=str(exc)
-        )
-        return Response(status_code=status.HTTP_409_CONFLICT)
-    return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-
-@router.post("/case/{patient_id}/pause")
-async def case_pause(request: Request, patient_id: str, chrome: Chrome = "epic") -> Response:
-    """Voluntary pause, when the case's pinned policy allows it."""
-    clinician_id, redirect = _require_clinician(request)
-    if redirect is not None:
-        return redirect
-    update_request_context(clinician_id=clinician_id, patient_id=patient_id)
-
-    contact, case, refusal = _lifecycle_request(request, clinician_id or "", patient_id)
-    if refusal is not None:
-        return _form_refusal(request, refusal)
-    if not case_contact.policy_for(case).pause_enabled:
-        return _form_refusal(request, _conflict(_PAUSE_DISABLED_MSG))
-    if contact.access is not CaseAccess.ACTIVE:  # type: ignore[union-attr]
-        return _form_refusal(request, _conflict(_CASE_NOT_ACTIVE_MSG))
-
-    tab_error = _tab_refusal(
-        request,
-        clinician_id=clinician_id or "",
-        patient_id=patient_id,
-        case=case,
-        contact=contact,
-        form=await request.form(),
-    )
-    if tab_error is not None:
-        return _mark_tab_conflict(_form_refusal(request, _conflict(tab_error)))
-
-    try:
-        case_contact.pause_case(request.app.state.db, request.app.state, contact)  # type: ignore[arg-type]
-    except CaseLifecycleError as exc:
-        return _form_refusal(request, _conflict(str(exc)))
-
-    return _htmx_aware_redirect(
-        request, _frontier_url(request, clinician_id or "", patient_id, case, chrome)
-    )
-
-
-@router.post("/case/{patient_id}/resume")
-async def case_resume(request: Request, patient_id: str, chrome: Chrome = "epic") -> Response:
-    """Resume a paused case inside its pause grace; beyond it the case is incomplete."""
-    clinician_id, redirect = _require_clinician(request)
-    if redirect is not None:
-        return redirect
-    update_request_context(clinician_id=clinician_id, patient_id=patient_id)
-
-    contact, case, refusal = _lifecycle_request(request, clinician_id or "", patient_id)
-    if refusal is not None:
-        return _form_refusal(request, refusal)
-    if contact.access is not CaseAccess.PAUSED:  # type: ignore[union-attr]
-        return _form_refusal(request, _conflict(_CASE_NOT_PAUSED_MSG))
-
-    try:
-        case_contact.resume_case(request.app.state.db, request.app.state, contact, case)  # type: ignore[arg-type]
-    except CaseLifecycleError as exc:
-        return _form_refusal(request, _conflict(str(exc)))
-
-    return _htmx_aware_redirect(
-        request, _frontier_url(request, clinician_id or "", patient_id, case, chrome)
-    )
-
-
 @router.get(
     "/patient/{patient_id}/timepoint/{t_index}",
     response_class=HTMLResponse,
@@ -1292,38 +197,16 @@ async def patient_timepoint(
     t_index: int,
     chrome: Chrome = "epic",
 ) -> Response:
-    clinician_id, redirect = _require_clinician(request)
-    if redirect is not None:
-        return redirect
-    update_request_context(clinician_id=clinician_id)
-    state = request.app.state
-    if _is_unactivated_phase2_patient(request, clinician_id or "", patient_id):
-        return _htmx_aware_redirect(request, _INDEX_URL)
-
-    case: CaseConfiguration | None = None
-    if state.study is not None:
-        case, case_error, case_status = _try_resolve_case(request, clinician_id or "", patient_id)
-        if case_error is not None:
-            return HTMLResponse(content=_error_flash(case_error), status_code=case_status)
-
-    # S11e: lifecycle gate before the frontier gate and before any slice.
-    contact: ContactResult | None = None
-    if state.study is not None:
-        contact = _check_contact(request, clinician_id or "", patient_id, case)
-        if contact.access is CaseAccess.INCOMPLETE:
-            return _htmx_aware_redirect(request, _INDEX_URL)
-        if contact.access is CaseAccess.PAUSED:
-            return _case_paused_page(request, patient_id)
-
-    resolved, message = _resolve_timepoint(
-        request,
-        patient_id,
-        t_index,
-        patient_ids=list(case.patient_ids) if case is not None else None,
-        timepoints=case.timepoints if case is not None else None,
+    prepared = await _case_request(request, patient_id, t_index, RefusalShape.PAGE)
+    if isinstance(prepared, Response):
+        return prepared
+    clinician_id, case, contact, resolved = (
+        prepared.clinician_id,
+        prepared.case,
+        prepared.contact,
+        prepared.resolved,
     )
-    if resolved is None:
-        return HTMLResponse(content=_error_flash(message or ""), status_code=404)
+    state = request.app.state
 
     # Bound before the gate so a redirected request stays attributable.
     update_request_context(
@@ -1340,7 +223,7 @@ async def patient_timepoint(
         frontier = read_frontier(
             state.db,
             state,
-            clinician_id=clinician_id or "",
+            clinician_id=clinician_id,
             patient_id=patient_id,
             timepoints=case.timepoints if case is not None else None,
         )
@@ -1356,15 +239,15 @@ async def patient_timepoint(
             )
         ctx = _study_bootstrap(
             request,
-            clinician_id=clinician_id or "",
+            clinician_id=clinician_id,
             patient_id=patient_id,
             frontier=frontier,
             case=case,
         )
 
-    view = _render_patient_view(
+    view = await _render_patient_view(
         request,
-        clinician_id=clinician_id or "",
+        clinician_id=clinician_id,
         patient_id=patient_id,
         t_index=t_index,
         chrome=chrome,
@@ -1386,26 +269,14 @@ async def patient_timepoint(
     else:
         response = HTMLResponse(
             content=inner,
-            status_code=200,
+            status_code=status.HTTP_200_OK,
             headers={"HX-Push-Url": _timepoint_url(patient_id, t_index, chrome)},
         )
 
     # Only a successfully rendered editable frontier counts as an enter;
     # any other study render is a read-only revisit (S11i marker only).
     if state.study is not None and ctx is not None:
-        record = record_enter if pane_mode(ctx.frontier, t_index) == "open" else record_revisit
-        record(
-            state.db,
-            state,
-            ctx=ctx,
-            clinician_id=clinician_id or "",
-            patient_id=patient_id,
-            t_index=t_index,
-            t_minutes=float(resolved.t_minutes),
-        )
-        _record_render(
-            request, view=view, ctx=ctx, clinician_id=clinician_id or "", patient_id=patient_id
-        )
+        _record_view(request, view=view, ctx=ctx, clinician_id=clinician_id, patient_id=patient_id)
 
     _touch_contact(request, contact)
     return response
@@ -1419,71 +290,19 @@ async def patient_answer(
     request: Request, patient_id: str, t_index: int, chrome: Chrome = "epic"
 ) -> Response:
     """Auto-save one answer; always reply with the badge fragment."""
-    clinician_id, redirect = _require_clinician(request)
-    if redirect is not None:
-        return redirect
-    update_request_context(clinician_id=clinician_id)
-
+    prepared = await _case_request(request, patient_id, t_index, RefusalShape.ANSWER_BADGE)
+    if isinstance(prepared, Response):
+        return prepared
+    clinician_id, case, contact, resolved, form = (
+        prepared.clinician_id,
+        prepared.case,
+        prepared.contact,
+        prepared.resolved,
+        prepared.form,
+    )
     state = request.app.state
-    if state.questions is None:
-        return _answer_status(
-            request,
-            state="error",
-            error=_NO_QUESTIONS_MSG,
-            status_code=status.HTTP_409_CONFLICT,
-        )
-    if _is_unactivated_phase2_patient(request, clinician_id or "", patient_id):
-        return _answer_status(
-            request, state="error", error=_NOT_ACTIVATED_MSG, status_code=status.HTTP_409_CONFLICT
-        )
-
-    case = None
-    if state.study is not None:
-        case, case_error, case_status = _try_resolve_case(request, clinician_id or "", patient_id)
-        if case_error is not None:
-            return _answer_status(request, state="error", error=case_error, status_code=case_status)
-
-    contact: ContactResult | None = None
-    if state.study is not None:
-        contact = _check_contact(request, clinician_id or "", patient_id, case)
-        if contact.access is CaseAccess.PAUSED:
-            return _answer_status(
-                request, state="error", error=_CASE_PAUSED_MSG, status_code=status.HTTP_409_CONFLICT
-            )
-        if contact.access is CaseAccess.INCOMPLETE:
-            return _back_to_index(
-                _answer_status(
-                    request,
-                    state="error",
-                    error=_CASE_CLOSED_MSG,
-                    status_code=status.HTTP_409_CONFLICT,
-                )
-            )
-
-    tab_error = _tab_refusal(
-        request, clinician_id=clinician_id or "", patient_id=patient_id, case=case, contact=contact
-    )
-    if tab_error is not None:
-        return _mark_tab_conflict(
-            _answer_status(
-                request, state="error", error=tab_error, status_code=status.HTTP_409_CONFLICT
-            )
-        )
-
     questions = case.questions if case is not None else state.questions
-    resolved, message = _resolve_timepoint(
-        request,
-        patient_id,
-        t_index,
-        patient_ids=list(case.patient_ids) if case is not None else None,
-        timepoints=case.timepoints if case is not None else None,
-    )
-    if resolved is None:
-        return _answer_status(
-            request, state="error", error=message, status_code=status.HTTP_404_NOT_FOUND
-        )
 
-    form = await request.form()
     # First wins if a malformed client sends question_id twice (FormData.get
     # would return the last one).
     question_ids = [v for v in form.getlist("question_id") if isinstance(v, str)]
@@ -1510,13 +329,13 @@ async def patient_answer(
     frontier = read_frontier(
         state.db,
         state,
-        clinician_id=clinician_id or "",
+        clinician_id=clinician_id,
         patient_id=patient_id,
         timepoints=case.timepoints if case is not None else None,
     )
     ctx = _study_bootstrap(
         request,
-        clinician_id=clinician_id or "",
+        clinician_id=clinician_id,
         patient_id=patient_id,
         frontier=frontier,
         case=case,
@@ -1538,7 +357,7 @@ async def patient_answer(
             state.db,
             state,
             ctx=ctx,
-            clinician_id=clinician_id or "",
+            clinician_id=clinician_id,
             patient_id=patient_id,
             t_minutes=t_minutes,
             questions=questions,
@@ -1577,7 +396,7 @@ async def patient_answer(
     # The CTA rides out-of-band so its remaining-count is always the server's.
     saved = saved_answers(
         state.db,
-        clinician_id=clinician_id or "",
+        clinician_id=clinician_id,
         patient_id=patient_id,
         t_minutes=t_minutes,
         questions=questions,
@@ -1611,41 +430,6 @@ async def patient_answer(
     )
 
 
-def _render_changed_slots(
-    request: Request,
-    *,
-    questions: Questions,
-    saved: dict[str, str | list[str]],
-    changed: tuple[str, ...],
-    patient_id: str,
-    t_index: int,
-    chrome: str,
-) -> str:
-    """S11h: out-of-band replacements of the slots whose branch state moved."""
-    if not changed:
-        return ""
-
-    template = request.app.state.templates.get_template("_question.html")
-    evaluated = evaluate(questions, saved)
-    return "".join(
-        template.render(
-            request=request,
-            item=evaluated.get(qid),
-            prefill=saved,
-            mode="open",
-            oob=True,
-            patient_id=patient_id,
-            t_index=t_index,
-            chrome=chrome,
-            free_text_max_chars=FREE_TEXT_MAX_CHARS,
-            free_text_autosave_delay_ms=FREE_TEXT_AUTOSAVE_DELAY_MS,
-            probability_min=PROBABILITY_MIN,
-            probability_max=PROBABILITY_MAX,
-        )
-        for qid in changed
-    )
-
-
 @router.post(
     "/patient/{patient_id}/timepoint/{t_index}/advance",
     response_class=HTMLResponse,
@@ -1659,49 +443,18 @@ async def patient_advance(
     stored frontier is answered with the frontier's view (412), never with a
     write. Plain-browser (non-HTMX) submits get POST-redirect-GET 303s.
     """
-    clinician_id, redirect = _require_clinician(request)
-    if redirect is not None:
-        return redirect
-    update_request_context(clinician_id=clinician_id)
-
+    prepared = await _case_request(request, patient_id, t_index, RefusalShape.ADVANCE_FLASH)
+    if isinstance(prepared, Response):
+        return prepared
+    clinician_id, case, contact, resolved, form = (
+        prepared.clinician_id,
+        prepared.case,
+        prepared.contact,
+        prepared.resolved,
+        prepared.form,
+    )
     state = request.app.state
-    if state.study is None:
-        return HTMLResponse(
-            content=_error_flash(_NO_QUESTIONS_MSG), status_code=status.HTTP_409_CONFLICT
-        )
-    if _is_unactivated_phase2_patient(request, clinician_id or "", patient_id):
-        return HTMLResponse(
-            content=_error_flash(_NOT_ACTIVATED_MSG), status_code=status.HTTP_409_CONFLICT
-        )
-
-    case, case_error, case_status = _try_resolve_case(request, clinician_id or "", patient_id)
-    if case_error is not None:
-        return HTMLResponse(content=_error_flash(case_error), status_code=case_status)
-
-    contact = _check_contact(request, clinician_id or "", patient_id, case)
-    if contact.access is CaseAccess.PAUSED:
-        return HTMLResponse(
-            content=_error_flash(_CASE_PAUSED_MSG), status_code=status.HTTP_409_CONFLICT
-        )
-    if contact.access is CaseAccess.INCOMPLETE:
-        return _back_to_index(_conflict(_CASE_CLOSED_MSG))
-
-    tab_error = _tab_refusal(
-        request, clinician_id=clinician_id or "", patient_id=patient_id, case=case, contact=contact
-    )
-    if tab_error is not None:
-        return _mark_tab_conflict(_conflict(tab_error))
-
     questions = case.questions if case is not None else state.questions
-    resolved, message = _resolve_timepoint(
-        request,
-        patient_id,
-        t_index,
-        patient_ids=list(case.patient_ids) if case is not None else None,
-        timepoints=case.timepoints if case is not None else None,
-    )
-    if resolved is None:
-        return HTMLResponse(content=_error_flash(message or ""), status_code=404)
     update_request_context(
         patient_id=patient_id,
         timepoint=float(resolved.t_minutes),
@@ -1709,19 +462,16 @@ async def patient_advance(
         chrome=chrome,
     )
 
-    # The only await in this handler sits BEFORE the frontier read, so the
-    # read → compare-and-set below runs without yielding to the loop.
-    form = await request.form()
     frontier = read_frontier(
         state.db,
         state,
-        clinician_id=clinician_id or "",
+        clinician_id=clinician_id,
         patient_id=patient_id,
         timepoints=case.timepoints if case is not None else None,
     )
     ctx = _study_bootstrap(
         request,
-        clinician_id=clinician_id or "",
+        clinician_id=clinician_id,
         patient_id=patient_id,
         frontier=frontier,
         case=case,
@@ -1731,7 +481,7 @@ async def patient_advance(
         state.db,
         state,
         ctx=ctx,
-        clinician_id=clinician_id or "",
+        clinician_id=clinician_id,
         patient_id=patient_id,
         t_index=t_index,
         timepoints=resolved.timepoints,
@@ -1741,11 +491,11 @@ async def patient_advance(
     )
     # A finished walk completed the case; touch() then finds nothing active.
     _touch_contact(request, contact)
-    return _advance_response(
+    return await _advance_response(
         request,
         result=result,
         ctx=ctx,
-        clinician_id=clinician_id or "",
+        clinician_id=clinician_id,
         patient_id=patient_id,
         t_index=t_index,
         chrome=chrome,
@@ -1753,524 +503,4 @@ async def patient_advance(
         case=case,
         contact=contact,
         tab_id=request.headers.get(tab_guard.TAB_ID_HEADER),
-    )
-
-
-def _advance_response(
-    request: Request,
-    *,
-    result: AdvanceResult,
-    ctx: SessionContext,
-    clinician_id: str,
-    patient_id: str,
-    t_index: int,
-    chrome: str,
-    timepoint_count: int,
-    case: CaseConfiguration | None = None,
-    contact: ContactResult | None = None,
-    tab_id: str | None = None,
-) -> Response:
-    """Map an :class:`AdvanceResult` onto the HTMX / plain-browser contract (spec §5.1).
-
-    S11m: the owner's lease follows the advanced-into render, so the swapped
-    view writes without waiting for its own claim.
-    """
-    if result.outcome == "finished":
-        return _htmx_aware_redirect(request, _INDEX_URL)
-
-    if result.outcome == "blocked":
-        if not _is_htmx(request):
-            return RedirectResponse(
-                _timepoint_url(patient_id, t_index, chrome), status_code=status.HTTP_303_SEE_OTHER
-            )
-        html = _render_advance_cta(
-            request,
-            patient_id=patient_id,
-            t_index=t_index,
-            chrome=chrome,
-            remaining=result.remaining,
-            is_last=t_index == timepoint_count - 1,
-            oob=False,
-        )
-        return HTMLResponse(
-            content=html,
-            status_code=status.HTTP_409_CONFLICT,
-            headers={"HX-Retarget": "#advance-form", "HX-Reswap": "outerHTML"},
-        )
-
-    # "advanced" and "stale" both answer with the frontier's view. The ctx
-    # from bootstrap predates the write, so re-point it at the new frontier.
-    target_t_index = result.unlocked_t_index
-    target_url = _timepoint_url(patient_id, target_t_index, chrome)
-    if not _is_htmx(request):
-        return RedirectResponse(target_url, status_code=status.HTTP_303_SEE_OTHER)
-
-    target_ctx = replace(ctx, frontier=Frontier(target_t_index, ctx.frontier.completed))
-    target_resolved, message = _resolve_timepoint(
-        request,
-        patient_id,
-        target_t_index,
-        patient_ids=list(case.patient_ids) if case is not None else None,
-        timepoints=case.timepoints if case is not None else None,
-    )
-    if target_resolved is None:  # unreachable: read_frontier clamps to the study range
-        return HTMLResponse(
-            content=_error_flash(message or ""),
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-        )
-    advanced = result.outcome == "advanced"
-    # S9b: the 412 stale view is write free, so it carries no render id.
-    view = _render_patient_view(
-        request,
-        clinician_id=clinician_id,
-        patient_id=patient_id,
-        t_index=target_t_index,
-        chrome=chrome,
-        resolved=target_resolved,
-        ctx=target_ctx,
-        case=case,
-        contact=contact,
-        render_tracking=RenderTracking.TRACKED if advanced else RenderTracking.WRITE_FREE,
-    )
-    status_code = status.HTTP_200_OK if advanced else status.HTTP_412_PRECONDITION_FAILED
-    if advanced:
-        # S10: the htmx swap shows the next frontier pane without a new GET,
-        # so its enter rides on this response. The 412 "stale" reply keeps
-        # the frontier the clinician is actually on — no enter there (and
-        # the non-HTMX 303 path defers to the GET that follows).
-        record_enter(
-            request.app.state.db,
-            request.app.state,
-            ctx=target_ctx,
-            clinician_id=clinician_id,
-            patient_id=patient_id,
-            t_index=target_t_index,
-            t_minutes=float(target_resolved.t_minutes),
-        )
-        _record_render(
-            request, view=view, ctx=target_ctx, clinician_id=clinician_id, patient_id=patient_id
-        )
-        if view.tab_guard and view.render_id is not None and tab_id:
-            tab_guard.move_to_render(
-                request.app.state.db,
-                request.app.state,
-                clinician_id=clinician_id,
-                patient_id=patient_id,
-                tab_id=tab_id,
-                render_id=view.render_id,
-            )
-    return HTMLResponse(
-        content=view.html, status_code=status_code, headers={"HX-Push-Url": target_url}
-    )
-
-
-def _form_str(value: object) -> str | None:
-    return value if isinstance(value, str) else None
-
-
-def _render_summary(
-    patient_slice: PatientSlice,
-    request: Request,
-    *,
-    chrome: str,
-    timepoint_count: int,
-    show_next: bool,
-    resume_t_index: dict[str, int],
-    patient_ids: list[str] | None = None,
-    intervention_mode: InterventionMode = InterventionMode.LEGACY,
-    backward: BackwardNavigation = BackwardNavigation.ALLOW_READONLY,
-) -> str:
-    """``patient_ids`` overrides the jumper list (S11d Phase 2: own cases only).
-
-    Measured cases drop the AI row count (S11g): it must not exist in a no
-    AI case, and the AI arm keeps identical chrome. ``prohibit`` drops the
-    Prev button (S11i).
-    """
-    templates = request.app.state.templates
-    dataset = request.app.state.dataset
-    admission_facts = {
-        row.field: row.value for row in patient_slice.admission.itertuples(index=False)
-    }
-    counts = {
-        "scalar_ts": int(len(patient_slice.scalar_ts)),
-        "imaging": int(len(patient_slice.imaging)),
-        "ai": int(len(patient_slice.ai_output)),
-        "admission": int(len(patient_slice.admission)),
-    }
-    # Mirror the index-route filter: with a study config loaded, the
-    # patient-jumper navigation only lists study patients (declared order
-    # preserved). Without a study config, fall back to the full dataset list.
-    study_patient_ids = getattr(request.app.state, "study_patient_ids", None)
-    if patient_ids is not None:
-        all_patient_ids = patient_ids
-    elif study_patient_ids is not None:
-        all_patient_ids = list(study_patient_ids)
-    else:
-        all_patient_ids = sorted(dataset.admission["patient_id"].unique().tolist())
-    return templates.get_template("_summary_card.html").render(
-        request=request,
-        patient_slice=patient_slice,
-        admission_facts=admission_facts,
-        counts=counts,
-        chrome=chrome,
-        all_patient_ids=all_patient_ids,
-        timepoint_count=timepoint_count,
-        show_next=show_next,
-        resume_t_index=resume_t_index,
-        show_ai_count=intervention_mode is InterventionMode.LEGACY,
-        show_prev=backward is BackwardNavigation.ALLOW_READONLY,
-    )
-
-
-def _render_panels(
-    patient_slice: PatientSlice,
-    request: Request,
-    intervention: InterventionContext = LEGACY_INTERVENTION,
-) -> dict[str, str]:
-    """Render each panel inside its own try/except so a failure in one panel
-    cannot take down the whole page (Decision **D9**).
-
-    S11g: a measured no AI case never calls the AI renderer, so the result
-    has no ``"ai"`` key at all; a measured AI case renders the frozen row.
-    """
-
-    log = get_logger()
-    out: dict[str, str] = {}
-    renderers: list[tuple[str, Callable[[PatientSlice, Request], str]]] = [
-        ("vitals", _render_vitals),
-        ("labs", _render_labs),
-        ("admission", _render_admission),
-        ("imaging", _render_imaging),
-    ]
-    if intervention.mode is InterventionMode.LEGACY:
-        renderers.append(("ai", _render_ai))
-    elif intervention.mode is InterventionMode.AI:
-        renderers.append(("ai", partial(_render_measured_ai, intervention=intervention)))
-
-    for panel_name, render_fn in renderers:
-        try:
-            out[panel_name] = render_fn(patient_slice, request)
-        except Exception as exc:  # noqa: BLE001
-            log.warning(
-                "panel.render.failed",
-                panel=panel_name,
-                error=repr(exc),
-            )
-            patient_slice.panel_states[panel_name] = "error"
-            patient_slice.panel_errors[panel_name] = repr(exc)
-            templates = request.app.state.templates
-            out[panel_name] = templates.get_template("_panel_error.html").render(
-                request=request,
-                panel=panel_name,
-                error=repr(exc),
-            )
-    return out
-
-
-# Round-03 layout: BP grouped on shared mmHg, then HR, RR; SpO2/Temp below.
-# Order is fixed (clinician reading order); only present vitals get rendered,
-# but the order they appear within each figure stays stable.
-_VITALS_TABLE_ORDER: tuple[str, ...] = ("sbp", "dbp", "hr", "rr", "spo2", "temp")
-_BP_PANEL_VARS: frozenset[str] = frozenset({"sbp", "dbp"})
-_BP_GROUP_VARS_ORDERED: tuple[str, ...] = ("sbp", "dbp")
-_UPPER_SINGLE_VARS: tuple[str, ...] = ("hr", "rr")
-_LOWER_SINGLE_VARS: tuple[str, ...] = ("spo2", "temp")
-
-
-def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
-    """Vitals: two stacked figures.
-
-    Round-03 layout (`specs/feedback/session-02-feedback.md` round-03):
-
-    - **Upper figure** (hemodynamics): BP grouped on a shared mmHg y-scale,
-      then HR, then RR — top to bottom.
-    - **Lower figure** (oxygenation/metabolic): SpO₂, then Temp.
-    - All panels in a figure share the same x-range; tick labels render on
-      the bottom-most panel only.
-    - Partial-within-BP: if SBP or DBP is missing from the slice, the BP
-      panel renders a faint dashed expected band at the missing variable's
-      reference range and the panel-level note "DBP missing at this
-      timepoint." appears below the BP panel.
-
-    Round-02 lineage (FINDING-007 / FINDING-008): per-variable rendering
-    instead of ``facet_wrap`` because plotnine's facet strip text rendered
-    as empty grey rectangles. Round-03 keeps that pattern for HR/RR/SpO₂/
-    Temp and adds a single multi-line plotnine call for the BP panel.
-    """
-    from ehr_simulator.web.charts import render_grouped_bp_svg, render_timeline_svg
-    from ehr_simulator.web.panels import _VITAL_VARS
-
-    templates = request.app.state.templates
-    state = patient_slice.panel_states["vitals"]
-    rows = patient_slice.scalar_ts.loc[patient_slice.scalar_ts.variable.isin(_VITAL_VARS)]
-
-    upper_panels: list[dict[str, object]] = []
-    lower_panels: list[dict[str, object]] = []
-    fallback_rows: list[dict[str, object]] = []
-    variables_present: list[str] = []
-    units: dict[str, str] = {}
-    pivot_rows: list[dict[str, object]] = []
-    bp_missing: list[str] = []
-    bp_partial_note: str | None = None
-    current_t = float(patient_slice.t_minutes)
-
-    if state in {"loading", "partial"} and not rows.empty:
-        present_set = set(rows["variable"].astype(str).unique().tolist())
-        for r in rows.itertuples(index=False):
-            units.setdefault(r.variable, str(r.unit))
-        # Stable column order for the values table (matches the panel reading
-        # order: BP → HR → RR → SpO₂ → Temp).
-        variables_present = [v for v in _VITALS_TABLE_ORDER if v in present_set]
-
-        all_t = rows["t_minutes"].astype(float)
-        t_lo = float(all_t.min())
-        t_hi = float(all_t.max())
-        x_range = (t_lo - 1.0, t_hi + 1.0) if t_lo == t_hi else (t_lo, t_hi)
-        sorted_rows = rows.sort_values(["variable", "t_minutes"])
-
-        present_bp: frozenset[str] = frozenset(present_set & _BP_PANEL_VARS)
-        bp_missing = [v for v in _BP_GROUP_VARS_ORDERED if v not in present_bp]
-
-        # Compose upper figure (BP → HR → RR), then lower (SpO₂ → Temp).
-        upper_specs: list[dict[str, object]] = []
-        if present_bp:
-            upper_specs.append(
-                {
-                    "group": "bp",
-                    "label": "BP",
-                    "unit": "mmHg",
-                    "is_grouped": True,
-                    "present_bp": present_bp,
-                    "missing": list(bp_missing),
-                }
-            )
-        for var in _UPPER_SINGLE_VARS:
-            if var in present_set:
-                upper_specs.append(
-                    {
-                        "group": var,
-                        "label": var.upper(),
-                        "unit": units.get(var, ""),
-                        "is_grouped": False,
-                        "variable": var,
-                    }
-                )
-        lower_specs: list[dict[str, object]] = []
-        for var in _LOWER_SINGLE_VARS:
-            if var in present_set:
-                lower_specs.append(
-                    {
-                        "group": var,
-                        "label": "SpO₂" if var == "spo2" else var.upper(),
-                        "unit": units.get(var, ""),
-                        "is_grouped": False,
-                        "variable": var,
-                    }
-                )
-
-        def _render_specs(
-            specs: list[dict[str, object]],
-        ) -> list[dict[str, object]]:
-            rendered: list[dict[str, object]] = []
-            for idx, spec in enumerate(specs):
-                is_bottom = idx == len(specs) - 1
-                if spec["is_grouped"]:
-                    svg = render_grouped_bp_svg(
-                        sorted_rows,
-                        present_vars=spec["present_bp"],  # type: ignore[arg-type]
-                        x_range=x_range,
-                        is_bottom=is_bottom,
-                    )
-                else:
-                    svg = render_timeline_svg(
-                        sorted_rows,
-                        spec["variable"],  # type: ignore[arg-type]
-                        x_range=x_range,
-                        is_bottom=is_bottom,
-                    )
-                rendered.append(
-                    {
-                        "group": spec["group"],
-                        "label": spec["label"],
-                        "unit": spec["unit"],
-                        "svg": svg,
-                        "is_bottom": is_bottom,
-                        "is_grouped": spec["is_grouped"],
-                        "missing": spec.get("missing", []),
-                    }
-                )
-            return rendered
-
-        upper_panels = _render_specs(upper_specs)
-        lower_panels = _render_specs(lower_specs)
-
-        if bp_missing and present_bp:
-            # Specific to round-03: the BP panel internally annotates which
-            # of SBP/DBP is missing, layered on top of the panel-level
-            # "Partial data at this timepoint." badge.
-            missing_label = ", ".join(v.upper() for v in bp_missing)
-            bp_partial_note = f"{missing_label} missing at this timepoint."
-
-        fallback_rows = [
-            {
-                "t": float(r.t_minutes),
-                "variable": r.variable,
-                "value": float(r.value),
-                "unit": r.unit,
-            }
-            for r in rows.sort_values(["t_minutes", "variable"]).itertuples(index=False)
-        ]
-        pivot: dict[float, dict[str, float]] = {}
-        for r in rows.itertuples(index=False):
-            pivot.setdefault(float(r.t_minutes), {})[r.variable] = float(r.value)
-        for t in sorted(pivot.keys()):
-            pivot_rows.append(
-                {
-                    "t": t,
-                    "is_current": t == current_t,
-                    "cells": [pivot[t].get(var) for var in variables_present],
-                }
-            )
-
-    return templates.get_template("_panel_vitals.html").render(
-        request=request,
-        patient_slice=patient_slice,
-        state=state,
-        error=patient_slice.panel_errors.get("vitals"),
-        upper_panels=upper_panels,
-        lower_panels=lower_panels,
-        variables=variables_present,
-        units=units,
-        pivot_rows=pivot_rows,
-        fallback_rows=fallback_rows,
-        bp_partial_note=bp_partial_note,
-    )
-
-
-def _render_labs(patient_slice: PatientSlice, request: Request) -> str:
-    """Labs: variable-by-timepoint table (FINDING-005). Tabular form is the
-    clinical standard for labs; charts add visual noise without aiding the
-    point-in-time read."""
-    from ehr_simulator.web.panels import _LAB_VARS
-
-    templates = request.app.state.templates
-    state = patient_slice.panel_states["labs"]
-    rows = patient_slice.scalar_ts.loc[patient_slice.scalar_ts.variable.isin(_LAB_VARS)]
-
-    timepoints: list[float] = []
-    variables_present: list[str] = []
-    units: dict[str, str] = {}
-    table_rows: list[dict[str, object]] = []
-    current_t = float(patient_slice.t_minutes)
-
-    if state in {"loading", "partial"} and not rows.empty:
-        timepoints = sorted({float(t) for t in rows["t_minutes"].tolist()})
-        variables_present = sorted(rows["variable"].unique().tolist())
-        for r in rows.itertuples(index=False):
-            units.setdefault(r.variable, str(r.unit))
-        pivot: dict[str, dict[float, float]] = {}
-        for r in rows.itertuples(index=False):
-            pivot.setdefault(r.variable, {})[float(r.t_minutes)] = float(r.value)
-        for variable in variables_present:
-            table_rows.append(
-                {
-                    "variable": variable,
-                    "unit": units.get(variable, ""),
-                    "cells": [pivot[variable].get(t) for t in timepoints],
-                }
-            )
-
-    return templates.get_template("_panel_labs.html").render(
-        request=request,
-        patient_slice=patient_slice,
-        state=state,
-        error=patient_slice.panel_errors.get("labs"),
-        timepoints=timepoints,
-        current_t=current_t,
-        table_rows=table_rows,
-    )
-
-
-def _render_admission(patient_slice: PatientSlice, request: Request) -> str:
-    templates = request.app.state.templates
-    state = patient_slice.panel_states["admission"]
-    facts = [
-        {"field": row.field, "value": row.value}
-        for row in patient_slice.admission.itertuples(index=False)
-    ]
-    return templates.get_template("_panel_admission.html").render(
-        request=request,
-        state=state,
-        error=patient_slice.panel_errors.get("admission"),
-        facts=facts,
-    )
-
-
-def _render_imaging(patient_slice: PatientSlice, request: Request) -> str:
-    templates = request.app.state.templates
-    state = patient_slice.panel_states["imaging"]
-    rows = [
-        {
-            "t_minutes": float(r.t_minutes),
-            "modality": r.modality,
-            "report_text": r.report_text,
-        }
-        for r in patient_slice.imaging.itertuples(index=False)
-    ]
-    return templates.get_template("_panel_imaging.html").render(
-        request=request,
-        state=state,
-        error=patient_slice.panel_errors.get("imaging"),
-        rows=rows,
-    )
-
-
-def _render_ai(patient_slice: PatientSlice, request: Request) -> str:
-    templates = request.app.state.templates
-    state = patient_slice.panel_states["ai"]
-    rows: list[dict[str, object]] = []
-    for r in patient_slice.ai_output.itertuples(index=False):
-        try:
-            payload = json.loads(r.output_json)
-        except (TypeError, ValueError):
-            payload = {}
-        rows.append(
-            {
-                "t_minutes": float(r.t_minutes),
-                "model_id": r.model_id,
-                "payload": payload,
-            }
-        )
-    return templates.get_template("_panel_ai.html").render(
-        request=request,
-        state=state,
-        error=patient_slice.panel_errors.get("ai"),
-        rows=rows,
-    )
-
-
-def _render_measured_ai(
-    patient_slice: PatientSlice, request: Request, *, intervention: InterventionContext
-) -> str:
-    """S11g AI arm: the pinned model's row at exactly t, or ``unavailable``."""
-    measured = select_measured_ai(patient_slice, intervention)
-    state, payload = measured_ai_state(measured)
-    if measured.unavailable is not None:
-        get_logger().warning(
-            "measured AI output unavailable",
-            event_kind="intervention.ai.unavailable",
-            reason=str(measured.unavailable),
-        )
-
-    rows = []
-    if measured.unavailable is None:
-        rows.append(
-            {"t_minutes": measured.t_minutes, "model_id": measured.model_id, "payload": payload}
-        )
-    return request.app.state.templates.get_template("_panel_ai.html").render(
-        request=request,
-        state=state,
-        error=None,
-        rows=rows,
-        measured=True,
     )

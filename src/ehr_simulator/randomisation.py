@@ -59,6 +59,7 @@ __all__ = [
     "create_or_fetch_schedule",
     "generate_schedule",
     "load_activated_allocation_state",
+    "projected_imbalance",
     "require_schedule_compatible",
 ]
 
@@ -253,11 +254,17 @@ def _expand_slots(config: RandomisationConfig, starting_arm: Arm, n_positions: i
     return slots
 
 
+def projected_imbalance(ai_count: int, no_ai_count: int, arm: Arm) -> int:
+    """``|ai - no_ai|`` after one more case on ``arm`` (S11c slots, S11f
+    replacements). ``(2, 1, Arm.NO_AI) → 0``."""
+    ai = ai_count + (1 if arm is Arm.AI else 0)
+    no_ai = no_ai_count + (1 if arm is Arm.NO_AI else 0)
+    return abs(ai - no_ai)
+
+
 def _projected_imbalance(allocation: PatientAllocation, arm: Arm) -> int:
     """``|ai - no_ai|`` after one more case on ``arm`` (activated counts only)."""
-    ai = allocation.ai_count + (1 if arm is Arm.AI else 0)
-    no_ai = allocation.no_ai_count + (1 if arm is Arm.NO_AI else 0)
-    return abs(ai - no_ai)
+    return projected_imbalance(allocation.ai_count, allocation.no_ai_count, arm)
 
 
 def _assign_patients(
@@ -307,6 +314,45 @@ def _assignment_seed(key: bytes, case_position: int, patient_id: str, arm: Arm) 
     return raw >> (_ASSIGNMENT_SEED_BYTES * 8 - _ASSIGNMENT_SEED_BITS)
 
 
+def _derive_seed_hex(master_seed: int, context_json: bytes) -> str:
+    """HMAC-SHA256 of the schedule context keyed by the master seed."""
+    master_key = str(master_seed).encode("utf-8")
+    return hmac.new(master_key, context_json, hashlib.sha256).hexdigest()
+
+
+def _build_items(slots: list[_Slot], patients: list[str], key: bytes) -> tuple[ScheduleItem, ...]:
+    """One :class:`ScheduleItem` per slot, in case-position order.
+
+    planned_cases_since_ai: None before any AI slot, 0 on AI, else the
+    distance to the most recent AI slot (ai, no_ai, no_ai → 0, 1, 2).
+    """
+    items: list[ScheduleItem] = []
+    last_ai_position: int | None = None
+    for slot, patient_id in zip(slots, patients, strict=True):
+        if slot.planned_arm is Arm.AI:
+            last_ai_position = slot.case_position
+
+        since_ai = None if last_ai_position is None else slot.case_position - last_ai_position
+        items.append(
+            ScheduleItem(
+                case_position=slot.case_position,
+                patient_id=patient_id,
+                planned_arm=slot.planned_arm.value,
+                block_number=slot.block_number,
+                position_in_block=slot.position_in_block,
+                preceding_block_arm=(
+                    None if slot.preceding_block_arm is None else slot.preceding_block_arm.value
+                ),
+                planned_cases_since_ai=since_ai,
+                assignment_seed=_assignment_seed(
+                    key, slot.case_position, patient_id, slot.planned_arm
+                ),
+            )
+        )
+
+    return tuple(items)
+
+
 def generate_schedule(
     *,
     study: StudyConfig,
@@ -344,39 +390,14 @@ def generate_schedule(
         }
     ).encode("utf-8")
     schedule_id = hashlib.sha256(context_json).hexdigest()
-    master_key = str(config.master_seed).encode("utf-8")
-    derived_seed_hex = hmac.new(master_key, context_json, hashlib.sha256).hexdigest()
+    derived_seed_hex = _derive_seed_hex(config.master_seed, context_json)
     key = bytes.fromhex(derived_seed_hex)
 
     starting_arm = _choose_starting_arm(starting_arm_counts, key)
     slots = _expand_slots(config, starting_arm, len(study.patient_ids))
     patients = _assign_patients(slots, study.patient_ids, allocation_state, key)
 
-    # planned_cases_since_ai: None before any AI slot, 0 on AI, else the
-    # distance to the most recent AI slot (ai, no_ai, no_ai → 0, 1, 2).
-    items: list[ScheduleItem] = []
-    last_ai_position: int | None = None
-    for slot, patient_id in zip(slots, patients, strict=True):
-        if slot.planned_arm is Arm.AI:
-            last_ai_position = slot.case_position
-
-        since_ai = None if last_ai_position is None else slot.case_position - last_ai_position
-        items.append(
-            ScheduleItem(
-                case_position=slot.case_position,
-                patient_id=patient_id,
-                planned_arm=slot.planned_arm.value,
-                block_number=slot.block_number,
-                position_in_block=slot.position_in_block,
-                preceding_block_arm=(
-                    None if slot.preceding_block_arm is None else slot.preceding_block_arm.value
-                ),
-                planned_cases_since_ai=since_ai,
-                assignment_seed=_assignment_seed(
-                    key, slot.case_position, patient_id, slot.planned_arm
-                ),
-            )
-        )
+    items = _build_items(slots, patients, key)
 
     return GeneratedSchedule(
         schedule_id=schedule_id,
@@ -393,7 +414,7 @@ def generate_schedule(
         starting_arm=starting_arm.value,
         block_length=config.block_length,
         block_sequence_json=_canonical_json(config.block_sequence),
-        items=tuple(items),
+        items=items,
     )
 
 

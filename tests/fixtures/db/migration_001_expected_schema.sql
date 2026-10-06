@@ -3,7 +3,8 @@
 -- "s11b_config_version_history", 006 "s11c_randomisation_schedules", 007
 -- "s11d_case_activation", 008 "s11e_case_lifecycle", 009
 -- "s11f_case_replacements", 010 "s11h_answer_source", 011 "s11i_practice", 012
--- "s11j_browser_telemetry", 013 "s11m_case_tab_leases", 014 "s11p_clinician_profiles"); the
+-- "s11j_browser_telemetry", 013 "s11m_case_tab_leases", 014 "s11p_clinician_profiles",
+-- 015 "integrity_hardening"); the
 -- filename predates 002. The
 -- drift-check test in tests/test_db.py reads sqlite_master.sql (the exact
 -- DDL text SQLite stored) sorted by name, joins with ";\n\n", and asserts
@@ -265,6 +266,13 @@ BEGIN
     SELECT RAISE(ABORT, 'phase2_randomized assignments are immutable');
 END;
 
+CREATE TRIGGER trg_arm_phase2_no_promotion
+BEFORE UPDATE ON arm_assignments
+WHEN NEW.arm_source = 'phase2_randomized' AND OLD.arm_source <> 'phase2_randomized'
+BEGIN
+    SELECT RAISE(ABORT, 'phase2_randomized assignments are created by activation only');
+END;
+
 CREATE TRIGGER trg_case_lifecycle_no_delete
 BEFORE DELETE ON case_lifecycle
 BEGIN
@@ -316,6 +324,30 @@ BEGIN
     SELECT RAISE(ABORT, 'clinician profiles are never deleted');
 END;
 
+CREATE TRIGGER trg_configuration_history_no_delete
+BEFORE DELETE ON configuration_history
+BEGIN
+    SELECT RAISE(ABORT, 'configuration_history is append-only');
+END;
+
+CREATE TRIGGER trg_configuration_history_no_update
+BEFORE UPDATE ON configuration_history
+BEGIN
+    SELECT RAISE(ABORT, 'configuration_history is append-only');
+END;
+
+CREATE TRIGGER trg_events_no_delete
+BEFORE DELETE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'events is append-only');
+END;
+
+CREATE TRIGGER trg_events_no_update
+BEFORE UPDATE ON events
+BEGIN
+    SELECT RAISE(ABORT, 'events is append-only');
+END;
+
 CREATE TRIGGER trg_practice_cases_complete_once
 BEFORE UPDATE ON practice_cases
 WHEN OLD.completed_at IS NOT NULL
@@ -333,6 +365,42 @@ CREATE TRIGGER trg_practice_cases_no_delete
 BEFORE DELETE ON practice_cases
 BEGIN
     SELECT RAISE(ABORT, 'practice cases are never deleted');
+END;
+
+CREATE TRIGGER trg_randomisation_schedule_items_no_delete
+BEFORE DELETE ON randomisation_schedule_items
+BEGIN
+    SELECT RAISE(ABORT, 'randomisation_schedule_items is append-only');
+END;
+
+CREATE TRIGGER trg_randomisation_schedule_items_no_update
+BEFORE UPDATE ON randomisation_schedule_items
+BEGIN
+    SELECT RAISE(ABORT, 'randomisation_schedule_items is append-only');
+END;
+
+CREATE TRIGGER trg_randomisation_schedules_no_delete
+BEFORE DELETE ON randomisation_schedules
+BEGIN
+    SELECT RAISE(ABORT, 'randomisation_schedules is append-only');
+END;
+
+CREATE TRIGGER trg_randomisation_schedules_no_update
+BEFORE UPDATE ON randomisation_schedules
+BEGIN
+    SELECT RAISE(ABORT, 'randomisation_schedules is append-only');
+END;
+
+CREATE TRIGGER trg_study_identity_no_delete
+BEFORE DELETE ON study_identity
+BEGIN
+    SELECT RAISE(ABORT, 'study_identity is append-only');
+END;
+
+CREATE TRIGGER trg_study_identity_no_update
+BEFORE UPDATE ON study_identity
+BEGIN
+    SELECT RAISE(ABORT, 'study_identity is append-only');
 END;
 
 CREATE UNIQUE INDEX ux_arm_schedule_position

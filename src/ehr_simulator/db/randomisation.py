@@ -120,11 +120,20 @@ def list_schedules(conn: sqlite3.Connection, study_id: str) -> tuple[StoredSched
     return tuple(_to_stored(conn, row) for row in rows)
 
 
+def count_foreign_schedules(conn: sqlite3.Connection, study_id: str) -> int:
+    """Schedules stamped with a study other than ``study_id`` (an export refuses any)."""
+    row = conn.execute(
+        "SELECT COUNT(*) FROM randomisation_schedules WHERE study_id != ?", (study_id,)
+    ).fetchone()
+    return int(row[0])
+
+
 def insert_schedule(conn: sqlite3.Connection, schedule: GeneratedSchedule) -> StoredSchedule:
     """Persist ``schedule`` and its items in one transaction, then commit.
 
     An existing schedule for the clinician is never overwritten: identical
-    → returned unchanged (nothing written); different →
+    → returned unchanged (nothing written, any open transaction left to the
+    caller); different →
     :class:`RandomisationIntegrityError`. Any failure rolls back, so no
     header ever exists without its items. Joins a transaction the caller
     already opened (e.g. ``BEGIN IMMEDIATE``) and commits it.
@@ -138,7 +147,7 @@ def insert_schedule(conn: sqlite3.Connection, schedule: GeneratedSchedule) -> St
                     f"{existing.schedule.schedule_id[:12]}…; refusing to replace it "
                     f"with {schedule.schedule_id[:12]}…"
                 )
-            conn.rollback()
+            # Nothing written: a joined transaction stays the caller's to end.
             return existing
 
         conn.execute(

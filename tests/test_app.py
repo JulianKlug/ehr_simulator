@@ -15,7 +15,6 @@ exceptions surface as ``app.boot.failed``.
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
@@ -25,22 +24,16 @@ from fastapi.testclient import TestClient
 
 from ehr_simulator.db import MIGRATIONS
 from ehr_simulator.web.app import app_from_study_config, create_app
+from tests.conftest import drop_append_only_triggers
 
 
 def _seed_and_cookie(tmp_db_path: Path, client: TestClient) -> str:
-    from ehr_simulator.db import apply_migrations, connect
+    from ehr_simulator.db import apply_migrations, clinicians, connect
 
-    name = "Dr. Test"
-    name_normalized = " ".join(name.casefold().split())
-    clinician_id = hashlib.sha256(name_normalized.encode("utf-8")).hexdigest()[:16]
     tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(tmp_db_path)
     apply_migrations(conn)
-    conn.execute(
-        "INSERT OR IGNORE INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
-        (clinician_id, name_normalized),
-    )
-    conn.commit()
+    clinician_id = clinicians.lookup_or_create(conn, "Dr. Test")
     conn.close()
     client.cookies.set("ehrsim_clinician_id", clinician_id)
     return clinician_id
@@ -56,22 +49,15 @@ def _pre_seed(tmp_db_path: Path, study_path: Path, questions_path: Path) -> str:
     without an active configuration.
     """
     from ehr_simulator.config import load_study_config
-    from ehr_simulator.db import apply_migrations, connect, study_identity
+    from ehr_simulator.db import apply_migrations, clinicians, connect, study_identity
     from tests.conftest import _activate_configuration
 
     study = load_study_config(study_path)
-    name = "Dr. Test"
-    name_normalized = " ".join(name.casefold().split())
-    clinician_id = hashlib.sha256(name_normalized.encode("utf-8")).hexdigest()[:16]
     tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(tmp_db_path)
     apply_migrations(conn)
     study_identity.bind(conn, study.study_id)
-    conn.execute(
-        "INSERT OR IGNORE INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
-        (clinician_id, name_normalized),
-    )
-    conn.commit()
+    clinician_id = clinicians.lookup_or_create(conn, "Dr. Test")
     conn.close()
     _activate_configuration(
         tmp_db_path, study_path, questions_path, version="v1", description="test activation"
@@ -500,13 +486,8 @@ timepoints: [0, 60, 180]
 
 
 def _seed_clinician_row(db_path: Path, *, bound_study_id: str | None = None) -> str:
-    import hashlib
+    from ehr_simulator.db import apply_migrations, clinicians, connect, study_identity
 
-    from ehr_simulator.db import apply_migrations, connect, study_identity
-
-    name = "Dr. Preexisting"
-    nn = " ".join(name.casefold().split())
-    cid = hashlib.sha256(nn.encode("utf-8")).hexdigest()[:16]
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = connect(db_path)
     apply_migrations(conn)
@@ -514,11 +495,7 @@ def _seed_clinician_row(db_path: Path, *, bound_study_id: str | None = None) -> 
         # Bind FIRST: bind refuses to claim a non-empty unbound DB, so the
         # preexisting clinician row only exists after the identity is set.
         study_identity.bind(conn, bound_study_id)
-    conn.execute(
-        "INSERT INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
-        (cid, nn),
-    )
-    conn.commit()
+    cid = clinicians.lookup_or_create(conn, "Dr. Preexisting")
     conn.close()
     return cid
 
@@ -808,6 +785,7 @@ def test_lifespan_refuses_corrupted_active_snapshot(
     _pre_seed(tmp_db_path, study_path, questions_path)
     conn = connect(tmp_db_path)
     stored = conn.execute(f"SELECT {column} FROM configuration_history").fetchone()[0]
+    drop_append_only_triggers(conn)
     conn.execute(f"UPDATE configuration_history SET {column} = ?", (corrupt(stored),))  # type: ignore[operator]
     conn.commit()
     conn.close()

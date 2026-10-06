@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 from playwright.sync_api import BrowserContext, Page
 
-from tests.e2e.test_telemetry_walk import _login_and_start
+from tests.support.browser import _login_and_start
 
 GRANTED = '#patient-view[data-tab-state="granted"]'
 REFUSED = '#patient-view[data-tab-state="refused"]'
@@ -86,3 +86,22 @@ def test_second_tab_is_blocked_and_audited(
         time.sleep(0.25)
     early = _count(telemetry_db, sql + f" AND CAST(client_ts AS TEXT) < '{retried_at}'")
     assert early == 0, "events from the refused period were reported"
+
+
+@pytest.mark.e2e
+def test_autosave_cancelled_by_a_lost_lease_shows_save_failed(
+    page: Page, live_telemetry_server: str, telemetry_db: Path
+) -> None:
+    """A debounced free-text save that fires after the lease is lost is
+    cancelled client side: its badge must say so, never stay silent."""
+    _login_and_start(page, live_telemetry_server, "Dr. Lost Lease")
+    page.wait_for_selector(GRANTED)
+    form = 'form.question[data-response-type="free-text"]'
+
+    answers_before = _count(telemetry_db, "SELECT COUNT(*) FROM answers")
+    page.fill(f"{form} textarea", "typed before the lease was lost")
+    page.evaluate("document.dispatchEvent(new CustomEvent('ehrsim:tabconflict'))")
+    page.wait_for_selector(REFUSED)
+
+    page.wait_for_selector(f'{form} .answer-status[data-state="error"]')
+    assert _count(telemetry_db, "SELECT COUNT(*) FROM answers") == answers_before

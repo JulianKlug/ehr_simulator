@@ -16,6 +16,9 @@ from typer.testing import CliRunner
 
 from ehr_simulator import cli
 from ehr_simulator.db import connect
+from ehr_simulator.pseudonym import pseudonymize
+from tests.conftest import drop_append_only_triggers
+from tests.support.cli import _console_script
 
 
 @pytest.fixture
@@ -25,7 +28,7 @@ def captured_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:
     def fake_run(app: object, **kwargs: Any) -> None:
         calls.append({"app": app, **kwargs})
 
-    monkeypatch.setattr(cli.uvicorn, "run", fake_run)
+    monkeypatch.setattr(cli.serve.uvicorn, "run", fake_run)
     return calls
 
 
@@ -289,7 +292,7 @@ def test_cli_migrate_forward_then_idempotent(runner: CliRunner, tmp_path: Path) 
     db_path = tmp_path / "x.db"
     first = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
     assert first.exit_code == 0, first.stderr
-    assert "Applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]" in first.stdout
+    assert "Applied migrations: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]" in first.stdout
 
     second = runner.invoke(cli.app_typer, ["migrate", "--db-path", str(db_path)])
     assert second.exit_code == 0, second.stderr
@@ -477,6 +480,42 @@ def test_cli_reset_progress_rewinds_walk(
     conn.close()
 
 
+def test_reset_progress_event_failure_leaves_walk_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One transaction: a failed ``progress.reset`` event rolls back the
+    answer deletion and the frontier rewind."""
+    from ehr_simulator import cli_support
+    from ehr_simulator.db import events, progress
+
+    db_path = tmp_path / "walk.db"
+    cid = _walked_db(db_path, unlocked=2, completed=True)
+
+    def _fail(*_args: Any, **_kwargs: Any) -> int:
+        raise sqlite3.OperationalError("injected event failure")
+
+    monkeypatch.setattr(events, "append", _fail)
+    conn = connect(db_path)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="injected"):
+            cli_support.reset_progress(
+                conn,
+                clinician_name="Dr. Test",
+                patient_id="synth_001",
+                to_t_index=0,
+                timepoints=[0.0, 60.0, 180.0],
+            )
+
+        row = progress.fetch(conn, clinician_id=cid, patient_id="synth_001")
+        answers_left = conn.execute("SELECT COUNT(*) FROM answers").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert row.unlocked_t_index == 2
+    assert row.completed_at is not None
+    assert answers_left == 3
+
+
 @pytest.mark.parametrize(
     ("clinician", "patient", "to_t_index", "fragment"),
     [
@@ -558,7 +597,7 @@ def test_cli_reset_progress_refuses_stale_schema(
         ],
     )
     assert result.exit_code == 1
-    assert "pending migrations [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]" in result.stderr
+    assert "pending migrations [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]" in result.stderr
     conn = connect(db_path)
     assert conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0] == 1
     conn.close()
@@ -570,6 +609,7 @@ def test_cli_reset_progress_refuses_stale_schema(
 
 STUDY_CONFIG = "study_synthetic.yaml"
 QUESTIONS = "questions.yaml"
+PSEUDONYM_SECRET_NAME = "pseudonym.secret"
 FINAL_INDEX = 2  # len([0, 60, 180]) - 1
 
 EXPECTED_ANSWER_HEADER = (
@@ -621,6 +661,8 @@ def _export_args(study_fixture_dir: Path, tmp_db_path: Path, *extra: str) -> lis
         str(study_fixture_dir / QUESTIONS),
         "--db-path",
         str(tmp_db_path),
+        "--pseudonym-secret",
+        str(tmp_db_path.parent / PSEUDONYM_SECRET_NAME),
         *extra,
     ]
 
@@ -795,10 +837,83 @@ def test_cli_export_answers_keyfile_writes_mode_0600(
     assert result.exit_code == 0, result.stderr
     assert stat.S_IMODE(keyfile.stat().st_mode) == 0o600
     assert hashlib.sha256(b"dr. cli").hexdigest()[:16] == clinician_id
+    secret = (tmp_db_path.parent / PSEUDONYM_SECRET_NAME).read_bytes()
+    pseudonym = pseudonymize(secret, clinician_id)
     assert keyfile.read_text(encoding="utf-8") == (
-        f"clinician_id,name_normalized\n{clinician_id},dr. cli\n"
+        f"clinician_id,name_normalized\n{pseudonym},dr. cli\n"
     )
+    assert pseudonym in (tmp_path / "answers.csv").read_text(encoding="utf-8")
+    assert clinician_id not in (tmp_path / "answers.csv").read_text(encoding="utf-8")
     assert "Wrote keyfile" in result.stdout
+
+
+def test_cli_export_answers_creates_the_secret_mode_0600(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+) -> None:
+    import stat
+
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    first, second = tmp_path / "first.csv", tmp_path / "second.csv"
+
+    for out in (first, second):
+        result = runner.invoke(
+            cli.app_typer, _export_args(study_fixture_dir, tmp_db_path, "--out", str(out))
+        )
+        assert result.exit_code == 0, result.stderr
+
+    secret = tmp_db_path.parent / PSEUDONYM_SECRET_NAME
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+    assert first.read_text(encoding="utf-8") == second.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("clash", ["--out", "--keyfile"])
+def test_cli_export_answers_refuses_secret_at_an_output_path(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+    clash: str,
+) -> None:
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    secret = str(tmp_db_path.parent / PSEUDONYM_SECRET_NAME)
+    paths = {"--out": str(tmp_path / "answers.csv"), "--keyfile": str(tmp_path / "key.csv")}
+    paths[clash] = secret
+
+    result = runner.invoke(
+        cli.app_typer,
+        _export_args(study_fixture_dir, tmp_db_path, *(x for kv in paths.items() for x in kv)),
+    )
+
+    assert result.exit_code == 1
+    assert "pseudonym secret" in result.stderr
+    assert not (tmp_db_path.parent / PSEUDONYM_SECRET_NAME).exists()
+
+
+def test_cli_export_answers_refuses_a_loose_secret(
+    runner: CliRunner,
+    db: sqlite3.Connection,
+    tmp_db_path: Path,
+    tmp_path: Path,
+    study_fixture_dir: Path,
+) -> None:
+    _seed_completed_walk(db, "Dr. CLI", "synth_001", live_hash=_live_hash(study_fixture_dir))
+    secret = tmp_db_path.parent / PSEUDONYM_SECRET_NAME
+    secret.write_bytes(bytes(32))
+    secret.chmod(0o644)
+    out = tmp_path / "answers.csv"
+
+    result = runner.invoke(
+        cli.app_typer, _export_args(study_fixture_dir, tmp_db_path, "--out", str(out))
+    )
+
+    assert result.exit_code == 1
+    assert "0600" in result.stderr
+    assert not out.exists()
 
 
 def test_cli_export_answers_same_path_for_out_and_keyfile_refused(
@@ -961,14 +1076,6 @@ def test_cli_export_answers_invisible_to_uncommitted_writer(
 # ---------------------------------------------------------------------------
 
 
-def _console_script() -> Path:
-    import sys
-
-    exe = Path(sys.executable).parent / "ehr-simulator"
-    assert exe.is_file(), "installed console script missing"
-    return exe
-
-
 def test_cli_rejection_reaches_os_process_status_1(
     study_fixture_dir: Path,
 ) -> None:
@@ -1081,6 +1188,49 @@ def test_cli_divergence_view_refuses_identity_mismatch(
     assert not out.exists()
 
 
+def test_cli_divergence_view_adapter_error_is_exit_1(
+    runner: CliRunner,
+    study_fixture_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dataset that fails its adapter contract is an operator error, not a traceback."""
+    from ehr_simulator import cli_support
+    from ehr_simulator.ingestion.exceptions import AdapterError
+
+    db_path = tmp_path / "gate.db"
+    _gate_db(db_path, study_id="fixture_synthetic")
+
+    def broken_loader(*_args, **_kwargs):
+        def load():
+            raise AdapterError("scalar_ts violates the canonical shape")
+
+        return load
+
+    monkeypatch.setattr(cli_support, "build_dataset_loader", broken_loader)
+    out = tmp_path / "fig.svg"
+
+    result = runner.invoke(
+        cli.app_typer,
+        [
+            "divergence-view",
+            str(study_fixture_dir / STUDY_CONFIG),
+            str(study_fixture_dir / QUESTIONS),
+            "--patient",
+            "synth_001",
+            "--db-path",
+            str(db_path),
+            "--out",
+            str(out),
+        ],
+    )
+
+    assert result.exit_code == 1
+    assert "Error: scalar_ts violates the canonical shape" in result.stderr
+    assert not isinstance(result.exception, AdapterError)
+    assert not out.exists()
+
+
 @pytest.mark.parametrize("bound_to", [None, "some_other_study"])
 def test_cli_reset_progress_refuses_identity_mismatch(
     runner: CliRunner, study_fixture_dir: Path, tmp_path: Path, bound_to: str | None
@@ -1172,6 +1322,7 @@ def test_cli_preview_scratch_db_is_recreated_on_repeated_runs(
         # S11b: the scratch DB also carries a configuration_history row that
         # foreign-keys to the identity; evict it before simulating the
         # foreign rebind.
+        drop_append_only_triggers(conn)
         conn.execute("DELETE FROM active_configuration")
         conn.execute("DELETE FROM configuration_history")
         conn.execute("UPDATE study_identity SET study_id = 'other_fixture'")

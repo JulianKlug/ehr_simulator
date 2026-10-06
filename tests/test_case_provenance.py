@@ -53,7 +53,12 @@ class Config:
 
 
 @dataclass(frozen=True)
-class Harness:
+class ProvenanceHarness:
+    """Fixed v1/v2 pair on a non-randomised study; GET-bootstrapped cases.
+
+    Not ``tests.support.cases.Harness``: no profile/tab adoption, no Start case.
+    """
+
     tmp_path: Path
     db_path: Path
     clinician_id: str
@@ -130,20 +135,20 @@ def _write_v2(tmp_path: Path, study_fixture_dir: Path) -> tuple[Path, Path]:
 
 
 @pytest.fixture
-def harness(tmp_path: Path, study_fixture_dir: Path) -> Harness:
+def harness(tmp_path: Path, study_fixture_dir: Path) -> ProvenanceHarness:
     v1 = Config(
         "v1", study_fixture_dir / "study_synthetic.yaml", study_fixture_dir / "questions.yaml"
     )
     v2 = Config("v2", *_write_v2(tmp_path, study_fixture_dir))
     db_path = tmp_path / "study.db"
     clinician_id = _seed_clinician(db_path, study_id=load_study_config(v1.study_yaml).study_id)
-    h = Harness(tmp_path, db_path, clinician_id, v1, v2)
+    h = ProvenanceHarness(tmp_path, db_path, clinician_id, v1, v2)
     h.activate(v1)
     return h
 
 
 @pytest.fixture
-def upgraded(harness: Harness) -> Harness:
+def upgraded(harness: ProvenanceHarness) -> ProvenanceHarness:
     """v1 case opened on REMOVED_PID, then v2 activated (server stopped)."""
     with harness.boot(harness.v1) as client:
         assert client.get(f"/patient/{REMOVED_PID}/timepoint/0").status_code == HTTP_OK
@@ -163,7 +168,7 @@ def _answer(client: TestClient, patient_id: str, question_id: str, value: str):
 # ---------------------------------------------------------------------------
 
 
-def test_new_case_receives_active_version(harness: Harness) -> None:
+def test_new_case_receives_active_version(harness: ProvenanceHarness) -> None:
     with harness.boot(harness.v1) as client:
         assert client.get(f"/patient/{KEPT_PID}/timepoint/0").status_code == HTTP_OK
 
@@ -172,7 +177,7 @@ def test_new_case_receives_active_version(harness: Harness) -> None:
         assert harness.provenance(table, KEPT_PID) == expected
 
 
-def test_existing_case_keeps_version_after_later_activation(upgraded: Harness) -> None:
+def test_existing_case_keeps_version_after_later_activation(upgraded: ProvenanceHarness) -> None:
     with upgraded.boot(upgraded.v2) as client:
         assert client.get(f"/patient/{REMOVED_PID}/timepoint/0").status_code == HTTP_OK
 
@@ -181,7 +186,7 @@ def test_existing_case_keeps_version_after_later_activation(upgraded: Harness) -
         assert upgraded.provenance(table, REMOVED_PID) == expected
 
 
-def test_new_case_after_activation_receives_new_version(upgraded: Harness) -> None:
+def test_new_case_after_activation_receives_new_version(upgraded: ProvenanceHarness) -> None:
     with upgraded.boot(upgraded.v2) as client:
         assert client.get(f"/patient/{KEPT_PID}/timepoint/0").status_code == HTTP_OK
 
@@ -193,7 +198,7 @@ def test_new_case_after_activation_receives_new_version(upgraded: Harness) -> No
 # ---------------------------------------------------------------------------
 
 
-def test_historical_case_uses_its_questions(upgraded: Harness) -> None:
+def test_historical_case_uses_its_questions(upgraded: ProvenanceHarness) -> None:
     question_marker = f'data-question-id="{DROPPED_QUESTION}"'
     with upgraded.boot(upgraded.v2) as client:
         old_case = client.get(f"/patient/{REMOVED_PID}/timepoint/0")
@@ -208,7 +213,7 @@ def test_historical_case_uses_its_questions(upgraded: Harness) -> None:
     assert upgraded.provenance("answers", REMOVED_PID) == ("v1", upgraded.v1.config_hash)
 
 
-def test_historical_case_uses_its_timepoints(upgraded: Harness) -> None:
+def test_historical_case_uses_its_timepoints(upgraded: ProvenanceHarness) -> None:
     with upgraded.boot(upgraded.v2) as client:
         old_case = client.get(f"/patient/{REMOVED_PID}/timepoint/99")
         new_case = client.get(f"/patient/{KEPT_PID}/timepoint/99")
@@ -218,12 +223,42 @@ def test_historical_case_uses_its_timepoints(upgraded: Harness) -> None:
     assert "valid: 0…1" in new_case.text  # v2: two timepoints
 
 
+def test_progress_links_use_the_case_pinned_timepoints(
+    harness: ProvenanceHarness, study_fixture_dir: Path
+) -> None:
+    # v1 case at its last timepoint; active v2 keeps every patient, two timepoints.
+    study = yaml.safe_load((study_fixture_dir / "study_synthetic.yaml").read_text())
+    study["timepoints"] = V2_TIMEPOINTS
+    study_path = harness.tmp_path / "study_v2_all_patients.yaml"
+    study_path.write_text(yaml.safe_dump(study))
+    v2 = Config("v2", study_path, harness.v1.questions_yaml)
+
+    with harness.boot(harness.v1) as client:
+        assert client.get(f"/patient/{REMOVED_PID}/timepoint/0").status_code == HTTP_OK
+    v1_last_t_index = 2
+    harness.execute(
+        "INSERT INTO progress (clinician_id, patient_id, unlocked_t_index, config_hash, "
+        "config_version) VALUES (?, ?, ?, ?, 'v1')",
+        (harness.clinician_id, REMOVED_PID, v1_last_t_index, harness.v1.config_hash),
+    )
+    harness.activate(v2)
+    frontier_link = f"/patient/{REMOVED_PID}/timepoint/{v1_last_t_index}?chrome=epic"
+
+    with harness.boot(v2) as client:
+        index = client.get("/")
+        jumper = client.get(f"/patient/{KEPT_PID}/timepoint/0")
+
+    assert frontier_link in index.text
+    assert "in progress · t 3/3" in index.text
+    assert frontier_link in jumper.text
+
+
 # ---------------------------------------------------------------------------
 # #17-#20 provenance integrity on sessions, progress and answers
 # ---------------------------------------------------------------------------
 
 
-def test_session_provenance_mismatch_is_refused(upgraded: Harness) -> None:
+def test_session_provenance_mismatch_is_refused(upgraded: ProvenanceHarness) -> None:
     upgraded.execute(
         "UPDATE sessions SET config_version = 'v2' WHERE patient_id = ?", (REMOVED_PID,)
     )
@@ -235,7 +270,7 @@ def test_session_provenance_mismatch_is_refused(upgraded: Harness) -> None:
     assert upgraded.count("sessions", REMOVED_PID) == 1
 
 
-def test_progress_provenance_mismatch_is_refused(upgraded: Harness) -> None:
+def test_progress_provenance_mismatch_is_refused(upgraded: ProvenanceHarness) -> None:
     upgraded.execute(
         "INSERT INTO progress (clinician_id, patient_id, unlocked_t_index, config_hash, "
         "config_version) VALUES (?, ?, 0, ?, 'v2')",
@@ -248,7 +283,7 @@ def test_progress_provenance_mismatch_is_refused(upgraded: Harness) -> None:
     assert r.status_code == HTTP_INTEGRITY_ERROR
 
 
-def test_progress_writes_cannot_change_provenance(upgraded: Harness) -> None:
+def test_progress_writes_cannot_change_provenance(upgraded: ProvenanceHarness) -> None:
     v1_hash = upgraded.v1.config_hash
     conn = connect(upgraded.db_path)
     try:
@@ -272,7 +307,7 @@ def test_progress_writes_cannot_change_provenance(upgraded: Harness) -> None:
     assert (row.config_version, row.config_hash) == ("v1", v1_hash)
 
 
-def test_answer_upsert_on_historical_case_keeps_provenance(upgraded: Harness) -> None:
+def test_answer_upsert_on_historical_case_keeps_provenance(upgraded: ProvenanceHarness) -> None:
     with upgraded.boot(upgraded.v2) as client:
         assert _answer(client, REMOVED_PID, "deterioration_6h", "Yes").status_code == HTTP_OK
         assert _answer(client, REMOVED_PID, "deterioration_6h", "No").status_code == HTTP_OK
@@ -280,7 +315,7 @@ def test_answer_upsert_on_historical_case_keeps_provenance(upgraded: Harness) ->
     assert upgraded.provenance("answers", REMOVED_PID) == ("v1", upgraded.v1.config_hash)
 
 
-def test_answer_provenance_mismatch_refuses_write(upgraded: Harness) -> None:
+def test_answer_provenance_mismatch_refuses_write(upgraded: ProvenanceHarness) -> None:
     with upgraded.boot(upgraded.v2) as client:
         assert _answer(client, REMOVED_PID, "deterioration_6h", "Yes").status_code == HTTP_OK
     upgraded.execute(
@@ -307,7 +342,7 @@ def test_answer_provenance_mismatch_refuses_write(upgraded: Harness) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_removed_assigned_patient_remains_accessible(upgraded: Harness) -> None:
+def test_removed_assigned_patient_remains_accessible(upgraded: ProvenanceHarness) -> None:
     with upgraded.boot(upgraded.v2) as client:
         index = client.get("/")
         case = client.get(f"/patient/{REMOVED_PID}/timepoint/0")
@@ -324,7 +359,9 @@ def test_removed_assigned_patient_remains_accessible(upgraded: Harness) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_stale_server_refuses_new_case_after_external_activation(harness: Harness) -> None:
+def test_stale_server_refuses_new_case_after_external_activation(
+    harness: ProvenanceHarness,
+) -> None:
     with harness.boot(harness.v1) as client:
         assert client.get(f"/patient/{REMOVED_PID}/timepoint/0").status_code == HTTP_OK
 
@@ -374,7 +411,7 @@ def test_removed_assigned_patient_loaded_for_filtered_dataset(
     v2 = Config("v2", _geneva_study(tmp_path, study_fixture_dir, "g2.yaml", [kept]), questions)
     db_path = tmp_path / "geneva.db"
     clinician_id = _seed_clinician(db_path, study_id=load_study_config(v1.study_yaml).study_id)
-    h = Harness(tmp_path, db_path, clinician_id, v1, v2)
+    h = ProvenanceHarness(tmp_path, db_path, clinician_id, v1, v2)
 
     h.activate(v1)
     with h.boot(v1) as client:

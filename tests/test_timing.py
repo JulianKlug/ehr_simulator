@@ -11,7 +11,7 @@ Exercises the exact rule set the export relies on:
 7. later repeats never replace the first completed interval;
 8. elapsed_seconds is integer wall-clock seconds, not dwell time;
 9. derivation is scoped to the requested clinician/patient/timepoint;
-10. ordering is by server_ts then event id.
+10. ordering is by event id (arrival order).
 """
 
 from __future__ import annotations
@@ -65,8 +65,8 @@ def test_zero_second_interval_is_fine() -> None:
 
 
 def test_earliest_enter_is_the_start_even_if_listed_later() -> None:
-    # Stream order is (server_ts, event_id), not call order: the enter at
-    # BASE is the start even though it is passed second here.
+    # Stream order is event id, not call order: the enter with id 1 is the
+    # start even though it is passed second here.
     out = derive(
         ev(2, "timepoint.enter", BASE + MIN),
         ev(1, "timepoint.enter", BASE),
@@ -140,6 +140,13 @@ def test_end_before_start_raises_timing_error() -> None:
             patient_id=PID,
             timepoint=T,
         )
+
+
+def test_clock_step_back_raises_timing_error() -> None:
+    # The exit arrived after the enter (event id) but the server clock
+    # stepped back: pairing follows arrival order, so the inversion surfaces.
+    with pytest.raises(timing.TimingError):
+        derive(ev(1, "timepoint.enter", BASE), ev(2, "timepoint.exit", BASE - SEC(1)))
 
 
 def test_scoped_to_clinician_patient_and_timepoint() -> None:

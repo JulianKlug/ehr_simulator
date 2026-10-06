@@ -3,12 +3,13 @@
 ``lookup_or_create`` is the only write path; ``lookup`` (S9b) is its read-only
 sibling for operator commands. It normalizes the raw name
 (``" ".join(raw.casefold().split())`` — case-fold + collapse whitespace),
-truncates SHA256 to 16 hex chars for the ``clinician_id``, and INSERT-OR-IGNOREs
-into ``clinicians``. The function is called from the ``/login`` POST handler;
-the optional ``known_clinicians`` set is the lifespan-scoped cache the
-``_require_clinician`` preamble reads from (review-fix R11).
+truncates SHA256 to 16 hex chars for the ``clinician_id``, and inserts into
+``clinicians`` (``ON CONFLICT(clinician_id) DO NOTHING``). The function is
+called from the ``/login`` POST handler; the optional ``known_clinicians``
+set is the lifespan-scoped cache the ``_require_clinician`` preamble reads
+from (review-fix R11).
 
-Two round-trips on existing clinician (INSERT-OR-IGNORE returns no row,
+Two round-trips on existing clinician (the insert does nothing,
 fallback SELECT resolves the canonical id). Fine at the pilot scale of one
 POST per session.
 """
@@ -36,8 +37,10 @@ def lookup_or_create(
     if not name_normalized:
         raise ValueError("name must be non-empty after trimming")
     clinician_id = hashlib.sha256(name_normalized.encode("utf-8")).hexdigest()[:16]
+    # Only an existing id is benign; any other constraint failure raises.
     conn.execute(
-        "INSERT OR IGNORE INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
+        "INSERT INTO clinicians (clinician_id, name_normalized) VALUES (?, ?) "
+        "ON CONFLICT(clinician_id) DO NOTHING",
         (clinician_id, name_normalized),
     )
     conn.commit()
@@ -81,5 +84,13 @@ def lookup(conn: sqlite3.Connection, raw_name: str) -> str | None:
         return None
     row = conn.execute(
         "SELECT clinician_id FROM clinicians WHERE name_normalized = ?", (name_normalized,)
+    ).fetchone()
+    return None if row is None else row[0]
+
+
+def fetch_name(conn: sqlite3.Connection, clinician_id: str) -> str | None:
+    """The clinician's case-folded display name, or ``None`` if unknown."""
+    row = conn.execute(
+        "SELECT name_normalized FROM clinicians WHERE clinician_id = ?", (clinician_id,)
     ).fetchone()
     return None if row is None else row[0]

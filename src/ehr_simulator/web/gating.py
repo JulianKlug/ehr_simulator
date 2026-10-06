@@ -122,23 +122,27 @@ def progress_overview(
     clinician_id: str,
     patient_ids: Sequence[str],
     timepoint_count: int,
+    timepoint_counts: Mapping[str, int] | None = None,
 ) -> dict[str, PatientProgress]:
     """Per-patient frontier for the index page and the patient jumper.
 
     Total over ``patient_ids`` (a missing row is ``not_started``), so the
-    templates can index it without a Jinja ``Undefined``.
+    templates can index it without a Jinja ``Undefined``. ``timepoint_counts``
+    overrides ``timepoint_count`` per patient: a case pinned to an older
+    configuration version clamps to its own timepoints (S11b).
     """
+    counts = timepoint_counts or {}
     rows = progress.list_for_clinician(conn, clinician_id)
-    last = max(timepoint_count - 1, 0)
     overview: dict[str, PatientProgress] = {}
     for pid in patient_ids:
+        count = counts.get(pid, timepoint_count)
         row = rows.get(pid)
         if row is None:
-            overview[pid] = PatientProgress("not_started", NOT_STARTED_T_INDEX, timepoint_count)
+            overview[pid] = PatientProgress("not_started", NOT_STARTED_T_INDEX, count)
             continue
-        unlocked = min(row.unlocked_t_index, last)
+        unlocked = min(row.unlocked_t_index, max(count - 1, 0))
         state: ProgressState = "complete" if row.completed_at is not None else "in_progress"
-        overview[pid] = PatientProgress(state, unlocked, timepoint_count)
+        overview[pid] = PatientProgress(state, unlocked, count)
     return overview
 
 

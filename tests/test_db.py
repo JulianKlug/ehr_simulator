@@ -154,7 +154,7 @@ def test_apply_migrations_forward(tmp_db_path: Path) -> None:
         ).fetchall()
     finally:
         conn.close()
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     assert [(r[0], r[1]) for r in rows] == [
         (1, "initial"),
         (2, "sessions_open_unique"),
@@ -170,6 +170,7 @@ def test_apply_migrations_forward(tmp_db_path: Path) -> None:
         (12, "s11j_browser_telemetry"),
         (13, "s11m_case_tab_leases"),
         (14, "s11p_clinician_profiles"),
+        (15, "integrity_hardening"),
     ]
 
 
@@ -200,7 +201,7 @@ def test_apply_migrations_recovers_from_partial_apply(tmp_db_path: Path) -> None
         migration_rows = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
     finally:
         conn.close()
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     expected = {
         "clinicians",
         "sessions",
@@ -247,7 +248,7 @@ def test_apply_migrations_recovers_from_partial_migration_5(tmp_db_path: Path) -
     finally:
         half.close()
 
-    assert versions == [5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    assert versions == [5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     assert all(cols.count("config_version") == 1 for cols in columns.values()), columns
 
 
@@ -681,7 +682,7 @@ def test_migration_2_rejects_second_open_session(tmp_db_path: Path) -> None:
     )
     v1.execute("INSERT INTO schema_migrations (version, name) VALUES (1, 'initial')")
     v1.commit()
-    assert apply_migrations(v1) == [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    assert apply_migrations(v1) == [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     assert apply_migrations(v1) == []
 
     cid = clinicians.lookup_or_create(v1, "Dr. Smith")
@@ -734,7 +735,7 @@ def _v2_db(tmp_db_path: Path) -> sqlite3.Connection:
 
 def test_migration_3_creates_progress_and_is_idempotent(tmp_db_path: Path) -> None:
     v2 = _v2_db(tmp_db_path)
-    assert apply_migrations(v2) == [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+    assert apply_migrations(v2) == [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
     assert apply_migrations(v2) == []
     tables = {r[0] for r in v2.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert "progress" in tables
@@ -1301,7 +1302,7 @@ def test_migration_4_creates_exactly_study_identity_table(tmp_db_path: Path) -> 
     never populates it, and is safe to re-apply."""
     conn = connect(tmp_db_path)
     try:
-        assert apply_migrations(conn) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14]
+        assert apply_migrations(conn) == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
         tables = {
             r[0]
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
@@ -1519,3 +1520,124 @@ class TestStudyIdentityDao:
             assert si.fetch(conn) is None
         finally:
             conn.close()
+
+
+# ---------------------------------------------------------------------------
+# DAOs never end a transaction they did not open
+# ---------------------------------------------------------------------------
+
+_PENDING_CLINICIAN_COUNT = "SELECT COUNT(*) FROM clinicians WHERE clinician_id = 'pending'"
+
+
+def _open_caller_write(conn: sqlite3.Connection) -> None:
+    conn.execute("INSERT INTO clinicians (clinician_id, name_normalized) VALUES ('pending', 'p')")
+
+
+def _assert_caller_write_still_pending(conn: sqlite3.Connection) -> None:
+    assert conn.in_transaction
+    assert conn.execute(_PENDING_CLINICIAN_COUNT).fetchone()[0] == 1
+    conn.rollback()
+    assert conn.execute(_PENDING_CLINICIAN_COUNT).fetchone()[0] == 0
+
+
+def test_lifecycle_cas_miss_never_commits_caller_writes(db: sqlite3.Connection) -> None:
+    from datetime import UTC, datetime
+
+    from ehr_simulator.db import case_lifecycle
+    from ehr_simulator.db.exceptions import CaseLifecycleError
+
+    _open_caller_write(db)
+    with pytest.raises(CaseLifecycleError):
+        case_lifecycle.touch(db, clinician_id="c", patient_id="p", now=datetime.now(UTC))
+
+    _assert_caller_write_still_pending(db)
+
+
+def test_lifecycle_cas_miss_ends_its_own_empty_transaction(db: sqlite3.Connection) -> None:
+    from datetime import UTC, datetime
+
+    from ehr_simulator.db import case_lifecycle
+    from ehr_simulator.db.exceptions import CaseLifecycleError
+
+    with pytest.raises(CaseLifecycleError):
+        case_lifecycle.touch(db, clinician_id="c", patient_id="p", now=datetime.now(UTC))
+
+    assert not db.in_transaction
+
+
+def test_replacement_activation_miss_never_commits_caller_writes(db: sqlite3.Connection) -> None:
+    from datetime import UTC, datetime
+
+    from ehr_simulator.db import replacements
+    from ehr_simulator.db.exceptions import CaseActivationError
+
+    _open_caller_write(db)
+    with pytest.raises(CaseActivationError):
+        replacements.mark_activated(db, "unknown", now=datetime.now(UTC))
+
+    _assert_caller_write_still_pending(db)
+
+
+def test_replacement_activation_miss_ends_its_own_empty_transaction(
+    db: sqlite3.Connection,
+) -> None:
+    from datetime import UTC, datetime
+
+    from ehr_simulator.db import replacements
+    from ehr_simulator.db.exceptions import CaseActivationError
+
+    with pytest.raises(CaseActivationError):
+        replacements.mark_activated(db, "unknown", now=datetime.now(UTC))
+
+    assert not db.in_transaction
+
+
+def test_clinician_create_swallows_only_id_conflicts(db: sqlite3.Connection) -> None:
+    # Same id → existing row reused; a name held by another id is corruption.
+    first = clinicians.lookup_or_create(db, "Dr. X")
+    assert clinicians.lookup_or_create(db, "dr.  x") == first
+
+    db.execute("DELETE FROM clinicians")
+    db.execute("INSERT INTO clinicians (clinician_id, name_normalized) VALUES ('other', 'dr. x')")
+    db.commit()
+
+    with pytest.raises(sqlite3.IntegrityError):
+        clinicians.lookup_or_create(db, "Dr. X")
+
+
+@pytest.mark.parametrize(
+    ("stored", "expected"),
+    [
+        # CURRENT_TIMESTAMP / to_db_timestamp shapes stay naive UTC.
+        ("2026-01-02 03:04:05", "2026-01-02T03:04:05"),
+        ("2026-01-02 03:04:05.5", "2026-01-02T03:04:05.500000"),
+        # S11j browser client_ts: ISO with T and an offset reads aware.
+        ("2026-01-02T03:04:05Z", "2026-01-02T03:04:05+00:00"),
+        ("2026-01-02T03:04:05.123+02:00", "2026-01-02T03:04:05.123000+02:00"),
+    ],
+)
+def test_timestamp_columns_read_both_stored_shapes(
+    tmp_db_path: Path, stored: str, expected: str
+) -> None:
+    conn = connect(tmp_db_path)
+    try:
+        conn.execute("CREATE TABLE t (ts TIMESTAMP)")
+        conn.execute("INSERT INTO t VALUES (?)", (stored,))
+        value = conn.execute("SELECT ts FROM t").fetchone()[0]
+    finally:
+        conn.close()
+
+    assert value.isoformat() == expected
+
+
+def test_datetime_parameters_store_the_space_separated_form(tmp_db_path: Path) -> None:
+    from datetime import datetime
+
+    conn = connect(tmp_db_path)
+    try:
+        moment = datetime(2026, 1, 2, 3, 4, 5, 6)
+        stored = conn.execute("SELECT ?", (moment,)).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert stored == "2026-01-02 03:04:05.000006"

@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 from structlog.testing import capture_logs
 
 from ehr_simulator.db import progress
-from ehr_simulator.web import routes
+from ehr_simulator.web import patient_view
 from tests.conftest import answer_all_required, seed_progress
 
 PID = "synth_001"
@@ -92,13 +92,13 @@ def test_gate_beyond_frontier_writes_nothing(
 ) -> None:
     """review-fix R20 + R21: no slice, no arm lock, no session, no event."""
     calls: list[tuple] = []
-    real = routes.slice_to_timepoint
+    real = patient_view.slice_to_timepoint
 
     def _counting(*args, **kwargs):
         calls.append(args)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(routes, "slice_to_timepoint", _counting)
+    monkeypatch.setattr(patient_view, "slice_to_timepoint", _counting)
     r = study_client.get(_view_url(2), follow_redirects=False)
     assert r.status_code == 303
     assert calls == []

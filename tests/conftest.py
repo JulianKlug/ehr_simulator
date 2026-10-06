@@ -26,7 +26,6 @@ and ``POST …/answer`` has a config to validate against.
 
 from __future__ import annotations
 
-import hashlib
 import sqlite3
 from collections.abc import Iterator
 from enum import StrEnum
@@ -89,6 +88,16 @@ def db(tmp_db_path: Path) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
+def drop_append_only_triggers(conn: sqlite3.Connection) -> None:
+    """Let a test tamper with the append-only tables (migration 15) to
+    simulate out-of-band corruption."""
+    from ehr_simulator.db.migrations import _APPEND_ONLY_TABLES
+
+    for table in _APPEND_ONLY_TABLES:
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_no_update")
+        conn.execute(f"DROP TRIGGER IF EXISTS trg_{table}_no_delete")
+
+
 def _seed_clinician(tmp_db_path: Path, *, study_id: str | None = None) -> str:
     """Insert ``Dr. Test`` into a fresh DB; return the canonical id.
 
@@ -96,21 +105,14 @@ def _seed_clinician(tmp_db_path: Path, *, study_id: str | None = None) -> str:
     study BEFORE the clinician row is seeded — S11a refuses to claim a DB
     that already holds application data, so seeding must follow binding.
     """
-    from ehr_simulator.db import apply_migrations, connect, study_identity
+    from ehr_simulator.db import apply_migrations, clinicians, connect, study_identity
 
-    name = "Dr. Test"
-    name_normalized = " ".join(name.casefold().split())
-    clinician_id = hashlib.sha256(name_normalized.encode("utf-8")).hexdigest()[:16]
     tmp_db_path.parent.mkdir(parents=True, exist_ok=True)
     seed_conn = connect(tmp_db_path)
     apply_migrations(seed_conn)
     if study_id is not None:
         study_identity.bind(seed_conn, study_id)
-    seed_conn.execute(
-        "INSERT INTO clinicians (clinician_id, name_normalized) VALUES (?, ?)",
-        (clinician_id, name_normalized),
-    )
-    seed_conn.commit()
+    clinician_id = clinicians.lookup_or_create(seed_conn, "Dr. Test")
     seed_conn.close()
     return clinician_id
 

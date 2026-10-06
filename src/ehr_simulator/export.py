@@ -31,8 +31,10 @@ import contextlib
 import csv
 import io
 import os
+import re
 import stat
 import tempfile
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -43,6 +45,7 @@ from ehr_simulator.config import Question, Questions, StudyConfig
 from ehr_simulator.config.study import FreeTextExport
 from ehr_simulator.db import answers, arm_assignments, clinicians, practice, progress
 from ehr_simulator.db.observation import ObservationMode
+from ehr_simulator.pseudonym import pseudonymize
 
 __all__ = [
     "METADATA_COLUMNS",
@@ -54,6 +57,7 @@ __all__ = [
     "build_export",
     "encode_multi_select",
     "guard_cell",
+    "read_snapshot",
     "write_csv",
     "write_export",
     "write_keyfile",
@@ -128,9 +132,13 @@ def guard_cell(value: str) -> str:
     Guards against the formula triggers (``= + - @ TAB CR LF`` and the
     full-width variants ``＝＋－＠``) that Excel and Google Sheets
     auto-execute at the start of a cell. A value beginning with `'` is
-    unchanged, and an empty value is unchanged.
+    unchanged, and an empty value is unchanged. A plain signed number
+    (likert ``-2``) is unchanged so analysis tools still read it as numeric;
+    ``-2+3`` is not a plain number and stays guarded.
     """
     if not value:
+        return value
+    if _PLAIN_NUMBER.fullmatch(value):
         return value
     if _FORMULA_TRIGGERS.issuperset(value[:1]):
         return "'" + value
@@ -138,6 +146,32 @@ def guard_cell(value: str) -> str:
 
 
 _FORMULA_TRIGGERS = frozenset("=+-@\t\r\n\uff1d\uff0b\uff0d\uff20")  # = + - @ ＝ ＋ － ＠
+
+#: ASCII only: ``re`` ``\d`` would also accept non-ASCII digits.
+_PLAIN_NUMBER = re.compile(r"[+-]?[0-9]+(\.[0-9]+)?([eE][+-]?[0-9]+)?")
+
+
+@contextlib.contextmanager
+def read_snapshot(conn: Any) -> Iterator[None]:
+    """One WAL read snapshot: ``BEGIN`` … ``ROLLBACK``, never ``COMMIT``.
+
+    Every read inside the block sees the same committed state.
+
+    Raises:
+        ExportError: ``conn`` is already inside a transaction (its snapshot
+            would be someone else's).
+    """
+    if conn.in_transaction:
+        raise ExportError(
+            "cannot export inside an open transaction; the export takes its own snapshot — "
+            "use one connection per export"
+        )
+
+    conn.execute("BEGIN")
+    try:
+        yield
+    finally:
+        conn.rollback()
 
 
 # ---------------------------------------------------------------------------
@@ -152,9 +186,13 @@ def build_export(
     questions: Questions,
     live_hash: str,
     options: ExportOptions,
+    pseudonym_secret: bytes,
     include_keyfile: bool = False,
 ) -> ExportBundle:
     """Read + validate + compute the export (no file I/O).
+
+    Exported ``clinician_id`` cells (and keyfile ids) are
+    ``pseudonymize(pseudonym_secret, db id)``; DB ids never leave.
 
     All rejections raise :class:`ExportError`. All reads happen inside
     one explicit ``BEGIN`` … ``ROLLBACK`` read transaction — a WAL
@@ -171,14 +209,7 @@ def build_export(
     if not study.timepoints_minutes:
         raise ExportError("the study config has no timepoints; nothing to export")
 
-    if conn.in_transaction:
-        raise ExportError(
-            "cannot export inside an open transaction; build_export takes its own snapshot — "
-            "use one connection per export"
-        )
-
-    conn.execute("BEGIN")
-    try:
+    with read_snapshot(conn):
         # S11i: practice observations never reach the routine export.
         measured = ObservationMode.MEASURED
         practice_pairs = practice.fetch_all_pairs(conn)
@@ -195,7 +226,7 @@ def build_export(
             for e in timing.fetch_timing_events(conn)
             if (e.clinician_id, e.patient_id) not in practice_pairs
         )
-        return _build_under_snapshot(
+        bundle = _build_under_snapshot(
             conn,
             study=study,
             questions=questions,
@@ -209,8 +240,33 @@ def build_export(
             clinician_ids=clinician_ids,
             timing_events=timing_events,
         )
-    finally:
-        conn.rollback()
+    return _pseudonymized(bundle, pseudonym_secret)
+
+
+def _pseudonymized(bundle: ExportBundle, secret: bytes) -> ExportBundle:
+    """Swap the DB id for its keyed pseudonym in rows and keyfile.
+
+    Runs after every validation, so refusal messages still name DB ids
+    (operator-facing, never exported).
+    """
+    column = METADATA_COLUMNS.index("clinician_id")
+    rows = [
+        (*row[:column], pseudonymize(secret, row[column]), *row[column + 1 :])
+        for row in bundle.frame.rows
+    ]
+
+    # Rows were ordered patient → DB id; that order would let a roster match
+    # pseudonyms. Re-order patient → pseudonym (stable: t_index order kept).
+    patient_rank: dict[str, int] = {}
+    for row in rows:
+        patient_rank.setdefault(row[0], len(patient_rank))
+    rows.sort(key=lambda row: (patient_rank[row[0]], row[column]))
+    keyfile_rows = bundle.keyfile_rows
+    if keyfile_rows is not None:
+        keyfile_rows = tuple((pseudonymize(secret, cid), name) for cid, name in keyfile_rows)
+
+    frame = ExportFrame(header=bundle.frame.header, rows=tuple(rows), report=bundle.frame.report)
+    return ExportBundle(frame=frame, keyfile_rows=keyfile_rows)
 
 
 def _build_under_snapshot(

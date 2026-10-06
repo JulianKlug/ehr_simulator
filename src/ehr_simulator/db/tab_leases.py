@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 
-from ehr_simulator.db.case_lifecycle import to_db_timestamp
+from ehr_simulator.db._timestamps import _as_utc, to_db_timestamp
 
 __all__ = [
     "TabLease",
@@ -37,13 +37,6 @@ class TabLease:
     render_id: str
     claimed_at: datetime
     last_seen_at: datetime
-
-
-def _as_utc(value: datetime | str) -> datetime:
-    # PARSE_DECLTYPES yields naive UTC datetimes; a raw string may come back too.
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
 def _row(row: tuple) -> TabLease:

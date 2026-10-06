@@ -37,10 +37,13 @@ from ehr_simulator.db.backup import create_backup, read_identity
 from ehr_simulator.db.connection import AccessMode
 from ehr_simulator.db.migrations import MIGRATIONS
 from ehr_simulator.export_phase2 import Phase2Bundle, build_phase2_bundle
-from tests.test_case_lifecycle import GRACE, LifecycleHarness, _harness
-from tests.test_case_start import _start, _started_patient
-from tests.test_tab_guard import HX, TAB_A, _answer_all, _claim, _owner, _page, _post
-from tests.test_telemetry import _event
+from ehr_simulator.pseudonym import pseudonymize
+from tests.conftest import drop_append_only_triggers
+from tests.support.cases import HX, _start, _started_patient
+from tests.support.lifecycle import GRACE, LifecycleHarness, _harness
+from tests.support.pseudonym import TEST_SECRET
+from tests.support.tab_guard import TAB_A, _answer_all, _claim, _owner, _page, _post
+from tests.support.telemetry import _event
 
 CONFIGS = Path(__file__).parents[1] / "configs"
 HTTP_OK = 200
@@ -206,13 +209,18 @@ def integrated(tmp_path_factory: pytest.TempPathFactory) -> Integrated:
         h.clock.advance(GRACE + 1)
         client.post(f"/case/{lost.patient_id}/heartbeat")
         replacement = _walk(h, client, z_id)
-    return Integrated(h, x, y, lost, replacement, {"x": h.clinician_id, "y": y_id, "z": z_id})
+    # ids as exported: the bundle never carries DB clinician ids.
+    ids = {
+        role: pseudonymize(TEST_SECRET, cid)
+        for role, cid in {"x": h.clinician_id, "y": y_id, "z": z_id}.items()
+    }
+    return Integrated(h, x, y, lost, replacement, ids)
 
 
 def _bundle(db_path: Path, study_id: str) -> Phase2Bundle:
     conn = connect(db_path, access=AccessMode.READ_ONLY)
     try:
-        return build_phase2_bundle(conn, study_id=study_id)
+        return build_phase2_bundle(conn, study_id=study_id, pseudonym_secret=TEST_SECRET)
     finally:
         conn.close()
 
@@ -430,6 +438,35 @@ def test_i_backup_is_attributable_and_exports_the_same(
     assert _bundle(dest, study_id).tables == source.tables
 
 
+def test_shared_timelines_export_the_same_bundle(
+    integrated: Integrated, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One timeline per render, shared across derivations, exports exactly
+    what per-derivation timelines did — with fewer timeline builds."""
+    from ehr_simulator import behavioral_timing
+
+    h = integrated.h
+    study_id = h.v1.study.study_id
+    builds: list[str] = []
+    build_timeline = behavioral_timing.build_timeline
+
+    def counting(render: Any, rows: Any) -> Any:
+        builds.append(render.render_id)
+        return build_timeline(render, rows)
+
+    monkeypatch.setattr(behavioral_timing, "build_timeline", counting)
+    shared = _bundle(h.db_path, study_id)
+    shared_builds = len(builds)
+
+    # None: every derivation builds its own timelines (the unshared path).
+    builds.clear()
+    monkeypatch.setattr("ehr_simulator.export_phase2.cases.build_timelines", lambda *_: None)
+    unshared = _bundle(h.db_path, study_id)
+
+    assert unshared.tables == shared.tables
+    assert 0 < shared_builds < len(builds)
+
+
 # ---------------------------------------------------------------------------
 # J: privacy and keyfile separation (tests #28-#30)
 # ---------------------------------------------------------------------------
@@ -457,6 +494,8 @@ def test_j_keyfile_is_separate_and_protected(integrated: Integrated, tmp_path: P
             str(out),
             "--keyfile",
             str(key),
+            "--pseudonym-secret",
+            str(tmp_path / "pseudonym.secret"),
         ],
     )
 
@@ -516,6 +555,8 @@ def test_d_configuration_update_keeps_old_cases_pinned(tmp_path: Path) -> None:
             str(h.db_path),
             "--out",
             str(tmp_path / "legacy.csv"),
+            "--pseudonym-secret",
+            str(tmp_path / "pseudonym.secret"),
         ],
     )
     assert legacy.exit_code == 1 and "export-phase2" in legacy.stderr
@@ -528,6 +569,7 @@ def test_d_unknown_provenance_refuses(tmp_path: Path) -> None:  # 17
     with _tab(h) as client:
         _walk(h, client, h.clinician_id, stop_at=0)
     with h.conn() as conn:
+        drop_append_only_triggers(conn)
         conn.execute("UPDATE configuration_history SET config_hash = 'forged'")
         conn.commit()
     with pytest.raises(Phase2ExportError):

@@ -22,13 +22,17 @@ import yaml
 from fastapi.testclient import TestClient
 
 from ehr_simulator.cli_support import walk_preflight_report
+from ehr_simulator.clinician_profile import YEARS, ProfileValidationError, parse_profile
 from ehr_simulator.config import load_questions, load_study_config
+from ehr_simulator.config.study import ClinicianProfileConfig
 from ehr_simulator.db import clinician_profiles, connect
 from ehr_simulator.db.connection import AccessMode
 from ehr_simulator.export_phase2 import build_phase2_bundle
+from ehr_simulator.pseudonym import pseudonymize
 from tests.conftest import ProfileSetup, valid_profile_form
-from tests.test_case_lifecycle import LifecycleHarness, _harness
-from tests.test_case_start import HTTP_CONFLICT, HTTP_SEE_OTHER, _start, _started_patient
+from tests.support.cases import HTTP_CONFLICT, HTTP_SEE_OTHER, _start, _started_patient
+from tests.support.lifecycle import LifecycleHarness, _harness
+from tests.support.pseudonym import TEST_SECRET
 
 PROFILE = {"specialties": ["neurology", "emergency_medicine"], "countries": ["CH", "FR"]}
 HTTP_OK = 200
@@ -205,7 +209,9 @@ def test_open_case_resumes_without_a_profile(tmp_path: Path, study_fixture_dir: 
 def _clinicians_csv(h: LifecycleHarness) -> list[dict[str, str]]:
     conn = connect(h.db_path, access=AccessMode.READ_ONLY)
     try:
-        bundle = build_phase2_bundle(conn, study_id=h.v1.study.study_id)
+        bundle = build_phase2_bundle(
+            conn, study_id=h.v1.study.study_id, pseudonym_secret=TEST_SECRET
+        )
     finally:
         conn.close()
     table = next(t for t in bundle.tables if t.name == "clinicians.csv")
@@ -221,7 +227,7 @@ def test_clinicians_csv_carries_the_profile(ph: LifecycleHarness) -> None:  # 8
     assert _clinicians_csv(ph) == [
         {
             "study_id": ph.v1.study.study_id,
-            "clinician_id": ph.clinician_id,
+            "clinician_id": pseudonymize(TEST_SECRET, ph.clinician_id),
             "profile_status": "complete",
             "professional_role": "physician",
             "years_of_practice": "7.5",
@@ -310,3 +316,11 @@ def test_preflight_warns_phase2_without_the_block(study_fixture_dir: Path) -> No
 
     warnings = [r.message for r in report.rows if r.status == "WARN"]
     assert any("clinician characteristics" in m for m in warnings)
+
+
+@pytest.mark.parametrize("years", ["7_5", "1e1", "1.", ".5", "+3"])
+def test_years_refuse_non_decimal_notation(years: str) -> None:
+    form = {**NURSE, "years_of_practice": years}
+    with pytest.raises(ProfileValidationError) as excinfo:
+        parse_profile(form, ClinicianProfileConfig(**PROFILE))
+    assert YEARS in excinfo.value.errors

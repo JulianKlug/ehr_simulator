@@ -28,7 +28,14 @@ from ehr_simulator.db.case_lifecycle import CaseState
 from ehr_simulator.db.randomisation import ScheduleItem
 from ehr_simulator.replacement import ArmCounts, select_replacement
 from ehr_simulator.web import case_contact, case_start
-from tests.test_case_lifecycle import (
+from tests.support.cases import (
+    HTTP_CONFLICT,
+    HTTP_SEE_OTHER,
+    INDEX_URL,
+    _start,
+    _started_patient,
+)
+from tests.support.lifecycle import (
     GRACE,
     VALID_LIFECYCLE,
     LifecycleHarness,
@@ -38,13 +45,6 @@ from tests.test_case_lifecycle import (
     _study,
     _url,
     _with_lifecycle,
-)
-from tests.test_case_start import (
-    HTTP_CONFLICT,
-    HTTP_SEE_OTHER,
-    INDEX_URL,
-    _start,
-    _started_patient,
 )
 
 SCHEDULE_TABLES = ("randomisation_schedules", "randomisation_schedule_items")
@@ -240,6 +240,13 @@ def test_patient_imbalance_breaks_the_next_tie() -> None:
     far = _item(5, "p5", "ai")
     counts = {"p2": ArmCounts(ai=2), "p5": ArmCounts(no_ai=1)}
     assert _select([near, far], patient_counts=counts) == far
+
+
+def test_arm_counts_share_the_randomisation_imbalance() -> None:
+    assert ArmCounts(ai=2, no_ai=1).projected_imbalance("no_ai") == 0
+    assert ArmCounts(ai=2, no_ai=1).projected_imbalance("ai") == 2
+    with pytest.raises(ValueError):
+        ArmCounts().projected_imbalance("placebo")  # never counted as no_ai
 
 
 def test_sequence_distance_breaks_the_next_tie() -> None:

@@ -14,7 +14,7 @@ import sqlite3
 import pytest
 from fastapi.testclient import TestClient
 
-from ehr_simulator.web import routes, timing_events
+from ehr_simulator.web import patient_view, routes, timing_events
 from tests.conftest import answer_all_required, seed_progress
 
 PID = "synth_001"
@@ -156,6 +156,34 @@ def test_failed_render_records_no_enter(
         study_client.get(_view_url(0), follow_redirects=False)
     assert _enter_pairs(study_client) == []
     assert _exit_pairs(study_client) == []
+
+
+def test_failed_render_record_rolls_back_the_enter(
+    study_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The enter and the ``timepoint.render`` of one view are one transaction."""
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("render record lost")
+
+    monkeypatch.setattr(patient_view, "_record_render", _boom)
+    with pytest.raises(RuntimeError, match="render record lost"):
+        study_client.get(_view_url(0), follow_redirects=False)
+    assert _enter_pairs(study_client) == []
+
+
+def test_failed_render_record_on_advance_rolls_back_the_enter(
+    study_client: TestClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    answer_all_required(study_client, PID, 0)
+
+    def _boom(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("render record lost")
+
+    monkeypatch.setattr(patient_view, "_record_render", _boom)
+    with pytest.raises(RuntimeError, match="render record lost"):
+        study_client.post(_advance_url(0), headers=HX, follow_redirects=False)
+    assert _enter_pairs(study_client) == []
 
 
 def test_failed_exit_event_rolls_back_the_advance(

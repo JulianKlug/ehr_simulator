@@ -10,10 +10,10 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import datetime
 
+from ehr_simulator.db._timestamps import _as_utc, to_db_timestamp
 from ehr_simulator.db.arm_assignments import ARM_SOURCE_PHASE2
-from ehr_simulator.db.case_lifecycle import to_db_timestamp
 
 __all__ = [
     "ProfileLockedError",
@@ -43,12 +43,6 @@ class StoredProfile:
     primary_specialty: str | None
     recorded_at: datetime
     updated_at: datetime
-
-
-def _as_utc(value: datetime | str) -> datetime:
-    if isinstance(value, str):
-        value = datetime.fromisoformat(value)
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value
 
 
 def _row(row: tuple) -> StoredProfile:

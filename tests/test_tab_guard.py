@@ -13,8 +13,6 @@ explicitly. Test numbers refer to ``specs/session-11m-privacy-multitab-backups.m
 from __future__ import annotations
 
 import json
-from collections.abc import Iterator
-from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -36,16 +34,20 @@ from ehr_simulator.study_variables_reader import load_case_inputs, load_case_var
 from ehr_simulator.web.tab_guard import (
     CONFLICT_HEADER,
     RENDER_ID_FIELD,
-    RENDER_ID_HEADER,
     TAB_ID_FIELD,
-    TAB_ID_HEADER,
     TAB_LEASE_TTL_SECONDS,
 )
 from ehr_simulator.web.telemetry import BrowserKind
 from tests.conftest import _valid_value
-from tests.test_case_lifecycle import LifecycleHarness, _harness
-from tests.test_case_start import Harness, _start, _started_patient, harness  # noqa: F401
-from tests.test_telemetry import TELEMETRY, _event
+from tests.support.cases import (
+    Harness,
+    _start,
+    _started_patient,
+    harness,  # noqa: F401
+)
+from tests.support.lifecycle import LifecycleHarness, _harness
+from tests.support.tab_guard import TAB_A, TAB_B, _answer_all, _claim, _owner, _page, _post, _tab
+from tests.support.telemetry import TELEMETRY, _event
 
 HX = {"HX-Request": "true"}
 HTTP_OK = 200
@@ -54,8 +56,6 @@ HTTP_NO_CONTENT = 204
 HTTP_CONFLICT = 409
 HTTP_UNPROCESSABLE = 422
 HTTP_UNAUTHORIZED = 401
-TAB_A = "0b6f7c1e-3f5a-4c2d-9e8b-7a6d5c4b3a21"
-TAB_B = "5d1c9a0e-8b7f-4e6d-a5c4-3b2a1f0e9d8c"
 UNKNOWN_RENDER = "f" * 32
 COOKIE = "ehrsim_clinician_id"
 LAST_T_INDEX = 2
@@ -73,32 +73,6 @@ def th(tmp_path: Path, study_fixture_dir: Path) -> LifecycleHarness:
     path = tmp_path / "study_guarded.yaml"
     path.write_text(yaml.safe_dump(data))
     return _harness(tmp_path, path, study_fixture_dir / "questions.yaml")
-
-
-@contextmanager
-def _tab(th: LifecycleHarness) -> Iterator[TestClient]:
-    """A booted app whose client never auto-claims (see conftest)."""
-    with th.client() as client:
-        client.event_hooks["response"].clear()
-        del client.tab_views
-        yield client
-
-
-def _owner(tab_id: str, render_id: str) -> dict[str, str]:
-    return {TAB_ID_HEADER: tab_id, RENDER_ID_HEADER: render_id}
-
-
-def _page(client: TestClient, patient_id: str, t_index: int = 0) -> str:
-    response = client.get(f"/patient/{patient_id}/timepoint/{t_index}")
-    assert response.status_code == HTTP_OK
-    view = BeautifulSoup(response.text, "html.parser").select_one("#patient-view")
-    return view["data-render-id"]
-
-
-def _claim(client: TestClient, patient_id: str, tab_id: str, render_id: str) -> Any:
-    return client.post(
-        f"/case/{patient_id}/tab/claim", json={"tab_id": tab_id, "render_id": render_id}
-    )
 
 
 def _release(client: TestClient, patient_id: str, tab_id: str, render_id: str) -> Any:
@@ -123,25 +97,6 @@ def _answer(client: TestClient, patient_id: str, t_index: int, headers: dict[str
         data={"question_id": question.question_id, "value": _valid_value(question)},
         headers=headers,
     )
-
-
-def _answer_all(client: TestClient, patient_id: str, t_index: int, headers: dict) -> None:
-    from ehr_simulator.question_branching import evaluate
-
-    questions = client.app.state.questions
-    values: dict[str, str] = {}
-    for q in questions.questions:
-        item = evaluate(questions, values).get(q.question_id)
-        if item is None or not item.required_now:
-            continue
-        value = _valid_value(q)
-        response = client.post(
-            f"/patient/{patient_id}/timepoint/{t_index}/answer",
-            data={"question_id": q.question_id, "value": value},
-            headers=headers,
-        )
-        assert response.status_code == HTTP_OK, response.text
-        values[q.question_id] = value
 
 
 def _tab_rows(th: LifecycleHarness, kind: str) -> list[tuple[str, str, dict]]:
@@ -550,10 +505,6 @@ def test_start_and_resume_need_no_lease(th: LifecycleHarness) -> None:  # 29
 # ---------------------------------------------------------------------------
 # Telemetry (#30-#34)
 # ---------------------------------------------------------------------------
-
-
-def _post(client: TestClient, tab_id: str, events_: list[dict]) -> Any:
-    return client.post("/telemetry/events", json={"tab_id": tab_id, "events": events_})
 
 
 def _complete_render(render_id: str) -> list[dict]:

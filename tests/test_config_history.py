@@ -38,6 +38,7 @@ from ehr_simulator.db import (
     sessions,
     study_identity,
 )
+from tests.conftest import drop_append_only_triggers
 
 
 @pytest.fixture
@@ -360,6 +361,7 @@ def test_activate_refuses_on_top_of_unparseable_snapshot(
 ) -> None:
     _activate(db, study=study, questions=questions, config_hash=config_hash)
     # Corrupt the stored snapshot so it no longer re-renders identically.
+    drop_append_only_triggers(db)
     db.execute("UPDATE configuration_history SET study_json = '{\"broken\": true}'")
     db.commit()
     with pytest.raises(ConfigurationActivationError, match="no longer parses"):

@@ -27,6 +27,14 @@ provably took turns (S11m, :func:`took_turns`), then they sum too::
 
     tab A  claimed ── reports ── released / lease expired
     tab B                                         claimed ── reports
+
+A second enter of the same tab on one render (S11m: refused, then granted
+by Retry; ``telemetry.js`` restarts) opens a new segment. The time between
+segments is unobserved and never counts; a segment without its own exit
+ends at its last event and makes the render ``incomplete``::
+
+    enter ─ state ┫ (refused: nothing sent) enter ──── exit
+    [── segment ──]                          [─ segment ─]
 """
 
 from __future__ import annotations
@@ -38,7 +46,14 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 
-from ehr_simulator.db.telemetry import RenderRow, TabAuditRow, TelemetryRow
+from ehr_simulator.domain_types import (
+    CLAIMED_KIND,
+    LEASE_EXPIRED_KIND,
+    RELEASED_KIND,
+    RenderRow,
+    TabAuditRow,
+    TelemetryRow,
+)
 
 __all__ = [
     "Interval",
@@ -46,16 +61,19 @@ __all__ = [
     "RenderTimeline",
     "RenderTiming",
     "StateChange",
+    "TRUSTWORTHY",
     "UNMEASURABLE",
     "TelemetryStatus",
     "aggregate_status",
     "build_timeline",
+    "build_timelines",
     "derive_observation_timings",
     "derive_render_timing",
     "group_observations",
     "intersect",
     "measure",
     "rows_by_render",
+    "sum_per_tab",
     "took_turns",
     "union",
     "worst_status",
@@ -98,6 +116,9 @@ _STATUS_RANK = {
 
 #: Render statuses whose measured milliseconds are no lower bound (or none exist).
 UNMEASURABLE = frozenset({TelemetryStatus.MISSING, TelemetryStatus.GAPPED, TelemetryStatus.INVALID})
+
+#: Observation statuses whose totals are measured lower bounds (S11j, S11k).
+TRUSTWORTHY = frozenset({TelemetryStatus.COMPLETE, TelemetryStatus.INCOMPLETE})
 
 
 def worst_status(statuses: Iterable[TelemetryStatus]) -> TelemetryStatus:
@@ -174,6 +195,8 @@ class RenderTimeline:
     #: S11m: server arrival (event_id) of each tab's last row, in or out of
     #: the interval — a row after another tab's grant means the tabs overlapped.
     last_arrival: Mapping[str, int] = field(default_factory=dict)
+    #: Observed ``[enter, exit or last event]`` spans; the time between is cut.
+    segments: tuple[Interval, ...] = ()
 
     @property
     def foreground(self) -> tuple[Interval, ...]:
@@ -185,7 +208,7 @@ class RenderTimeline:
                 continue
             end = following.mono_ms if following is not None else self.end_ms
             spans.append((max(current.mono_ms, self.start_ms), min(end, self.end_ms)))
-        return union(spans)
+        return intersect(spans, self.segments)
 
     def state_at(self, mono_ms: float) -> StateChange | None:
         """The state in force at ``mono_ms`` (a change at that instant applies)."""
@@ -212,8 +235,30 @@ def _last_arrival(rows: Sequence[TelemetryRow]) -> dict[str, int]:
     return last
 
 
+def _split_segments(timed: Sequence[TelemetryRow]) -> list[list[TelemetryRow]]:
+    """Cut before every enter of a tab that already entered (a restart)."""
+    segments: list[list[TelemetryRow]] = [[]]
+    entered: set[str] = set()
+    for row in timed:
+        if row.kind == ENTER and row.tab_id in entered:
+            segments.append([])
+        if row.kind == ENTER:
+            entered.add(row.tab_id)
+        segments[-1].append(row)
+    return segments
+
+
+def _segment_bounds(segment: Sequence[TelemetryRow]) -> tuple[float, float, TelemetryRow | None]:
+    """``(start, end, exit row)``: enter (else first row) to exit (else last row)."""
+    enter = next((r for r in segment if r.kind == ENTER), None)
+    start = enter.client_mono_ms if enter is not None else segment[0].client_mono_ms
+    exit_row = next((r for r in segment if r.kind == EXIT and r.client_mono_ms >= start), None)
+    end = exit_row.client_mono_ms if exit_row is not None else segment[-1].client_mono_ms
+    return start, end, exit_row
+
+
 def build_timeline(render: RenderRow, rows: Sequence[TelemetryRow]) -> RenderTimeline:
-    """Order one render's rows and fix its interval, states and status."""
+    """Order one render's rows and fix its segments, states and status."""
     tab_ids = frozenset(r.tab_id for r in rows)
     ordered = sorted(rows, key=_sort_key)
     timed = [r for r in ordered if r.kind != GAP]
@@ -223,18 +268,23 @@ def build_timeline(render: RenderRow, rows: Sequence[TelemetryRow]) -> RenderTim
         )
 
     status = TelemetryStatus.COMPLETE
-    enter = next((r for r in timed if r.kind == ENTER), None)
-    start = enter.client_mono_ms if enter is not None else timed[0].client_mono_ms
-    exit_row = next((r for r in timed if r.kind == EXIT and r.client_mono_ms >= start), None)
-    end = exit_row.client_mono_ms if exit_row is not None else timed[-1].client_mono_ms
-    if exit_row is None:
+    segments = _split_segments(timed)
+    bounds = [_segment_bounds(segment) for segment in segments]
+    start, end = bounds[0][0], bounds[-1][1]
+    exit_row = bounds[-1][2]
+    if any(segment_exit is None for _, _, segment_exit in bounds):
         status = TelemetryStatus.INCOMPLETE  # closed at the last event: a lower bound
-    if enter is None or len(timed) != len(ordered):
+    if not any(r.kind == ENTER for r in timed) or len(timed) != len(ordered):
         # A lost enter or a reported gap: the missing event may be the one
         # that ended foreground or exposure, so nothing here is a lower bound.
         status = TelemetryStatus.GAPPED
 
-    inside = tuple(r for r in timed if start <= r.client_mono_ms <= end)
+    inside = tuple(
+        r
+        for segment, (seg_start, seg_end, _) in zip(segments, bounds, strict=True)
+        for r in segment
+        if seg_start <= r.client_mono_ms <= seg_end
+    )
     states = [
         StateChange(r.client_mono_ms, bool(r.payload["visible"]), bool(r.payload["focused"]))
         for r in inside
@@ -255,6 +305,7 @@ def build_timeline(render: RenderRow, rows: Sequence[TelemetryRow]) -> RenderTim
         states=tuple(states),
         events=inside,
         last_arrival=_last_arrival(rows),
+        segments=union((seg_start, seg_end) for seg_start, seg_end, _ in bounds),
     )
 
 
@@ -320,6 +371,15 @@ def rows_by_render(rows: Iterable[TelemetryRow]) -> dict[str, list[TelemetryRow]
     return grouped
 
 
+def build_timelines(
+    renders: Iterable[RenderRow], rows: Iterable[TelemetryRow]
+) -> dict[str, RenderTimeline]:
+    """Every render's timeline keyed by ``render_id``: built once, shared by
+    the timing, panel and study-variable derivations of one case."""
+    by_render = rows_by_render(rows)
+    return {r.render_id: build_timeline(r, by_render.get(r.render_id, [])) for r in renders}
+
+
 def _has_seq_collision(timelines: Sequence[RenderTimeline]) -> bool:
     """Two renders reporting the same ``(tab_id, client_seq)``: a duplicated
     tab shares its storage, and with it the id and the counter."""
@@ -342,8 +402,7 @@ def group_observations(
     return groups
 
 
-_CLAIMED = "tab.claimed"
-_GAVE_UP = frozenset({"tab.released", "tab.lease_expired"})
+_GAVE_UP = frozenset({RELEASED_KIND, LEASE_EXPIRED_KIND})
 
 
 def took_turns(timelines: Sequence[RenderTimeline], audit: Sequence[TabAuditRow]) -> bool:
@@ -359,7 +418,7 @@ def took_turns(timelines: Sequence[RenderTimeline], audit: Sequence[TabAuditRow]
     render_ids = {t.render.render_id for t in timelines}
     grants: dict[str, int] = {}
     for row in audit:
-        if row.kind == _CLAIMED and row.render_id in render_ids:
+        if row.kind == CLAIMED_KIND and row.render_id in render_ids:
             grants.setdefault(row.tab_id, row.event_id)
 
     tabs = frozenset().union(*(t.tab_ids for t in timelines))
@@ -402,45 +461,67 @@ def aggregate_status(
     return worst
 
 
+def sum_per_tab(
+    measures: Iterable[tuple[RenderTimeline, float | None]],
+) -> dict[str, float | None]:
+    """Per tab diagnostics (S11j timing, S11k exposure): each render's
+    seconds summed into every tab that reported it. One unmeasurable render
+    (``None``) makes its tab's value None, never a partial sum.
+    ``[(r1 {a}, 1.0), (r2 {a}, 3.0), (r3 {b}, None)] → {a: 4.0, b: None}``.
+    """
+    per_tab: dict[str, float | None] = {}
+    for timeline, seconds in measures:
+        for tab in timeline.tab_ids:
+            so_far = per_tab.get(tab, 0.0)
+            if so_far is None or seconds is None:
+                per_tab[tab] = None
+                continue
+            per_tab[tab] = so_far + seconds
+    return per_tab
+
+
+def _seconds(ms: float | None) -> float | None:
+    return None if ms is None else ms / MS_PER_SECOND
+
+
 def derive_observation_timings(
     renders: Iterable[RenderRow],
     rows: Iterable[TelemetryRow],
     *,
     inactivity_threshold_seconds: float,
     tab_audit: Sequence[TabAuditRow] = (),
+    timelines: Mapping[str, RenderTimeline] | None = None,
 ) -> dict[tuple[int, str], ObservationTiming]:
     """Every observation of one clinician × patient keyed by
     ``(t_index, visit_kind)``. Revisit renders never extend primary ones;
-    ``tab_audit`` (S11m ``tab.*`` rows) lets tabs that took turns sum."""
-    by_render = rows_by_render(rows)
+    ``tab_audit`` (S11m ``tab.*`` rows) lets tabs that took turns sum.
+    ``timelines``: prebuilt from the same renders and rows (``build_timelines``)."""
+    renders = list(renders)
+    if timelines is None:
+        timelines = build_timelines(renders, rows)
+
     out: dict[tuple[int, str], ObservationTiming] = {}
     for (t_index, visit_kind), group in group_observations(renders).items():
         timings = [
             derive_render_timing(
-                build_timeline(r, by_render.get(r.render_id, [])),
+                timelines[r.render_id],
                 inactivity_threshold_seconds=inactivity_threshold_seconds,
             )
             for r in group
         ]
-        timelines = [t.timeline for t in timings]
-        status = aggregate_status(timelines, tab_audit)
+        group_timelines = [t.timeline for t in timings]
+        status = aggregate_status(group_timelines, tab_audit)
 
-        # Per tab diagnostics follow the observation rule: one unmeasurable
-        # render makes its tab's value None, never a partial sum.
+        # Foreground and active are None together (an unmeasurable render).
+        fg_per_tab = sum_per_tab((t.timeline, _seconds(t.foreground_ms)) for t in timings)
+        active_per_tab = sum_per_tab((t.timeline, _seconds(t.active_ms)) for t in timings)
         per_tab: dict[str, tuple[float, float] | None] = {}
-        for timing in timings:
-            for tab in timing.timeline.tab_ids:
-                so_far = per_tab.get(tab, (0.0, 0.0))
-                if so_far is None or timing.foreground_ms is None or timing.active_ms is None:
-                    per_tab[tab] = None
-                    continue
-                per_tab[tab] = (
-                    so_far[0] + timing.foreground_ms / MS_PER_SECOND,
-                    so_far[1] + timing.active_ms / MS_PER_SECOND,
-                )
+        for tab, fg in fg_per_tab.items():
+            active_s = active_per_tab[tab]
+            per_tab[tab] = None if fg is None or active_s is None else (fg, active_s)
 
         measured = [v for v in per_tab.values() if v is not None]
-        trustworthy = status in (TelemetryStatus.COMPLETE, TelemetryStatus.INCOMPLETE)
+        trustworthy = status in TRUSTWORTHY
         foreground = sum(fg for fg, _ in measured) if trustworthy else None
         active = sum(a for _, a in measured) if trustworthy else None
         out[(t_index, visit_kind)] = ObservationTiming(

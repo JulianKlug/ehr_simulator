@@ -21,36 +21,18 @@ from ehr_simulator.panel_exposure import (
     render_panel_exposure,
 )
 from ehr_simulator.web.telemetry import PanelId
-from tests.test_behavioral_timing import S, Stream, _render
-from tests.test_case_start import Harness, _start, _started_patient, harness  # noqa: F401
-from tests.test_intervention import _cases_by_arm, _page
-from tests.test_telemetry import TELEMETRY
+from tests.support.cases import (
+    Harness,
+    _start,
+    _started_patient,
+    harness,  # noqa: F401
+)
+from tests.support.intervention import _cases_by_arm, _page
+from tests.support.telemetry import TELEMETRY
+from tests.support.timeline import PANEL, PanelStream, S, Stream, _render
 
 VIEWPORT = 0.05
 VIEWED_S = 2.0
-PANEL = "vitals"
-
-
-class PanelStream(Stream):
-    def mount(self, at: float, panel: str = PANEL, *, expanded: bool = True) -> PanelStream:
-        self._add(
-            "panel.mount",
-            at,
-            {"panel_id": panel, "expanded": expanded, "collapsible": True, "state": "loading"},
-        )
-        return self
-
-    def ratio(self, at: float, value: float, panel: str = PANEL) -> PanelStream:
-        self._add("panel.viewport", at, {"panel_id": panel, "intersection_ratio": value})
-        return self
-
-    def open(self, at: float, panel: str = PANEL) -> PanelStream:
-        self._add("panel.open", at, {"panel_id": panel})
-        return self
-
-    def close(self, at: float, panel: str = PANEL) -> PanelStream:
-        self._add("panel.close", at, {"panel_id": panel})
-        return self
 
 
 def _exposure(stream: Stream, panel: str = PANEL, threshold: float = VIEWPORT):
@@ -169,6 +151,19 @@ def test_stream_without_exit_is_truncated_and_incomplete() -> None:
     assert exposure.qualifying_ms == 4 * S  # never extended past the last event
 
 
+def test_regranted_render_cuts_the_open_episode() -> None:
+    # S11m: refused at 1 s (nothing reported), granted again at 601 s.
+    stream = _visible_from_zero().activity(1)
+    stream.enter(601).mount(601).ratio(601, 0.5).exit(603)
+    exposure = _exposure(stream)
+
+    assert exposure.status is TelemetryStatus.INCOMPLETE
+    assert [(e.start_ms, e.end_ms, e.end_reason) for e in exposure.episodes] == [
+        (0.0, 1 * S, EndReason.TRUNCATED),
+        (601 * S, 603 * S, EndReason.TIMEPOINT_EXIT),
+    ]
+
+
 def test_episodes_never_overlap() -> None:
     stream = _visible_from_zero().ratio(1, 0.6).ratio(2, 0.9).ratio(3, 0.0).exit(4)
     episodes = _exposure(stream).episodes
@@ -271,6 +266,16 @@ def test_internal_gap_never_proves_viewed() -> None:
     assert summary.status is TelemetryStatus.GAPPED
     assert summary.viewed is None
     assert summary.qualifying_seconds is None
+
+
+def test_gapped_summary_has_no_episode_count_or_first_view() -> None:
+    stream = _visible_from_zero()
+    stream.gap(0.5)
+    summary = _summary([stream.exit(5)])[(0, "primary", PANEL)]
+
+    assert summary.status is TelemetryStatus.GAPPED
+    assert summary.episode_count is None
+    assert summary.time_to_first_view_seconds is None
 
 
 def test_missing_telemetry_is_not_not_viewed() -> None:

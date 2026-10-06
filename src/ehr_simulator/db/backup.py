@@ -32,6 +32,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ehr_simulator.db import migrations
 from ehr_simulator.db.connection import AccessMode, connect
 from ehr_simulator.db.exceptions import BackupIdentityError
 from ehr_simulator.logging import get_logger
@@ -67,10 +68,7 @@ def read_identity(conn: sqlite3.Connection) -> BackupIdentity:
         row = conn.execute("SELECT study_id FROM study_identity WHERE singleton = 1").fetchone()
         study_id = row[0] if row is not None else None
 
-    schema_version = None
-    if _table_exists(conn, "schema_migrations"):
-        schema_version = conn.execute("SELECT MAX(version) FROM schema_migrations").fetchone()[0]
-    return BackupIdentity(study_id=study_id, schema_version=schema_version)
+    return BackupIdentity(study_id=study_id, schema_version=migrations.schema_version(conn))
 
 
 def _destination(backup_root: Path, identity: BackupIdentity, stamp: str) -> Path:
@@ -110,7 +108,8 @@ def create_backup(
             version, no free destination name, or a copy that does not
             reopen with the source's identity (the copy is then removed).
     """
-    src = sqlite3.connect(db_path)
+    # Read only: a missing path raises instead of creating an empty file.
+    src = connect(db_path, access=AccessMode.READ_ONLY)
     try:
         identity = read_identity(src)
         if expected_study_id is not None and identity.study_id != expected_study_id:

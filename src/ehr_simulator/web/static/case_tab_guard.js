@@ -8,8 +8,9 @@
 //   granted: every htmx request carries X-Ehrsim-Tab-Id / X-Ehrsim-Render-Id,
 //            heartbeat.js asks tabHeaders(), the pause form gets hidden fields
 //   pending/refused: answer fieldsets, advance and pause are disabled (and any
-//            write is cancelled); refused adds a blocking notice; Retry, focus
-//            and becoming visible claim again
+//            write is cancelled and announced with ehrsim:writecancelled on
+//            its element, so answers.js shows "Save failed"); refused adds a
+//            blocking notice; Retry, focus and becoming visible claim again
 //   pagehide ──► sendBeacon release (the server ignores a stale render's)
 //
 // telemetry.js asks tabState(renderId) and holds pending renders' events.
@@ -35,6 +36,7 @@
     const CONFLICT_HEADER = "X-Ehrsim-Tab";
     const CONFLICT_EVENT = "ehrsim:tabconflict";
     const REGRANTED_EVENT = "ehrsim:tabregranted";
+    const WRITE_CANCELLED_EVENT = "ehrsim:writecancelled";
     const HTTP_NO_CONTENT = 204;
     const HTTP_CONFLICT = 409;
     const RETRY_MS = 5000;
@@ -200,6 +202,9 @@
         if (!view || !isWrite(e.detail)) return;
         if (tabState(view.dataset.renderId) !== GRANTED) {
             e.preventDefault(); // no write before (or after losing) the lease
+            // Never cancel silently: a debounced autosave would look saved.
+            const elt = e.detail.elt;
+            if (elt) elt.dispatchEvent(new CustomEvent(WRITE_CANCELLED_EVENT, { bubbles: true }));
             return;
         }
         Object.assign(e.detail.headers, tabHeaders());

@@ -34,6 +34,8 @@ from ehr_simulator.export import (
     write_export,
     write_keyfile,
 )
+from ehr_simulator.pseudonym import pseudonymize
+from tests.support.pseudonym import TEST_SECRET
 
 DEFAULT_OPTIONS = ExportOptions()
 
@@ -169,6 +171,7 @@ def build(study, questions, ro_db, *, live_hash, options=DEFAULT_OPTIONS, includ
         live_hash=live_hash,
         options=options,
         include_keyfile=include_keyfile,
+        pseudonym_secret=TEST_SECRET,
     )
 
 
@@ -254,7 +257,18 @@ def test_progress_only_pair_yields_blank_answer_cells(
     assert len(frame.rows) == 1
     row = frame.rows[0]
     # Metadata cells are all populated... (timing blank: no enter/exit events)
-    assert row[:10] == ("synth_001", alice, "0", "0.0", "", "", "", "no_ai", "", live_hash)
+    assert row[:10] == (
+        "synth_001",
+        pseudonymize(TEST_SECRET, alice),
+        "0",
+        "0.0",
+        "",
+        "",
+        "",
+        "no_ai",
+        "",
+        live_hash,
+    )
     # ...and every answer cell is the empty string.
     assert row[10:] == ("",) * 7
 
@@ -286,7 +300,7 @@ def test_only_complete_drops_incomplete_pairs_silently(
     assert complete.frame.report.clinicians == 1
     assert complete.frame.report.complete_walks == 1
     assert complete.frame.report.in_progress_walks == 0
-    assert {r[1] for r in complete.frame.rows} == {alice}
+    assert {r[1] for r in complete.frame.rows} == {pseudonymize(TEST_SECRET, alice)}
 
 
 def test_optional_unanswered_question_is_empty_string(
@@ -361,7 +375,10 @@ def test_row_order_is_patient_then_clinician_then_t_index(
     frame = build(study, questions, ro_db, live_hash=live_hash).frame
     # synth_001's pairs were seeded at t_index 1 → frontier = 1 → rows for
     # t_index 0 and 1. synth_003's pairs were seeded at t_index 0 → one row each.
-    ranked = {name: clinicians.lookup(db, name) for name in ("Alice", "Zed")}
+    # Clinicians order by the exported pseudonym, never the name-derived DB id.
+    ranked = {
+        name: pseudonymize(TEST_SECRET, clinicians.lookup(db, name)) for name in ("Alice", "Zed")
+    }
     rows_per_patient = {"synth_001": ["0", "1"], "synth_003": ["0"]}
     expected = [
         (pid, cid, tp)
@@ -648,6 +665,17 @@ def test_guard_ignores_triggers_past_the_first_column() -> None:
     assert guard_cell("a=1+1") == "a=1+1"
 
 
+@pytest.mark.parametrize("number", ["-2", "+3", "-0.5", "-1e-3", "+2.5E+4", "-10"])
+def test_guard_leaves_signed_numbers_numeric(number: str) -> None:
+    """A likert ``-2`` must stay numeric for R / pandas, not become ``'-2``."""
+    assert guard_cell(number) == number
+
+
+@pytest.mark.parametrize("hostile", ["-2+3", "=1", "+cmd", "-1+cmd", "-", "+", "-2 ", "@1"])
+def test_guard_still_prefixes_non_numbers(hostile: str) -> None:
+    assert guard_cell(hostile) == "'" + hostile
+
+
 def test_guard_applies_to_metadata_and_question_cells(
     study, questions, db, ro_db, tmp_path, live_hash
 ) -> None:
@@ -802,7 +830,20 @@ def test_keyfile_contains_exactly_the_exported_clinicians(
     seed_answer(db, alice, "synth_001", 0, "deterioration_6h", "No", config_hash=live_hash)
 
     bundle = build(study, questions, ro_db, live_hash=live_hash, include_keyfile=True)
-    assert bundle.keyfile_rows == ((alice, "alice"),)
+    assert bundle.keyfile_rows == ((pseudonymize(TEST_SECRET, alice), "alice"),)
+
+
+def test_exported_clinician_id_is_the_pseudonym(study, questions, db, ro_db, live_hash) -> None:
+    """The CSV never carries the DB id (sha256 of the name: roster reversible)."""
+    alice = seed_clinician(db, "Alice")
+    seed_arm(db, alice, "synth_001", config_hash=live_hash)
+    seed_answer(db, alice, "synth_001", 0, "deterioration_6h", "No", config_hash=live_hash)
+
+    bundle = build(study, questions, ro_db, live_hash=live_hash)
+    column = METADATA_COLUMNS.index("clinician_id")
+
+    assert {row[column] for row in bundle.frame.rows} == {pseudonymize(TEST_SECRET, alice)}
+    assert all(alice not in row for row in bundle.frame.rows)
 
 
 def test_write_keyfile_installs_mode_0600(study, tmp_path) -> None:
@@ -958,7 +999,7 @@ def test_wal_snapshot_excludes_concurrent_commits(
 
     # Bob is a fully-valid pair; if the exporter saw his mid-flight commit the
     # frame would carry a second clinician. The snapshot must shield it.
-    assert {r[1] for r in frame.rows} == {alice}
+    assert {r[1] for r in frame.rows} == {pseudonymize(TEST_SECRET, alice)}
     assert frame.report.clinicians == 1
 
 

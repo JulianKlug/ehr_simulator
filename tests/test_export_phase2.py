@@ -48,11 +48,13 @@ from ehr_simulator.export_phase2 import (
     build_phase2_bundle,
 )
 from ehr_simulator.panel_exposure import derive_panel_summaries
+from ehr_simulator.pseudonym import pseudonymize
 from ehr_simulator.study_variables_reader import load_case_variables
-from tests.test_case_lifecycle import GRACE, LifecycleHarness, _harness
-from tests.test_case_start import _start, _started_patient
-from tests.test_tab_guard import (
-    HX,
+from tests.conftest import drop_append_only_triggers
+from tests.support.cases import HX, _start, _started_patient
+from tests.support.lifecycle import GRACE, LifecycleHarness, _harness
+from tests.support.pseudonym import TEST_SECRET
+from tests.support.tab_guard import (
     TAB_A,
     TAB_B,
     _answer_all,
@@ -62,7 +64,7 @@ from tests.test_tab_guard import (
     _post,
     _tab,
 )
-from tests.test_telemetry import TELEMETRY, _event
+from tests.support.telemetry import TELEMETRY, _event
 
 FIXTURES = Path(__file__).parent / "fixtures" / "study"
 HTTP_NO_CONTENT = 204
@@ -161,6 +163,7 @@ def _abandon_by_timeout(xh: LifecycleHarness, client: TestClient, patient_id: st
 def _bundle(xh: LifecycleHarness, **kwargs: Any) -> export_phase2.Phase2Bundle:
     conn = connect(xh.db_path, access=AccessMode.READ_ONLY)
     try:
+        kwargs.setdefault("pseudonym_secret", TEST_SECRET)
         return build_phase2_bundle(conn, study_id=xh.v1.study.study_id, **kwargs)
     finally:
         conn.close()
@@ -174,6 +177,7 @@ def _rows(bundle: export_phase2.Phase2Bundle, name: str, **match: str) -> list[d
 
 def _sql(xh: LifecycleHarness, sql: str, params: tuple = ()) -> None:
     with xh.conn() as conn:
+        drop_append_only_triggers(conn)
         conn.execute(sql, params)
         conn.commit()
 
@@ -263,6 +267,7 @@ def test_legacy_export_refuses_mixed_and_names_export_phase2(xh: LifecycleHarnes
             str(xh.db_path),
             "--out",
             str(xh.tmp_path / "legacy.csv"),
+            *_secret_args(xh),
         ],
     )
     assert result.exit_code == 1
@@ -297,7 +302,7 @@ def test_foreign_study_refuses(xh: LifecycleHarness, walked: dict) -> None:  # 9
     conn = connect(xh.db_path, access=AccessMode.READ_ONLY)
     try:
         with pytest.raises(Phase2ExportError, match="belongs to study"):
-            build_phase2_bundle(conn, study_id="another_study")
+            build_phase2_bundle(conn, study_id="another_study", pseudonym_secret=TEST_SECRET)
     finally:
         conn.close()
 
@@ -583,6 +588,7 @@ def test_event_of_another_case_session_refuses(xh: LifecycleHarness, walked: dic
         other = conn.execute(
             "SELECT session_id FROM sessions WHERE patient_id = ? LIMIT 1", (walked["lost"],)
         ).fetchone()[0]
+        drop_append_only_triggers(conn)
         conn.execute(
             "UPDATE events SET session_id = ? WHERE event_id = "
             "(SELECT MIN(event_id) FROM events WHERE patient_id = ? AND kind = 'answer.upsert')",
@@ -649,17 +655,20 @@ def test_exported_inputs_regenerate_the_schedule(xh: LifecycleHarness, walked: d
         generate_schedule,
     )
 
-    bundle = _bundle(xh)
+    bundle = _bundle(xh, keyfile=KeyfileRequest.REQUESTED)
     audit = _rows(bundle, "randomisation_audit.csv")
     history = {r["config_version"]: r for r in _rows(bundle, "configuration_history.csv")}
     first = audit[0]
+    # The keyfile (pseudonym → name) is the only way back to the DB id.
+    name = dict(bundle.keyfile_rows or ())[first["clinician_id"]]
+    db_id = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
     study = parse_study_snapshot(history[first["generation_config_version"]]["study_json"])
     state = json.loads(first["allocation_state_json"])
     regenerated = generate_schedule(
         study=study,
         config_version=first["generation_config_version"],
         config_hash=first["generation_config_hash"],
-        clinician_id=first["clinician_id"],
+        clinician_id=db_id,
         allocation_state=ActivatedAllocationState.from_counts(
             {e["patient_id"]: (e["ai_count"], e["no_ai_count"]) for e in state}
         ),
@@ -667,7 +676,7 @@ def test_exported_inputs_regenerate_the_schedule(xh: LifecycleHarness, walked: d
             ai=int(first["starting_ai_count"]), no_ai=int(first["starting_no_ai_count"])
         ),
     )
-    assert regenerated.schedule_id == first["schedule_id"]
+    assert pseudonymize(TEST_SECRET, regenerated.schedule_id) == first["schedule_id"]
     assert [(i.patient_id, i.planned_arm) for i in regenerated.items] == [
         (r["patient_id"], r["planned_arm"]) for r in audit
     ]
@@ -764,9 +773,20 @@ def _cli(*args: str) -> Any:
     return CliRunner().invoke(cli.app_typer, ["export-phase2", *args])
 
 
+def _secret_args(xh: LifecycleHarness) -> list[str]:
+    return ["--pseudonym-secret", str(xh.tmp_path / "pseudonym.secret")]
+
+
 def test_cli_writes_bundle_and_manifest(xh: LifecycleHarness, walked: dict) -> None:  # 55-57
     out = xh.tmp_path / "bundle"
-    result = _cli(str(xh.v1.study_yaml), "--db-path", str(xh.db_path), "--out-dir", str(out))
+    result = _cli(
+        str(xh.v1.study_yaml),
+        "--db-path",
+        str(xh.db_path),
+        "--out-dir",
+        str(out),
+        *_secret_args(xh),
+    )
     assert result.exit_code == 0, result.output
 
     manifest = json.loads((out / MANIFEST_NAME).read_text())
@@ -783,7 +803,14 @@ def test_cli_writes_bundle_and_manifest(xh: LifecycleHarness, walked: dict) -> N
 
 def test_existing_destination_and_force(xh: LifecycleHarness, walked: dict) -> None:  # 53, 54
     out = xh.tmp_path / "bundle"
-    base = [str(xh.v1.study_yaml), "--db-path", str(xh.db_path), "--out-dir", str(out)]
+    base = [
+        str(xh.v1.study_yaml),
+        "--db-path",
+        str(xh.db_path),
+        "--out-dir",
+        str(out),
+        *_secret_args(xh),
+    ]
     assert _cli(*base).exit_code == 0
     before = (out / "timepoints.csv").read_bytes()
 
@@ -797,7 +824,14 @@ def test_existing_destination_and_force(xh: LifecycleHarness, walked: dict) -> N
 def test_validation_failure_leaves_nothing(xh: LifecycleHarness, walked: dict) -> None:  # 52
     _sql(xh, "UPDATE answers SET value = 'broken'")
     out = xh.tmp_path / "bundle"
-    result = _cli(str(xh.v1.study_yaml), "--db-path", str(xh.db_path), "--out-dir", str(out))
+    result = _cli(
+        str(xh.v1.study_yaml),
+        "--db-path",
+        str(xh.db_path),
+        "--out-dir",
+        str(out),
+        *_secret_args(xh),
+    )
 
     assert result.exit_code == 1
     assert not out.exists()
@@ -829,7 +863,7 @@ def test_exports_are_byte_stable(xh: LifecycleHarness, walked: dict) -> None:  #
 
 
 def test_process_exit_codes(xh: LifecycleHarness, walked: dict) -> None:  # 59
-    from tests.test_cli import _console_script
+    from tests.support.cli import _console_script
 
     def run(*args: str) -> int:
         return subprocess.run(
@@ -841,7 +875,14 @@ def test_process_exit_codes(xh: LifecycleHarness, walked: dict) -> None:  # 59
         ).returncode
 
     out = xh.tmp_path / "bundle"
-    base = [str(xh.v1.study_yaml), "--db-path", str(xh.db_path), "--out-dir", str(out)]
+    base = [
+        str(xh.v1.study_yaml),
+        "--db-path",
+        str(xh.db_path),
+        "--out-dir",
+        str(out),
+        *_secret_args(xh),
+    ]
     assert run(*base) == 0
     assert run(*base) == 1
 
@@ -953,3 +994,228 @@ def test_two_question_schemas_export_long(
     assert ids[second] == ids[first] | {"extra_q"}
     extra = _rows(bundle, "answers.csv", patient_id=second, t_index="0", question_id="extra_q")
     assert extra[0]["config_version"] == "v2" and extra[0]["response_status"] == "missing"
+
+
+# ---------------------------------------------------------------------------
+# Review fixes: missing refusals, pseudonyms, keyfile + publish safety
+# ---------------------------------------------------------------------------
+
+
+def test_lifecycle_without_assignment_refuses(xh: LifecycleHarness, walked: dict) -> None:
+    with xh.conn() as conn:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute(
+            "INSERT INTO case_lifecycle "
+            "(clinician_id, patient_id, state, state_changed_at, last_seen_at) "
+            "VALUES ('ffffffffffffffff', ?, 'active', '2026-01-01 00:00:00', "
+            "'2026-01-01 00:00:00')",
+            (walked["done"],),
+        )
+        conn.commit()
+    with pytest.raises(Phase2ExportError, match="lifecycle row of patient .* has no assignment"):
+        _bundle(xh)
+
+
+def test_s10_timing_error_refuses(
+    xh: LifecycleHarness, walked: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 9 (end < start) is unreachable through ordered rows; inject it."""
+
+    def invalid(*_args: Any, **_kwargs: Any) -> Any:
+        raise export_phase2.timing.TimingError("exit precedes enter")
+
+    monkeypatch.setattr(export_phase2.timing, "derive_timepoint_timings", invalid)
+    with pytest.raises(Phase2ExportError, match="cannot derive timepoint timing"):
+        _bundle(xh)
+
+
+#: Columns carrying an id derived from the DB clinician id.
+LINKED_ID_COLUMNS = ("clinician_id", "schedule_id", "replacement_id", "replaced_by_replacement_id")
+
+
+def _db_linked_ids(xh: LifecycleHarness) -> set[str]:
+    with xh.conn() as conn:
+        rows = conn.execute(
+            "SELECT clinician_id FROM clinicians "
+            "UNION SELECT schedule_id FROM randomisation_schedules "
+            "UNION SELECT replacement_id FROM case_replacements"
+        ).fetchall()
+    return {r[0] for r in rows}
+
+
+def test_bundle_pseudonymizes_every_linked_id(xh: LifecycleHarness, walked: dict) -> None:
+    bundle = _bundle(xh, keyfile=KeyfileRequest.REQUESTED)
+    raw = _db_linked_ids(xh)
+    text = "".join(str(t.rows) for t in bundle.tables)
+
+    assert raw and not any(value in text for value in raw)
+    assert bundle.keyfile_rows == ((pseudonymize(TEST_SECRET, xh.clinician_id), "dr. test"),)
+    for table in bundle.tables:
+        for column in set(LINKED_ID_COLUMNS) & set(table.header):
+            values = {r[column] for r in _rows(bundle, table.name)} - {""}
+            assert values <= {pseudonymize(TEST_SECRET, v) for v in raw}, (table.name, column)
+
+    # Payload ids link to the audit through the same pseudonym.
+    activated = _rows(bundle, "behavioral_events.csv", kind="case.activated")[0]
+    schedules = {r["schedule_id"] for r in _rows(bundle, "randomisation_audit.csv")}
+    assert json.loads(activated["payload_json"])["schedule_id"] in schedules
+
+
+def test_pseudonyms_follow_the_secret(xh: LifecycleHarness, walked: dict) -> None:
+    other = bytes(reversed(TEST_SECRET))
+    first, again = _bundle(xh), _bundle(xh)
+    rotated = _bundle(xh, pseudonym_secret=other)
+
+    ids = {r["clinician_id"] for r in _rows(first, "clinicians.csv")}
+    assert ids == {r["clinician_id"] for r in _rows(again, "clinicians.csv")}
+    assert ids.isdisjoint({r["clinician_id"] for r in _rows(rotated, "clinicians.csv")})
+    assert xh.clinician_id not in ids
+
+
+def test_cli_creates_the_secret_and_keeps_ids_stable(xh: LifecycleHarness, walked: dict) -> None:
+    secret = xh.tmp_path / "keys" / "pseudonym.secret"
+    common = [str(xh.v1.study_yaml), "--db-path", str(xh.db_path), "--pseudonym-secret"]
+
+    first = _cli(*common, str(secret), "--out-dir", str(xh.tmp_path / "a"))
+    second = _cli(*common, str(secret), "--out-dir", str(xh.tmp_path / "b"))
+    assert first.exit_code == 0 and second.exit_code == 0, first.output + second.output
+
+    assert stat.S_IMODE(secret.stat().st_mode) == 0o600
+    a = (xh.tmp_path / "a" / "clinicians.csv").read_text()
+    assert a == (xh.tmp_path / "b" / "clinicians.csv").read_text()
+    assert pseudonymize(secret.read_bytes(), xh.clinician_id) in a
+    assert xh.clinician_id not in a
+
+
+def _cli_with_secret(xh: LifecycleHarness, out: Path, secret: Path) -> Any:
+    return _cli(
+        str(xh.v1.study_yaml),
+        "--db-path",
+        str(xh.db_path),
+        "--out-dir",
+        str(out),
+        "--pseudonym-secret",
+        str(secret),
+    )
+
+
+def test_cli_refuses_a_loose_secret(xh: LifecycleHarness, walked: dict) -> None:
+    secret = xh.tmp_path / "pseudonym.secret"
+    secret.write_bytes(bytes(32))
+    secret.chmod(0o644)
+    out = xh.tmp_path / "bundle"
+
+    result = _cli_with_secret(xh, out, secret)
+
+    assert result.exit_code == 1 and "0600" in result.output
+    assert not out.exists()
+
+
+def test_cli_refuses_a_secret_inside_the_bundle(xh: LifecycleHarness, walked: dict) -> None:
+    out = xh.tmp_path / "bundle"
+
+    result = _cli_with_secret(xh, out, out / "pseudonym.secret")
+
+    assert result.exit_code == 1 and "outside --out-dir" in result.output
+    assert not out.exists()
+
+
+def test_cli_requires_the_secret(xh: LifecycleHarness, walked: dict) -> None:
+    out = xh.tmp_path / "bundle"
+    result = _cli(str(xh.v1.study_yaml), "--db-path", str(xh.db_path), "--out-dir", str(out))
+    assert result.exit_code != 0
+    assert not out.exists()
+
+
+def _leftovers(xh: LifecycleHarness) -> list[str]:
+    return [p.name for p in xh.tmp_path.iterdir() if p.name.startswith((".bundle.", ".key.csv"))]
+
+
+def test_existing_keyfile_refused_before_publishing(xh: LifecycleHarness, walked: dict) -> None:
+    bundle = _bundle(xh, keyfile=KeyfileRequest.REQUESTED)
+    out, key = xh.tmp_path / "bundle", xh.tmp_path / "key.csv"
+    key.write_text("old keyfile")
+
+    with pytest.raises(BundleWriteError, match="keyfile"):
+        write_bundle(bundle, out, keyfile=key)
+
+    assert not out.exists()
+    assert key.read_text() == "old keyfile"
+    assert not _leftovers(xh)
+
+
+def test_replace_keeps_old_keyfile_when_the_bundle_fails(
+    xh: LifecycleHarness, walked: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _bundle(xh, keyfile=KeyfileRequest.REQUESTED)
+    out, key = xh.tmp_path / "bundle", xh.tmp_path / "key.csv"
+    write_bundle(bundle, out, keyfile=key)
+    key.write_text("old keyfile")
+
+    from ehr_simulator import export_bundle
+
+    def boom(_bundle: Any, _files: Any) -> bytes:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(export_bundle, "_manifest", boom)
+    with pytest.raises(OSError, match="disk full"):
+        write_bundle(bundle, out, overwrite=Overwrite.REPLACE, keyfile=key)
+
+    assert key.read_text() == "old keyfile"
+    assert (out / MANIFEST_NAME).exists()
+    assert not _leftovers(xh)
+
+
+def test_replace_swaps_the_keyfile(xh: LifecycleHarness, walked: dict) -> None:
+    bundle = _bundle(xh, keyfile=KeyfileRequest.REQUESTED)
+    out, key = xh.tmp_path / "bundle", xh.tmp_path / "key.csv"
+    key.write_text("old keyfile")
+
+    write_bundle(bundle, out, overwrite=Overwrite.REPLACE, keyfile=key)
+
+    assert key.read_text().splitlines()[0] == "clinician_id,name_normalized"
+    assert stat.S_IMODE(key.stat().st_mode) == 0o600
+    assert not _leftovers(xh)
+
+
+def test_interrupt_restores_previous_bundle(
+    xh: LifecycleHarness, walked: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _bundle(xh)
+    out = xh.tmp_path / "bundle"
+    write_bundle(bundle, out)
+    before = sorted(p.name for p in out.iterdir())
+
+    real_rename = Path.rename
+
+    def interrupt_publish(self: Path, target: Any) -> Any:
+        if self.name.startswith(".bundle.staging-"):
+            raise KeyboardInterrupt
+        return real_rename(self, target)
+
+    monkeypatch.setattr(Path, "rename", interrupt_publish)
+    with pytest.raises(KeyboardInterrupt):
+        write_bundle(bundle, out, overwrite=Overwrite.REPLACE)
+
+    assert sorted(p.name for p in out.iterdir()) == before
+    assert not _leftovers(xh)
+
+
+def test_bundle_files_and_directories_are_fsynced(
+    xh: LifecycleHarness, walked: dict, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _bundle(xh)
+    synced: list[str] = []
+    real_fsync = os.fsync
+
+    def record(fd: int) -> None:
+        synced.append(os.readlink(f"/proc/self/fd/{fd}"))
+        real_fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", record)
+    out = write_bundle(bundle, xh.tmp_path / "bundle")
+
+    names = {Path(p).name for p in synced}
+    assert {t.name for t in bundle.tables} | {MANIFEST_NAME} <= names
+    assert any(Path(p).name.startswith(".bundle.staging-") for p in synced)  # staging dir
+    assert str(out.parent.resolve()) in synced  # parent after the rename

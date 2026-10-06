@@ -76,6 +76,30 @@ _PANEL_WIDTH = 10.0
 _PANEL_HEIGHT = 1.8
 
 
+#: A path needs two points; plotnine warns on (and draws nothing for) fewer.
+_MIN_LINE_POINTS = 2
+
+
+def _line_layers(
+    plot_df: pd.DataFrame, *, group: str | None = None, **geom_kwargs: object
+) -> list[p9.geom_line]:
+    """``geom_line`` over the groups with at least two points, else nothing.
+
+    A one-point group draws no line anyway (its point marker stays); leaving
+    it out of the layer silences plotnine's "Each group consist of only one
+    observation" warning. Example: sbp ×3, dbp ×1 → the line covers sbp only.
+    """
+    if group is None:
+        line_df = plot_df
+    else:
+        sizes = plot_df.groupby(group, observed=True)["t_minutes"].transform("size")
+        line_df = plot_df[sizes >= _MIN_LINE_POINTS]
+
+    if len(line_df) < _MIN_LINE_POINTS:
+        return []
+    return [p9.geom_line(data=line_df, **geom_kwargs)]
+
+
 def _panel_figsize(*, is_bottom: bool) -> tuple[float, float]:  # noqa: ARG001
     # is_bottom kept in signature for callsite symmetry / future tuning;
     # currently both upper and bottom panels render at identical height.
@@ -160,7 +184,7 @@ def render_timeline_svg(
     else:
         plot = (
             p9.ggplot(plot_df, p9.aes(x="t_minutes", y="value"))
-            + p9.geom_line(color=color, size=1.0)
+            + _line_layers(plot_df, color=color, size=1.0)
             + p9.geom_point(color=color, size=3.2)
             + p9.geom_text(
                 p9.aes(label="value"),
@@ -252,7 +276,7 @@ def render_grouped_bp_svg(
     if has_data:
         plot = (
             plot
-            + p9.geom_line(size=1.0)
+            + _line_layers(plot_df, group="variable", size=1.0)
             + p9.geom_point(size=3.0)
             + p9.geom_text(
                 p9.aes(label="value"),
@@ -347,7 +371,7 @@ def render_facet_timeline_svg(
     if has_data:
         plot = (
             plot
-            + p9.geom_line(size=0.9)
+            + _line_layers(plot_df, group="variable", size=0.9)
             + p9.geom_point(size=3.0)
             + p9.geom_text(
                 p9.aes(label="value"),

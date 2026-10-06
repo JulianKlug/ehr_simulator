@@ -3,28 +3,30 @@
 ::
 
     tables ─► CSV bytes (formula guard, RFC 4180, "\\n") ─► SHA256 + row count
-           ─► <parent>/.<name>.staging-<id>/   every CSV, manifest.json last
+           ─► <parent>/.<name>.staging-<id>/   every CSV, manifest.json last (fsynced)
+           ─► keyfile staged beside its target   (0600, before any swap)
            ─► rename to <parent>/<name>/        (--force: old one aside first)
+           ─► keyfile linked / replaced         (parents fsynced)
 
-A failure removes the staging directory and leaves any previous bundle
-untouched. The keyfile is written only after the bundle is published and
-never inside it.
+Keyfile preconditions are checked before anything is written. A failure
+(interrupts included) removes the staging files and puts any previous
+bundle and keyfile back. The keyfile never lies inside the bundle.
 """
 
 from __future__ import annotations
 
-import contextlib
 import csv
 import hashlib
 import io
 import json
+import os
 import shutil
 import uuid
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from ehr_simulator.export import guard_cell, write_keyfile
+from ehr_simulator.export import ExportError, guard_cell, write_keyfile
 from ehr_simulator.export_phase2 import EXPORT_SCHEMA_VERSION, Phase2Bundle, Table
 
 __all__ = ["MANIFEST_NAME", "BundleWriteError", "Overwrite", "render_table", "write_bundle"]
@@ -78,56 +80,112 @@ def write_bundle(
     """Publish ``bundle`` at ``out_dir`` (and ``keyfile`` beside it); return ``out_dir``.
 
     Raises:
-        BundleWriteError: destination exists without ``Overwrite.REPLACE``,
-            keyfile inside the bundle, or a keyfile failure after publication.
+        BundleWriteError: destination or keyfile exists without
+            ``Overwrite.REPLACE``, keyfile inside the bundle, or the keyfile
+            cannot be written (nothing is published then).
     """
     out_dir = Path(out_dir)
-    if keyfile is not None and _inside(Path(keyfile), out_dir):
-        raise BundleWriteError(
-            "--keyfile must lie outside --out-dir: the name mapping never travels with the bundle"
-        )
-    if out_dir.exists() and overwrite is Overwrite.REFUSE:
-        raise BundleWriteError(f"{out_dir} already exists; pass --force to replace it")
-    if keyfile is not None and bundle.keyfile_rows is None:
-        raise BundleWriteError("a keyfile was requested but the bundle carries no keyfile rows")
+    keyfile = Path(keyfile) if keyfile is not None else None
+    _check_preconditions(bundle, out_dir, overwrite, keyfile)
 
     out_dir.parent.mkdir(parents=True, exist_ok=True)
     token = uuid.uuid4().hex
     staging = out_dir.parent / f".{out_dir.name}.staging-{token}"
     aside = out_dir.parent / f".{out_dir.name}.previous-{token}"
+    staged_key = keyfile.parent / f".{keyfile.name}.staging-{token}" if keyfile else None
+    published = False
     staging.mkdir()
     try:
-        files: dict[str, tuple[int, str]] = {}
-        for table in bundle.tables:
-            content = render_table(table)
-            (staging / table.name).write_bytes(content)
-            files[table.name] = (len(table.rows), hashlib.sha256(content).hexdigest())
-        (staging / MANIFEST_NAME).write_bytes(_manifest(bundle, files))
+        _write_staging(bundle, staging)
+        if keyfile is not None and staged_key is not None:
+            _stage_keyfile(bundle, keyfile, staged_key)
 
         if out_dir.exists():
             out_dir.rename(aside)
         staging.rename(out_dir)
-    except Exception:
+        published = True
+        _fsync_dir(out_dir.parent)
+
+        if keyfile is not None and staged_key is not None:
+            _install_keyfile(staged_key, keyfile, overwrite)
+    except BaseException:
+        # Interrupts too: never strand the previous bundle under its aside name.
         shutil.rmtree(staging, ignore_errors=True)
+        if staged_key is not None:
+            staged_key.unlink(missing_ok=True)
+        if published:
+            shutil.rmtree(out_dir, ignore_errors=True)
         if aside.exists() and not out_dir.exists():
             aside.rename(out_dir)  # put the previous bundle back
         raise
 
     shutil.rmtree(aside, ignore_errors=True)
-    if keyfile is not None:
-        _write_keyfile(bundle, Path(keyfile), overwrite, out_dir)
     return out_dir
 
 
-def _write_keyfile(
-    bundle: Phase2Bundle, keyfile: Path, overwrite: Overwrite, out_dir: Path
+def _check_preconditions(
+    bundle: Phase2Bundle, out_dir: Path, overwrite: Overwrite, keyfile: Path | None
 ) -> None:
-    try:
-        if overwrite is Overwrite.REPLACE:
-            with contextlib.suppress(FileNotFoundError):
-                keyfile.unlink()
-        write_keyfile(bundle.keyfile_rows or (), keyfile)
-    except Exception as exc:
+    """Every refusal happens here, before any file is written."""
+    if keyfile is not None and _inside(keyfile, out_dir):
         raise BundleWriteError(
-            f"bundle published at {out_dir}, but the keyfile was not written: {exc}"
-        ) from exc
+            "--keyfile must lie outside --out-dir: the name mapping never travels with the bundle"
+        )
+    if out_dir.exists() and overwrite is Overwrite.REFUSE:
+        raise BundleWriteError(f"{out_dir} already exists; pass --force to replace it")
+    if keyfile is None:
+        return
+
+    if bundle.keyfile_rows is None:
+        raise BundleWriteError("a keyfile was requested but the bundle carries no keyfile rows")
+    if keyfile.is_dir():
+        raise BundleWriteError(f"keyfile {keyfile} is a directory")
+    if keyfile.exists() and overwrite is Overwrite.REFUSE:
+        raise BundleWriteError(f"keyfile {keyfile} already exists; pass --force to replace it")
+
+
+def _write_staging(bundle: Phase2Bundle, staging: Path) -> None:
+    files: dict[str, tuple[int, str]] = {}
+    for table in bundle.tables:
+        content = render_table(table)
+        _write_synced(staging / table.name, content)
+        files[table.name] = (len(table.rows), hashlib.sha256(content).hexdigest())
+    _write_synced(staging / MANIFEST_NAME, _manifest(bundle, files))
+    _fsync_dir(staging)
+
+
+def _stage_keyfile(bundle: Phase2Bundle, keyfile: Path, staged: Path) -> None:
+    """Complete mode-0600 keyfile under a sibling name; the target is untouched."""
+    try:
+        keyfile.parent.mkdir(parents=True, exist_ok=True)
+        write_keyfile(bundle.keyfile_rows or (), staged)
+    except ExportError as exc:
+        raise BundleWriteError(f"the keyfile was not written: {exc}") from exc
+
+
+def _install_keyfile(staged: Path, keyfile: Path, overwrite: Overwrite) -> None:
+    if overwrite is Overwrite.REPLACE:
+        os.replace(staged, keyfile)
+    else:
+        try:
+            os.link(staged, keyfile)  # no clobber: a keyfile created since the check wins
+        except FileExistsError as exc:
+            raise BundleWriteError(f"keyfile {keyfile} appeared during the export") from exc
+        staged.unlink()
+    _fsync_dir(keyfile.parent)
+
+
+def _write_synced(path: Path, content: bytes) -> None:
+    with open(path, "wb") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _fsync_dir(path: Path) -> None:
+    """Make a rename or new entry in ``path`` durable."""
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)

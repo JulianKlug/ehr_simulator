@@ -1,7 +1,8 @@
 """SQLite connection management + db_path resolution.
 
 ``connect`` opens a single :class:`sqlite3.Connection` per app and applies
-the three boot PRAGMAs (WAL journal, NORMAL synchronous, FK enforcement).
+the boot PRAGMAs (WAL journal, NORMAL synchronous, FK enforcement,
+recursive triggers).
 ``check_same_thread=False`` is required because FastAPI dispatches handlers
 on a threadpool; SQLite's serialized threading mode (build default since
 3.5) makes the shared connection safe for the pilot's ≤1 concurrent
@@ -24,6 +25,7 @@ from typing import TYPE_CHECKING
 from urllib.parse import quote
 
 from ehr_simulator.config.exceptions import ConfigError
+from ehr_simulator.db._timestamps import register_sqlite_codecs
 
 if TYPE_CHECKING:
     from ehr_simulator.config.study import StudyConfig
@@ -44,6 +46,9 @@ class AccessMode(StrEnum):
 
 
 _DEFAULT_DB_PATH = Path("data/ehr_simulator.db")
+
+# PARSE_DECLTYPES below reads TIMESTAMP columns through these codecs.
+register_sqlite_codecs()
 
 
 def connect(
@@ -78,6 +83,9 @@ def connect(
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA foreign_keys=ON")
+        # INSERT OR REPLACE deletes the old row; without this its delete
+        # triggers (no-delete / terminal guards) never fire.
+        conn.execute("PRAGMA recursive_triggers=ON")
     return conn
 
 

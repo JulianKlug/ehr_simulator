@@ -33,14 +33,20 @@ def load_case_inputs(
     ``phase2_randomized`` case (practice and Phase 1 are not observations).
 
     Callers own the read transaction (see :func:`load_case_variables`).
+
+    Raises:
+        ConfigurationProvenanceError: the case's pinned version is unknown or
+            registered under another hash.
     """
     assignment = arm_assignments.fetch_activated_for_pair(conn, clinician_id, patient_id)
     if assignment is None or assignment.arm_source != ARM_SOURCE_PHASE2:
         return None
 
-    history = config_history.fetch_version(conn, assignment.config_version or "")
-    if history is None:
-        return None
+    # A measured case pinned to an unknown or re-hashed configuration cannot
+    # be interpreted: raise ConfigurationProvenanceError, never drop the case.
+    history = config_history.require_known(
+        conn, assignment.config_version or "", assignment.config_hash or ""
+    )
     study = parse_study_snapshot(history.study_json)
     questions = parse_questions_snapshot(history.questions_json)
     timepoints = tuple(float(t) for t in study.timepoints_minutes)
