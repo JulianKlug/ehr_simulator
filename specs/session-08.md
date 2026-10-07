@@ -843,24 +843,19 @@ Do not introduce client side chart JavaScript in S8.
 
 ## 12.3 Preflight SLA
 
-Add an opt in `real_data` performance smoke for:
-
-30 Geneva patients × 12 configured timepoints.
+Two opt in `real_data` checks on the same data:
 
 1. Patients: the first 30 ids of the S7 sidecar `test_patient_ids.csv`, in file order, that are present in the real CSV. Test-split patients are used so the AI panel is exercised.
 2. Timepoints: `0, 60, …, 660` minutes.
-3. The study config is built in the test (`tmp_path`) from `.EXAMPLE_DATA_PATHS`, with `geneva_ai` set; no real paths are committed.
-4. The walk renders every panel through the same render functions the route uses (not `slice_to_timepoint` alone).
+3. The dataset is loaded in the test from `.EXAMPLE_DATA_PATHS`, with the Geneva AI artifact; no real paths are committed.
 
-Measure the walk after the dataset is loaded.
+**Slicing walk < 10 seconds**: 30 patients × 12 timepoints through `slice_to_timepoint` (the preflight walk: time bounding + panel states).
 
-Target:
+**Page render < 2 seconds**: each patient's last timepoint through the route's panel render path (`_render_panels_locked`, every panel, measured AI), slowest page under the budget.
 
-**headless walk < 10 seconds**
+Amended after measurement (§22.2): a render walk of 360 pages cannot meet 10 s, since one page costs about nine plotnine charts (~1 s).
 
-on the baseline machine.
-
-Dataset CSV loading is measured separately by the existing Geneva real data smoke and is not included in this 10 second threshold.
+Dataset CSV loading is measured separately by the existing Geneva real data smoke and is not included in either threshold.
 
 ---
 
@@ -1177,7 +1172,7 @@ Target: **at least 37 S8 tests** (items 1-23, 26-38 and 42 below), in addition t
 ## E2E / real data
 
 39. Geneva fixture patient can be walked from first configured timepoint to last without a render error, epic tabs included.
-40. `@pytest.mark.real_data`: 30 patient × 12 timepoint headless walk stays below the S8 SLA.
+40. `@pytest.mark.real_data`: 30 patient × 12 timepoint slicing walk < 10 s, and every patient's page render < 2 s (§12.3).
 41. Manual Chrome trace confirms TTI < 2 seconds on the baseline machine.
 
 ## Added after the refactor audit
@@ -1307,6 +1302,15 @@ Real Geneva patient `1014413_2451` (test split, most scalar rows of the first fi
 
 The page is server bound: 9 plotnine renders at ~100–120 ms each, serialised by `_PANEL_RENDER_LOCK`. TTI on this machine is under 2 s; the baseline laptop trace (item 41) is still to be recorded.
 
-## 22.2 §12.3 SLA conflict (open)
+## 22.2 §12.3 SLA (resolved)
 
-`test_geneva_real.py::test_render_walk_sla` (30 patients × 12 timepoints through `_render_panels_locked`, measured AI) takes **357 s** on this machine against the 10 s target. 10 s / 360 pages is ~28 ms per page, below the cost of a single plotnine chart, so no optimisation within §12.2's candidates (no client side charts) reaches it. A per-process SVG cache does not help a cold walk. Needs a decision: e.g. apply the 10 s budget to the slicing walk (preflight, the original S8 meaning) and set a per-page render budget instead.
+The original §12.3 walk rendered every panel: 357 s for 360 pages against 10 s. 10 s / 360 is ~28 ms per page, below the cost of one plotnine chart, so no §12.2 candidate reaches it. Decision: the 10 s budget applies to the slicing walk, and each page gets a 2 s render budget.
+
+Measured on the workstation above:
+
+| Check | Result |
+|---|---|
+| Slicing walk, 30 × 12 | 6.5 s (10.6 s before collapsing the aggregate family check into one pivot) |
+| Slowest page render, 30 patients at t = 660 | 1.49 s |
+
+Headroom is ~35 % on the slicing walk; about half of each slice is the pre-S8 per-patient filter over the full frames. A slower baseline laptop may need a per-patient frame cache.

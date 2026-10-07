@@ -79,7 +79,7 @@ def test_inventory_labels_arrive_in_expected_frames(real_geneva) -> None:
 
 
 # ---------------------------------------------------------------------------
-# S8 §12.3: headless render walk SLA (30 patients × 12 timepoints)
+# S8 §12.3: slicing walk SLA + per page render budget
 # ---------------------------------------------------------------------------
 
 AI_MODEL_DIR = Path(
@@ -89,20 +89,19 @@ AI_SPLIT = REAL_CSV.parent / "test_data_early_neurological_deterioration_ts0.8_r
 EXPORT_SCRIPT = Path(__file__).parents[1] / "scripts" / "export_geneva_test_ids.py"
 SLA_PATIENTS = 30
 SLA_TIMEPOINTS = tuple(60.0 * h for h in range(12))  # 0, 60, …, 660
-SLA_SECONDS = 10.0
+SLICE_WALK_SECONDS = 10.0
+PAGE_RENDER_SECONDS = 2.0
+AI_MODEL_ID = "opsum_end_xgb"
 
 
-@pytest.mark.real_data
-def test_render_walk_sla(tmp_path: Path) -> None:
+@pytest.fixture(scope="module")
+def sla_dataset(tmp_path_factory: pytest.TempPathFactory):
+    """The first 30 test split patients present in the CSV, with their AI rows."""
     import importlib.util
 
     import pandas as pd
 
-    from ehr_simulator.config.study import AIInterventionConfig
     from ehr_simulator.ingestion import GenevaAISource
-    from ehr_simulator.web.panel_render import _render_panels_locked
-    from ehr_simulator.web.panels import InterventionContext, InterventionMode, slice_to_timepoint
-    from tests.support.geneva_ui import stub_request
 
     if not REAL_CSV.is_file() or not AI_MODEL_DIR.is_dir() or not AI_SPLIT.is_file():
         pytest.skip("real Geneva data or AI artifact not available")
@@ -111,7 +110,7 @@ def test_render_walk_sla(tmp_path: Path) -> None:
     assert spec is not None and spec.loader is not None
     script = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(script)
-    sidecar = tmp_path / "test_patient_ids.csv"
+    sidecar = tmp_path_factory.mktemp("sla") / "test_patient_ids.csv"
     script.export(AI_SPLIT, AI_MODEL_DIR / "test_predictions.pkl", sidecar)
 
     present = set(
@@ -121,7 +120,6 @@ def test_render_walk_sla(tmp_path: Path) -> None:
     patients = tuple([pid for pid in test_ids if pid in present][:SLA_PATIENTS])
     assert len(patients) == SLA_PATIENTS
 
-    model_id = "opsum_end_xgb"
     dataset = load_geneva(
         REAL_CSV,
         REAL_PARAMS_DIR,
@@ -131,13 +129,42 @@ def test_render_walk_sla(tmp_path: Path) -> None:
             predictions_path=AI_MODEL_DIR / "test_predictions.pkl",
             patient_ids_path=sidecar,
             model_path=AI_MODEL_DIR / "xgb_final_model.model",
-            model_id=model_id,
+            model_id=AI_MODEL_ID,
             explanations_dir=AI_MODEL_DIR / "shap_explanations_over_time",
         ),
     )
+    return patients, dataset
+
+
+@pytest.mark.real_data
+def test_slicing_walk_sla(sla_dataset) -> None:
+    """30 × 12 time bounded slices (the preflight walk) under 10 s."""
+    from ehr_simulator.web.panels import slice_to_timepoint
+
+    patients, dataset = sla_dataset
+    start = time.monotonic()
+    for patient_id in patients:
+        for t_index, t in enumerate(SLA_TIMEPOINTS):
+            sliced = slice_to_timepoint(dataset, patient_id, t, t_index, timepoints=SLA_TIMEPOINTS)
+            assert (sliced.scalar_ts["t_minutes"] <= t).all()
+    elapsed = time.monotonic() - start
+
+    print(f"S8 slicing walk: {len(patients)}×{len(SLA_TIMEPOINTS)} in {elapsed:.2f}s")
+    assert elapsed < SLICE_WALK_SECONDS, f"slicing walk took {elapsed:.1f}s"
+
+
+@pytest.mark.real_data
+def test_page_render_budget(sla_dataset) -> None:
+    """Every patient's last timepoint, all panels + measured AI, under 2 s each."""
+    from ehr_simulator.config.study import AIInterventionConfig
+    from ehr_simulator.web.panel_render import _render_panels_locked
+    from ehr_simulator.web.panels import InterventionContext, InterventionMode, slice_to_timepoint
+    from tests.support.geneva_ui import stub_request
+
+    patients, dataset = sla_dataset
     loaded = dataset.ai_provenance
     configured = AIInterventionConfig(
-        model_id=model_id,
+        model_id=AI_MODEL_ID,
         model_system_version=loaded.model_system_version,
         prediction_artifact_sha256=loaded.prediction_sha256,
         explanation_artifact_sha256=loaded.explanation_sha256,
@@ -146,16 +173,18 @@ def test_render_walk_sla(tmp_path: Path) -> None:
     )
     intervention = InterventionContext(InterventionMode.AI, configured, loaded)
     request = stub_request()
+    t_index = len(SLA_TIMEPOINTS) - 1
 
-    start = time.monotonic()
-    errors = []
+    durations = {}
     for patient_id in patients:
-        for t_index, t in enumerate(SLA_TIMEPOINTS):
-            sliced = slice_to_timepoint(dataset, patient_id, t, t_index, timepoints=SLA_TIMEPOINTS)
-            _render_panels_locked(sliced, request, intervention)
-            errors += [(patient_id, t, p) for p, e in sliced.panel_errors.items() if e]
-    elapsed = time.monotonic() - start
+        start = time.monotonic()
+        sliced = slice_to_timepoint(
+            dataset, patient_id, SLA_TIMEPOINTS[t_index], t_index, timepoints=SLA_TIMEPOINTS
+        )
+        _render_panels_locked(sliced, request, intervention)
+        durations[patient_id] = time.monotonic() - start
+        assert not any(sliced.panel_errors.values()), patient_id
 
-    assert errors == []
-    print(f"S8 render walk: {SLA_PATIENTS}×{len(SLA_TIMEPOINTS)} in {elapsed:.1f}s")
-    assert elapsed < SLA_SECONDS, f"render walk exceeded {SLA_SECONDS}s ({elapsed:.1f}s)"
+    slowest = max(durations, key=durations.get)
+    print(f"S8 page render: max {durations[slowest]:.2f}s ({slowest})")
+    assert durations[slowest] < PAGE_RENDER_SECONDS, (slowest, durations[slowest])

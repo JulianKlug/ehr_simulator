@@ -47,6 +47,11 @@ from ehr_simulator.web.clinical_fields import displayed_scalar_ids
 PanelState = Literal[
     "loading", "empty-expected", "empty-unexpected", "partial", "error", "unavailable"
 ]
+#: Every aggregate family id: medians and their bounds.
+_FAMILY_MEMBERS = frozenset(AGGREGATE_BOUNDS) | {
+    b for pair in AGGREGATE_BOUNDS.values() for b in pair
+}
+
 PanelName = Literal["vitals", "neuro_support", "labs", "admission", "imaging", "ai"]
 
 #: S11g: imaging columns the imaging panel shows.
@@ -217,17 +222,22 @@ def _scalar_panel_state(
 
 def _aggregate_inconsistent(rows: pd.DataFrame) -> bool:
     """A family bucket has a bound without its median, or breaks
-    ``min <= median <= max``. Example: ``hr_max=90`` alone at t=60 → True."""
+    ``min <= median <= max``. Example: ``hr_max=90`` alone at t=60 → True.
+
+    One pivot over every family member present (this runs per request).
+    """
+    members = rows.loc[rows.variable.isin(_FAMILY_MEMBERS) & rows.value.notna()]
+    if members.empty:
+        return False
+    wide = members.groupby(["t_minutes", "variable"])["value"].first().unstack()
     for median, (low, high) in AGGREGATE_BOUNDS.items():
-        family = rows.loc[rows.variable.isin((median, low, high)) & rows.value.notna()]
-        if family.empty:
+        if low not in wide and high not in wide:
             continue
-        wide = family.groupby(["t_minutes", "variable"])["value"].first().unstack()
-        wide = wide.reindex(columns=[low, median, high])
-        has_bound = wide[low].notna() | wide[high].notna()
-        if (has_bound & wide[median].isna()).any():
+        family = wide.reindex(columns=[low, median, high])
+        has_bound = family[low].notna() | family[high].notna()
+        if (has_bound & family[median].isna()).any():
             return True
-        if (wide[low] > wide[median]).any() or (wide[median] > wide[high]).any():
+        if (family[low] > family[median]).any() or (family[median] > family[high]).any():
             return True
     return False
 
