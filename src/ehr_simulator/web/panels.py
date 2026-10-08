@@ -237,9 +237,20 @@ def _aggregate_inconsistent(rows: pd.DataFrame) -> bool:
         has_bound = family[low].notna() | family[high].notna()
         if (has_bound & family[median].isna()).any():
             return True
-        if (family[low] > family[median]).any() or (family[median] > family[high]).any():
+        if _exceeds(family[low], family[median]) or _exceeds(family[median], family[high]):
             return True
     return False
+
+
+#: Inverse normalisation leaves float noise: Geneva NIHSS min 1.0000000000000009
+#: with median 1.0 is one value, not an inconsistency.
+_BOUND_ORDER_REL_TOL = 1e-9
+
+
+def _exceeds(lower: pd.Series, upper: pd.Series) -> bool:
+    """``lower > upper`` beyond float noise (NaN never exceeds)."""
+    scale = upper.abs().clip(lower=1.0)
+    return bool(((lower - upper) > _BOUND_ORDER_REL_TOL * scale).any())
 
 
 def _imaging_panel_state(
