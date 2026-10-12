@@ -1,4 +1,4 @@
-# Session 08 — Real data UI on Geneva
+# Session 08 — Real data UI on Geneva [SHIPPED 2026-10-12]
 
 ## Goal
 
@@ -1314,3 +1314,10 @@ Measured on the workstation above:
 | Slowest page render, 30 patients at t = 660 | 1.49 s |
 
 Headroom is ~35 % on the slicing walk; about half of each slice is the pre-S8 per-patient filter over the full frames. A slower baseline laptop may need a per-patient frame cache.
+
+## 22.3 Acceptance (2026-10-12)
+
+- Criteria 1–16 and 19–21: covered by the test inventory (items 1–40, 42) and the real data checks.
+- Criterion 18: a clinician walked a Phase 2 demo on real Geneva data (8 test split patients, timepoints 2, 12, 24, 48 h, AI and no AI arms).
+- Criterion 17 / item 41: measured on the dev workstation (§22.1, ~1.2 s load); no Chrome trace of the baseline laptop was recorded.
+- Found during the demo setup: inverse normalisation leaves bounds a few ulps off the median, which read as `partial`; bound order now uses a 1e-9 relative tolerance (`2118e18`).

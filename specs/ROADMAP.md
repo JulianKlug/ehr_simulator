@@ -138,7 +138,7 @@ Scope:
 
 Status: shipped 2026-10-01 (spec `specs/session-07.md`). The artifacts are positional, so patient ids come from a sidecar exported once by `scripts/export_geneva_test_ids.py`. Wired through the study config (`geneva_ai`) and `load_geneva(..., ai_source=...)`, and populates `GenevaDataset.ai_provenance` so the S11g boot and preflight gates verify the loaded artifact.
 
-### Session 8 — Real-data UI on Geneva (read-only) [NEXT]
+### Session 8 — Real-data UI on Geneva (read-only) [SHIPPED]
 
 Goal: the thin UI from Session 2 now renders Geneva data + AI panel from S7.
 
@@ -153,6 +153,8 @@ Scope:
 **Test inventory:** ≥7 tests. 3+ unit (plotnine renderer, dataset cache, AI panel template). 2+ integration (5 UI states per panel, validate-once-cache). 1 **[REGRESSION]** test: **data ≤ t only** — request `t=N` returns no rows with `t_minutes > N`. The data leak failure mode invalidates study validity; this test is non-negotiable. 1 [→E2E] (full Geneva patient walk).
 
 **Acceptance:** clinician can navigate a real Geneva patient end-to-end on a laptop in-person.
+
+Status: shipped 2026-10-12 (spec `specs/session-08.md`, commits `f17b2ff` .. `2118e18`). Every Geneva study variable maps to a canonical id and a panel through a display registry: aggregate vitals as range bars, a sixth Neuro / Support panel, the full lab set, grouped admission, imaging derived volumes and findings, and a bounded AI explanation (probability + top five contributors per sign, pinned `outcome_label`). Empty states no longer reveal future data, and preflight checks exactly what is shown. The perf SLA was split into a 10 s slicing walk and a 2 s per page render budget (spec §22.2). Acceptance: a clinician walked a Phase 2 demo on real Geneva data.
 
 ### Session 9 — Question gating + answer capture + CSV export (split) [SHIPPED]
 
@@ -239,7 +241,7 @@ What shipped:
 - **Integration gate (S11o):** end to end scenarios in `tests/test_phase2_integration.py`, `tests/e2e/test_phase2_walk.py`, `tests/e2e/test_multitab_walk.py`.
 - **Clinician characteristics (S11p):** role, years of practice, country and specialty collected before the first measured case, locked once it starts, exported as `clinicians.csv`.
 
-### Session 12 — Phase 2.5 polished divergence + v1.0 release
+### Session 12 — Phase 2.5 polished divergence + v1.0 release [NEXT]
 
 Goal: publication-quality divergence view + reproducible analysis notebook + open-source v1.0 release. This is a **must-have** for v1.0 per the design doc — "do not ship v1.0 without it."
 
