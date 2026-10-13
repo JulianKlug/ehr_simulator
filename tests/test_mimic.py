@@ -137,7 +137,7 @@ def test_load_mimic_admission_matches_expected_sidecar_plus_anchors(
         ("mimic_fixture_001", "Referral", "Emergency service (144)"),
         ("mimic_fixture_002", "Sex", "Male"),
         ("mimic_fixture_002", "categorical_IVT", "91-270min"),
-        ("mimic_fixture_002", "Prestroke disability (Rankin)", "2.0"),
+        ("mimic_fixture_002", "Prestroke disability (Rankin)", "1.0"),
     ]
     admission = dataset.admission
     for patient_id, field, value in anchors:

@@ -10,6 +10,7 @@ the helpers later — adding dataset-specific behavior in either adapter
 
 from __future__ import annotations
 
+import ast
 import math
 from pathlib import Path
 from typing import Any
@@ -446,6 +447,31 @@ def test_load_categorical_encoding_covers_all_19_groups(dataset: str) -> None:
     # A one-hot column absent from the CSV is refused, e.g. sex_male.
     with pytest.raises(AdapterError, match="sex_male"):
         _load_categorical_encoding(encoding, sample_labels - {"sex_male"}, dataset=dataset)
+
+
+_NORM_PARAMS_FIXTURES = (
+    Path("geneva") / "normalisation_parameters.csv",
+    Path("mimic") / "reference_population_normalisation_parameters.csv",
+)
+
+
+@pytest.mark.parametrize("relative", _NORM_PARAMS_FIXTURES, ids=["geneva", "mimic"])
+def test_fixture_normalisation_params_are_fabricated(relative: Path) -> None:
+    """No cohort aggregate is published: row i is (10·(i+1), i+1), e.g. (10, 1)."""
+    params = pd.read_csv(Path(__file__).parent / "fixtures" / relative)
+    for i, row in enumerate(params.itertuples(index=False)):
+        assert (row.original_mean, row.original_std) == (10.0 * (i + 1), float(i + 1))
+
+
+@pytest.mark.parametrize("dataset", ["geneva", "mimic"])
+def test_fixture_category_order_is_alphabetical(dataset: str) -> None:
+    """Category order carries no cohort information (e.g. appearance order)."""
+    encoding = pd.read_csv(
+        Path(__file__).parent / "fixtures" / dataset / "categorical_variable_encoding.csv"
+    )
+    for raw in encoding["other_categories"]:
+        others = [str(label) for label in ast.literal_eval(raw)]
+        assert others == sorted(others)
 
 
 def test_load_categorical_encoding_refuses_empty_baseline_list(tmp_path: Path) -> None:
