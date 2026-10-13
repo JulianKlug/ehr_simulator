@@ -2,7 +2,7 @@
 
 Inline DataFrames cover the helper-level contracts (#1–#7e). The
 ``geneva_fixture_dir`` fixture supplies a 2-patient slice of the real CSV
-for the integration / E2E tests (#8–#12, #14). The 1.5 GB real-CSV smoke
+for the integration / E2E tests (#8–#12, #14). The real-CSV smoke
 test lives in ``test_geneva_real.py`` behind the ``real_data`` marker.
 """
 

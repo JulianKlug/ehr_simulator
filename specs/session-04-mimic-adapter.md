@@ -80,7 +80,7 @@ There is no upstream xlsx units source for MIMIC. The adapter ships with `unit=N
 
 Real-CSV facts the spec is built on (verified via direct inspection 2026-05-06):
 
-- **CSV columns:** `relative_sample_date_hourly_cat`, `case_admission_id`, `sample_label`, `source`, `value` — **no unnamed-index column** (vs Geneva has one). 1,831,752 data rows. 247 unique `case_admission_id`s. 103 unique `sample_label`s (same count as Geneva). Hour buckets 0–71 (same window as Geneva).
+- **CSV columns:** `relative_sample_date_hourly_cat`, `case_admission_id`, `sample_label`, `source`, `value` — **no unnamed-index column** (vs Geneva has one). Data row and patient counts withheld (not published). 103 unique `sample_label`s (same count as Geneva). Hour buckets 0–71 (same window as Geneva).
 - **All 8 observed `source` values:** `EHR`, `EHR_locf_imputed`, `EHR_pop_imputed`, `EHR_pop_imputed_locf_imputed`, `notes`, `notes_locf_imputed`, `missing_pop_imputed`, `missing_pop_imputed_locf_imputed`. **Substring match on `"imputed"` drops 6 of 8** (the two non-imputed survivors are `EHR` and `notes`). `notes` is the registry-equivalent — replaces Geneva's `stroke_registry`.
 - **`notes` rows are already one-hot expanded in `sample_label`** (`sex_male`, `medhist_*_yes`, `categorical_iat_*`, `prestroke_disability_(rankin)_*.0`, …) — same convention as Geneva. 35 distinct labels emitted under `source = "notes"`.
 - **`notes` rows repeat across the 72 hour buckets per patient.** Admission is static — adapter takes the `t=0` slice only.
@@ -460,8 +460,8 @@ Numbered to match commits in §12 below.
 
 16. **`test_load_mimic_real_csv_smoke`** — marked `@pytest.mark.real_data`; **skipped by default** in CI and `pytest -n auto`; runnable via `uv run pytest -m real_data`. Loads `/mnt/data1/klug/datasets/opsum/.../preprocessed_features_16022026_095909.csv` + `.../logs_16022026_095909/` via `load_mimic(strict=False)`. Asserts:
     - load completes within **90 s** wall time (post-eng-review T3; MIMIC is 10× smaller than Geneva but chunked-read fixed cost + pandera validation dominate at low row counts. 90 s gives headroom for slower CI runners and cold filesystem reads on `/mnt`).
-    - `dataset.scalar_ts` has rows for "most patients" — concrete count locked when the implementer measures whether all 247 patients have both EHR and notes rows; if some patients lack EHR rows, the assertion is `len(set(scalar_ts.patient_id.unique())) >= N` where N is the measured count, NOT a hardcoded 247.
-    - `dataset.admission` has all 247 patients (notes rows are guaranteed per Explore A; verified at fixture-build time).
+    - `dataset.scalar_ts` has rows for "most patients" — concrete count locked when the implementer measures whether every patient has both EHR and notes rows; if some patients lack EHR rows, the assertion is `len(set(scalar_ts.patient_id.unique())) >= N` where N is the measured count, never a hardcoded count.
+    - `dataset.admission` has every patient (notes rows are guaranteed per Explore A; verified at fixture-build time).
     - `dataset.issues` is reportable on test failure for debugging.
 
 The `real_data` marker is already registered in `pyproject.toml` from S3.
@@ -542,7 +542,7 @@ Splitting the `_shared.py` extraction + Geneva refactor into commit 1 keeps the 
 
 - **MIMIC AI predictions** — no upstream `test_predictions.pkl` exists for MIMIC. Deferred to whichever session first needs cross-dataset AI panel rendering. Until then, MIMIC's `AI_OUTPUT` stays empty by design.
 - **MIMIC real-data UI integration** — S8 still uses Geneva. Surfacing MIMIC in the UI requires a dataset selector (likely lands with the CLI in S5 or with the SQLite layer in S6). Punted.
-- **Performance on the 1.83M-row real CSV** — S4 trusts pandas + chunked-read defaults. Test #16's 90s budget is the only measurement (post-T3). If S8 surfaces MIMIC and load time matters, revisit.
+- **Performance on the real CSV** — S4 trusts pandas + chunked-read defaults. Test #16's 90s budget is the only measurement (post-T3). If S8 surfaces MIMIC and load time matters, revisit.
 - **MIMIC display-formatting policy** — decimal places, locale, French→English translation: same punt as S3, lands in S8.
 - **Refactoring `_DATASET_NAME` constants out of the per-adapter modules** — `mimic.py` and `geneva.py` each define `_DATASET_NAME` for use in error messages outside the lifted helpers (e.g. the required-column check). This is intentionally a per-module constant, not a `_shared.py` enum. Revisit only if a third adapter adds enough duplication to justify it.
 - **Memoizing `_load_normalisation_params` / `_load_categorical_encoding`** — premature; called once per `load_mimic` invocation and the files are <2 KB each. Revisit only if profiling shows otherwise.
@@ -554,7 +554,7 @@ Splitting the `_shared.py` extraction + Geneva refactor into commit 1 keeps the 
 - AI predictions for MIMIC (no upstream pkl).
 - MIMIC real-data UI integration (S8 stays on Geneva).
 - Display-formatting policy for MIMIC (S8).
-- Performance budgets on the real 1.83M-row CSV beyond the 90s smoke wall-time check.
+- Performance budgets on the real CSV beyond the 90s smoke wall-time check.
 - Units lookup for MIMIC (no source exists; `unit=None` is the locked behavior).
 - Tighter `EHR_SIM_DATA_ROOT` contract — S5 (`validate-adapter` CLI tightens both adapters to required env-var simultaneously).
 - Backup cadence (D10) — S6.

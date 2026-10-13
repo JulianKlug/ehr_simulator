@@ -1,4 +1,4 @@
-"""Opt-in smoke test against the real 1.5 GB Geneva CSV.
+"""Opt-in smoke test against the real Geneva CSV.
 
 Skipped by default. Run via ``uv run pytest -m real_data``. Lives outside
 the default ``-m 'not e2e'`` selector and is not parallelised so the load

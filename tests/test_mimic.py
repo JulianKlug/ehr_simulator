@@ -2,7 +2,7 @@
 
 Inline DataFrames cover the helper-level contracts; ``mimic_fixture_dir``
 supplies a 2-patient slice of the real CSV for the integration / E2E
-tests. The 1.83M-row real-CSV smoke test lives in ``test_mimic_real.py``
+tests. The real-CSV smoke test lives in ``test_mimic_real.py``
 behind the ``real_data`` marker.
 
 Anchor assertions in test #9 sub-(b) were locked at S4 implementation

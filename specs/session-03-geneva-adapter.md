@@ -73,7 +73,7 @@ The adapter also reads units from a committed JSON file (deliverable #6) that is
 
 Real-CSV facts the spec is built on (verified via direct inspection 2026-05-06):
 
-- **CSV columns:** unnamed-index, `relative_sample_date_hourly_cat`, `case_admission_id`, `sample_label`, `source`, `value`. 19,704,311 data rows. 2,657 unique `case_admission_id`s. 103 unique `sample_label`s. Hour buckets 0–71.
+- **CSV columns:** unnamed-index, `relative_sample_date_hourly_cat`, `case_admission_id`, `sample_label`, `source`, `value`. Data row and patient counts withheld (not published). 103 unique `sample_label`s. Hour buckets 0–71.
 - **All 8 observed `source` values:** `EHR`, `EHR_locf_imputed`, `EHR_pop_imputed`, `EHR_pop_imputed_locf_imputed`, `stroke_registry`, `stroke_registry_locf_imputed`, `stroke_registry_pop_imputed`, `stroke_registry_pop_imputed_locf_imputed`. Substring match on `"imputed"` drops 6 of 8.
 - **`stroke_registry` rows are already one-hot expanded in `sample_label`** (`sex_male`, `medhist_hypertension_yes`, `categorical_iat_no_iat`, …). The adapter consults `categorical_variable_encoding.csv` to re-fold one-hot groups back to single labels.
 - **`stroke_registry` rows repeat across all 72 hour buckets per patient.** Admission is static — adapter takes the `t=0` slice only.
@@ -393,7 +393,7 @@ Numbered to match `commits` in §13 below. Tests marked **(post-review-N.M)** we
 
 1. **`test_drop_imputed_drops_six_of_eight_known_sources`** (`tests/test_geneva.py`) — inline frame with one row per of the 8 observed `source` values; assert `_drop_imputed` returns exactly 2 rows (`EHR`, `stroke_registry`). Asserts the substring contract is "contains `imputed`", not "endswith".
 
-2. **`test_inverse_normalize_round_trip`** (`tests/test_geneva.py`) — `_inverse_normalize(_normalize(x), m, s) ≈ x` for `(x, m, s)` ∈ {(73.6, 73.6, 14.5), (1.09, 1.09, 0.27), (0.0, 22.1, 4.3)}` (pulled from real `normalisation_parameters.csv` rows). NaN input → NaN output.
+2. **`test_inverse_normalize_round_trip`** (`tests/test_geneva.py`) — `_inverse_normalize(_normalize(x), m, s) ≈ x` for `(x, m, s)` ∈ three `(x, m, s)` triples taken from `normalisation_parameters.csv` rows (values withheld: real cohort statistics are not published). NaN input → NaN output.
 
 3. **`test_decode_categorical_threshold_below_returns_baseline`** (`tests/test_geneva.py`) — group `Sex` (baseline=`Female`, other=`Male`, one_hot=`("sex_male",)`), single-row input with `value=0.4` → returns `("Female", None)`.
 
@@ -454,7 +454,7 @@ Numbered to match `commits` in §13 below. Tests marked **(post-review-N.M)** we
 
 13. **`test_data_contract_md_no_drift`** (`tests/test_data_contract.py`) — invokes `python scripts/gen_data_contract.py --check` via `subprocess.run` in the project root; asserts exit code 0 and stderr is empty. If the check fails, the test prints the diff snippet to aid the implementer fixing it.
 
-13a. **`test_load_geneva_real_csv_smoke`** (`tests/test_geneva_real.py`, **post-review-1.3**) — marked `@pytest.mark.real_data`; **skipped by default** in CI and `pytest -n auto`; runnable via `uv run pytest -m real_data`. Loads `/mnt/data1/klug/datasets/opsum/.../preprocessed_features_30012026_154047.csv` + `.../logs_30012026_154047/` via `load_geneva(strict=False)`. Asserts: (a) load completes within 120 s wall time; (b) `dataset.scalar_ts` has rows for all 2,657 patients (or whatever the implementer measures and locks); (c) `dataset.admission` has 2,657 patients; (d) `dataset.issues` is reportable (printed on test failure for debugging). Adds `real_data` marker to `[tool.pytest.ini_options]` so `--strict-markers` is satisfied.
+13a. **`test_load_geneva_real_csv_smoke`** (`tests/test_geneva_real.py`, **post-review-1.3**) — marked `@pytest.mark.real_data`; **skipped by default** in CI and `pytest -n auto`; runnable via `uv run pytest -m real_data`. Loads `/mnt/data1/klug/datasets/opsum/.../preprocessed_features_30012026_154047.csv` + `.../logs_30012026_154047/` via `load_geneva(strict=False)`. Asserts: (a) load completes within 120 s wall time; (b) `dataset.scalar_ts` has rows for every patient; (c) `dataset.admission` has every patient; (d) `dataset.issues` is reportable (printed on test failure for debugging). Adds `real_data` marker to `[tool.pytest.ini_options]` so `--strict-markers` is satisfied.
 
 ### Regression (1, non-negotiable)
 
@@ -488,7 +488,7 @@ Every item is a check a reviewer can run.
 - [ ] `src/ehr_simulator/ingestion/data/geneva_units.json` is committed; contents valid JSON parsing to a non-empty `dict[str, str]`.
 - [ ] `uv run python scripts/gen_data_contract.py` produces `docs/data-contract.md`; `--check` re-run is clean.
 - [ ] `uv run python -c "from ehr_simulator.ingestion import load_geneva; from pathlib import Path; ds = load_geneva(Path('tests/fixtures/geneva_sample.csv'), Path('tests/fixtures')); print(len(ds.scalar_ts), len(ds.admission))"` exits 0 with non-zero counts on both frames.
-- [ ] `uv run pytest -m real_data` exits 0 (post-review-1.3 smoke test on the real 1.5 GB CSV; opt-in marker, skipped by default).
+- [ ] `uv run pytest -m real_data` exits 0 (post-review-1.3 smoke test on the real CSV; opt-in marker, skipped by default).
 - [ ] `EHR_SIM_DATA_ROOT=/mnt/data1/klug/datasets/opsum uv run python -c "from ehr_simulator.ingestion import load_geneva; from pathlib import Path; load_geneva(Path('/mnt/data1/klug/datasets/opsum/short_term_outcomes/with_imaging/gsu_Extraction_20220815_prepro_30012026_154047/preprocessed_features_30012026_154047.csv'), Path('/mnt/data1/klug/datasets/opsum/short_term_outcomes/with_imaging/gsu_Extraction_20220815_prepro_30012026_154047/logs_30012026_154047'))"` exits 0.
 - [ ] `EHR_SIM_DATA_ROOT=/tmp uv run python -c "..."` (same call as above) exits non-zero with `AdapterError` mentioning `path traversal`.
 - [ ] `EHR_SIM_DATA_ROOT="" uv run python -c "..."` (empty-string sentinel) exits 0 — the empty string is treated as unset (post-review-1.5).
@@ -549,7 +549,7 @@ Splitting the path-traversal guard + real-data smoke into commit 3 keeps commit 
 - AI predictions (S7). `AI_OUTPUT` stays empty in S3.
 - Real-data UI integration (S8). The thin UI from S2 keeps loading `load_synthetic` until S8.
 - Display-formatting policy (decimal places, French→English variable translation, units rendering rules in panels). Punted to S8 where the real-data UI surfaces what's actually needed.
-- Performance budgets. The fixture is small (<5K rows); the real CSV is ~20M rows. S8 measures actual load time and decides whether to add caching, parquet conversion, or column-pruning. S3 trusts pandas defaults.
+- Performance budgets. The fixture is small (<5K rows); the real CSV is orders of magnitude larger. S8 measures actual load time and decides whether to add caching, parquet conversion, or column-pruning. S3 trusts pandas defaults.
 - Tighter `EHR_SIM_DATA_ROOT` contract — S5.
 - Backup cadence (D10) — S6 wires it into SQLite boot.
 

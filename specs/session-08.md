@@ -205,7 +205,7 @@ If any assertion fails, stop and amend this spec before building panels on it.
 
 ### 1.3.1 Result on the real CSV (amendment)
 
-Assertions 1 and 2 hold. Assertion 3 **fails**: the four binary imaging variables are `stroke_registry` rows, present at `t=0` only (`hypoperfusion_*` 1901 patients, `vascular_*` 2502). The adapter (`strict=False`, the app's load mode) routes them to `ADMISSION` through the flat binary tier, as `"True"`/`"False"`.
+Assertions 1 and 2 hold. Assertion 3 **fails**: the four binary imaging variables are `stroke_registry` rows, present at `t=0` only (patient counts withheld). The adapter (`strict=False`, the app's load mode) routes them to `ADMISSION` through the flat binary tier, as `"True"`/`"False"`.
 
 Amended contract:
 
@@ -1291,7 +1291,7 @@ Deploying is out of scope (project rule: no deploy or push without the user).
 
 Machine: **development workstation, not the baseline laptop** (§12.2). Intel Xeon W-2275 (14 cores / 28 threads, 3.3 GHz), 61 GB RAM, Linux 6.14, Python 3.11.14, headless Chromium 147.0.7727.15.
 
-Real Geneva patient `1014413_2451` (test split, most scalar rows of the first five), `t_index` 23 (t = 1380 min) on the dataset hourly timeline, epic chrome, legacy AI (latest row with contributors + probability history):
+One real Geneva test split patient (most scalar rows of the first five; id withheld), `t_index` 23 (t = 1380 min) on the dataset hourly timeline, epic chrome, legacy AI (latest row with contributors + probability history):
 
 | Measure | Value |
 |---|---|
@@ -1306,7 +1306,7 @@ The page is server bound: 9 plotnine renders at ~100–120 ms each, serialised b
 
 | Metric | Trace 1 | Trace 2 |
 |---|---|---|
-| Patient | `100023_4784` | `1030145_4574` |
+| Patient | real patient A (id withheld) | real patient B (id withheld) |
 | Timepoint index | 2 | 0 |
 | Layout | epic | epic |
 | First Contentful Paint | 1.49 s | 1.41 s |

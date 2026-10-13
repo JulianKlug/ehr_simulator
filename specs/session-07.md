@@ -76,13 +76,13 @@ Summary: **neither artifact carries patient ids, timestep indexes or model ident
 | Format | standard pickle, protocol 4, 460 751 bytes |
 | Globals | `numpy.dtype`, `numpy.ndarray`, `numpy.core.multiarray._reconstruct` only |
 | Top level | `tuple` of length 2 |
-| `[0]` | `ndarray (38376,) float64`, values `{0.0, 1.0}`: **ground truth `y_true`** |
-| `[1]` | `ndarray (38376,) float32`, range 0.00264–0.853: **predicted probability `y_prob`** |
+| `[0]` | `ndarray (72·N,) float64`, values `{0.0, 1.0}`: **ground truth `y_true`** |
+| `[1]` | `ndarray (72·N,) float32`, values in `[0, 1]`: **predicted probability `y_prob`** |
 | NaN / inf | none |
 | Patient id | not present |
 | Timestep | not present; implied by position |
 | Layout | patient major: row `r` → test patient `r // 72`, timestep `r % 72` |
-| Patients × timesteps | 533 × 72 = 38 376 |
+| Patients × timesteps | N × 72 (N withheld) |
 | Timesteps | 0..71, hourly |
 | `model_id` / version | not present |
 
@@ -96,11 +96,11 @@ Label semantics (observation only, not used by S7): `y_true[t] = 1` when an earl
 |---|---|
 | Layout | flat directory, exactly 2 regular files, no symlinks, 167 MB |
 | `shap_feature_names.pkl` | `list[str]`, 1134 unique names, no globals |
-| `tree_explainer_shap_values_over_ts.pkl` | `list` of 72 `ndarray (533, 1135) float32`; same three numpy globals |
+| `tree_explainer_shap_values_over_ts.pkl` | `list` of 72 `ndarray (N, 1135) float32`; same three numpy globals |
 | List index | timestep (0..71) |
 | Axis 0 | test patient, same order as predictions |
 | Columns 0..1133 | per feature contributions in `shap_feature_names` order, log odds |
-| Column 1134 | bias / expected value, constant `-0.6404414` over all rows |
+| Column 1134 | bias / expected value, constant over all rows (value withheld) |
 | NaN / inf | none |
 | Third party package | none (numpy only; no `shap.Explanation` objects) |
 | Read + hash + unpickle | 0.46 s |
@@ -109,14 +109,14 @@ Each row describes one timestep's feature vector. Feature names are all backward
 
 ### Explore C: identifier compatibility
 
-- Clinical CSV: `case_admission_id`, string `<digits>_<digits>` (e.g. `900001_0001`), 2657 patients; canonical `patient_id` = this string (`geneva.py`).
+- Clinical CSV: `case_admission_id`, string `<digits>_<digits>` (e.g. `900001_0001`); canonical `patient_id` = this string (`geneva.py`).
 - Predictions and SHAP: no ids.
 - The patient order exists only in the test split `test_data_early_neurological_deterioration_ts0.8_rs42_ns5.pth` (Geneva dataset dir). It is a torch zip whose `data.pkl` holds `(X, outcome_events)`:
-  - `X`: `ndarray (533, 72, 103, 4) object`, fields `[case_admission_id, timestep, sample_label, value]`; the id is constant per patient, the timestep equals the axis index
+  - `X`: `ndarray (N, 72, 103, 4) object`, fields `[case_admission_id, timestep, sample_label, value]`; the id is constant per patient, the timestep equals the axis index
   - `outcome_events`: pandas DataFrame of ground truth events
   - pickled with pandas < 2 (needs a `pandas.core.indexes.numeric.Int64Index` shim); torch is not needed
-- Order check: `X[:, 0, 0, 0]` gives 533 unique ids; the 98 patients with an event in `outcome_events` are exactly the 98 patients with any `y_true = 1`, 0 mismatches.
-- All 533 ids match `^\d+_\d+$` and all are in the clinical CSV.
+- Order check: `X[:, 0, 0, 0]` gives N unique ids; the patients with an event in `outcome_events` are exactly the patients with any `y_true = 1`, 0 mismatches (counts withheld).
+- All N ids match `^\d+_\d+$` and all are in the clinical CSV.
 
 **Pinned mapping:** identity. The `i`th id of the sidecar (§4.1) is the canonical `patient_id` of test patient `i`. No conversion.
 
@@ -151,7 +151,7 @@ Each prediction row becomes exactly one canonical `AI_OUTPUT` row:
 Payload with explanations:
 
 ```json
-{"explanation":{"base_value":-0.6404414,"contributions":{"ALAT":0.0012,"...":0.0}},"probability":0.0731}
+{"explanation":{"base_value":-0.5,"contributions":{"ALAT":0.0012,"...":0.0}},"probability":0.0731}
 ```
 
 Without an explanations source the `explanation` key is omitted (not `null`), so payloads with and without SHAP are distinguishable and byte stable.
@@ -354,7 +354,7 @@ It is never taken from `ai_intervention.model_system_version` or from YAML.
 
 ## 6. Patient subset semantics
 
-The Geneva AI artifact contains only the 533 test patients. This is expected.
+The Geneva AI artifact contains only the test split patients. This is expected.
 
 If a requested Geneva patient is not in the sidecar:
 
@@ -540,7 +540,7 @@ Target: at least 32 S7 specific tests (the list below).
 
 ### Real data
 
-35. `@pytest.mark.real_data` loads the real artifacts with a sidecar exported by the script, validates the canonical frame strictly, asserts 38 376 rows over 533 patients, checks uniqueness, the alignment check, ids ⊆ clinical CSV ids, and records AI parse + hash wall time into §14.
+35. `@pytest.mark.real_data` loads the real artifacts with a sidecar exported by the script, validates the canonical frame strictly, asserts 72 rows per patient, checks uniqueness, the alignment check, ids ⊆ clinical CSV ids, and records AI parse + hash wall time into §14.
 
 The default CI suite does not require private Geneva artifacts.
 
@@ -596,7 +596,7 @@ S7 is complete when all of the following hold:
 13. Prediction timesteps follow §7.1 (`i → 60i`).
 14. `validate-adapter` reports the loaded provenance; README documents the sidecar export and provenance steps.
 15. All default tests pass and the real data smoke passes locally.
-16. Measured AI load and hash time on the real artifacts: 42.3 s for all 533 patients (38 376 rows, with SHAP; dominated by JSON encoding and strict validation), 4.6 s for 50 patients (Explore B: 0.46 s for the SHAP file alone).
+16. Measured AI load and hash time on the real artifacts: 42.3 s for all test patients (with SHAP; dominated by JSON encoding and strict validation), 4.6 s for 50 patients (Explore B: 0.46 s for the SHAP file alone).
 
 ## 15. S8 handoff
 
@@ -604,7 +604,7 @@ S7 ends at a validated and provenance identified canonical dataset.
 
 S8 may assume:
 
-- `dataset.ai_output` contains real Geneva AI rows when configured, restricted to the 533 test patients
+- `dataset.ai_output` contains real Geneva AI rows when configured, restricted to the test split patients
 - timepoints are canonical whole hour minutes, `0..4260`
 - `output_json` is deterministic valid JSON: `probability` (6 hour early neurological deterioration risk) and, when configured, `explanation.base_value` + `explanation.contributions` (1134 features, log odds); a missing `explanation` key means "no explanation"
 - feature names are the model's engineered names (`lag2_`, `rolling_mean_`, …); S8 owns any display mapping

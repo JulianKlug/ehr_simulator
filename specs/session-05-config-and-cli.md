@@ -362,8 +362,8 @@ Reads the study config, builds the dataset_loader, runs the loader **once** with
 Dataset:    geneva
 csv_path:   /mnt/data1/klug/.../preprocessed_features_30012026_154047.csv
 params_dir: /mnt/.../logs_30012026_154047/
-SCALAR_TS:  19,734,201 rows
-ADMISSION:  3,127 rows × ~31 fields/patient
+SCALAR_TS:  <N> rows
+ADMISSION:  <M> rows
 IMAGING:    0 rows (empty by design)
 AI_OUTPUT:  0 rows (S7 deferred)
 Issues:     2 (run with --strict to fail on first issue)

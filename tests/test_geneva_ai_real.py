@@ -32,8 +32,9 @@ SPLIT = GENEVA_DIR / "test_data_early_neurological_deterioration_ts0.8_rs42_ns5.
 CLINICAL_CSV = GENEVA_DIR / "preprocessed_features_30012026_154047.csv"
 SCRIPT_PATH = Path(__file__).parents[1] / "scripts" / "export_geneva_test_ids.py"
 
-EXPECTED_PATIENTS = 533
-EXPECTED_ROWS = 38_376
+# One AI row per patient per hourly timestep. No cohort size is pinned:
+# it is not published.
+TIMESTEPS = 72
 
 
 @pytest.mark.real_data
@@ -46,7 +47,8 @@ def test_load_real_geneva_ai_artifact(tmp_path: Path) -> None:
     script = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(script)
     sidecar = tmp_path / "test_patient_ids.csv"
-    assert script.export(SPLIT, MODEL_DIR / "test_predictions.pkl", sidecar) == EXPECTED_PATIENTS
+    n_patients = script.export(SPLIT, MODEL_DIR / "test_predictions.pkl", sidecar)
+    assert n_patients > 0
 
     source = GenevaAISource(
         predictions_path=MODEL_DIR / "test_predictions.pkl",
@@ -61,8 +63,8 @@ def test_load_real_geneva_ai_artifact(tmp_path: Path) -> None:
 
     frame = output.ai_output
     validate(frame, CanonicalShape.AI_OUTPUT, strict=True, dataset="geneva")
-    assert len(frame) == EXPECTED_ROWS
-    assert frame["patient_id"].nunique() == EXPECTED_PATIENTS
+    assert len(frame) == TIMESTEPS * n_patients
+    assert frame["patient_id"].nunique() == n_patients
     assert not frame.duplicated(["patient_id", "t_minutes", "model_id"]).any()
     assert output.provenance.explanation_sha256 is not None
 

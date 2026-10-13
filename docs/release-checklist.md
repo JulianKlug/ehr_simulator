@@ -42,7 +42,9 @@ Work through this list before every tagged release. Steps marked **owner** are m
 
 - [ ] No real Geneva or MIMIC record, derived per-patient row or screenshot is in the repository, the wheel, the sdist, the release notes or preprint material.
 - [ ] No cohort aggregate is published (owner decision 2026-10-13): fixture normalisation parameters stay fabricated (`tests/test_shared.py` pins them), and no table, figure or note carries real cohort statistics.
-- [ ] Git history: commits before the S12c fixture change carry the real Geneva mean/std in `tests/fixtures/{geneva,mimic}/*normalisation_parameters.csv`. They are already public on GitHub (`origin/main` and older branches, since session 3). Decide on a history rewrite and force push, or accept the exposure, before the release.
+- [x] Git history: commits before the S12c fixture change carry real Geneva cohort means/stds in `tests/fixtures/{geneva,mimic}/*normalisation_parameters.csv`, public on GitHub since session 3. **Accepted (owner, 2026-10-13):** these summary statistics already appear in previous publications; no history rewrite.
+- [x] Git history also carries other real-data facts later redacted from the working tree (S12c): four real Geneva case ids, cohort and test-split sizes, the outcome event count, the prediction range, the SHAP base value, imaging-data patient counts. **Accepted exposure (owner, 2026-10-13):** no history rewrite.
+- [ ] Working tree: no real-data value (ids, counts, prevalences, statistics, model outputs) in code, tests, docs or specs. Local paths and extraction timestamps are allowed.
 - [ ] No Geneva sample is published. Only change this with explicit written sharing permission (decision 2026-10-13: none exists).
 - [ ] Demo screenshots and published figures come from synthetic data. Any figure from a real cohort has passed manual disclosure review (small cells).
 - [ ] The example Phase 2 questions and profile lists are labelled placeholders.
