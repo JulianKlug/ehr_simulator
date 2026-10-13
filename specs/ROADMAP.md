@@ -243,17 +243,19 @@ What shipped:
 
 ### Session 12 — Phase 2.5 polished divergence + v1.0 release [NEXT]
 
+Spec: `specs/session-12-phase25-release.md` (slices S12a analysis contract, S12b figures + notebook, S12c release).
+
 Goal: publication-quality divergence view + reproducible analysis notebook + open-source v1.0 release. This is a **must-have** for v1.0 per the design doc — "do not ship v1.0 without it."
 
 Scope:
 - Polished divergence figure suitable for inclusion in the paper.
-- Reproducible analysis notebook generating all study figures from the SQLite export.
+- Reproducible analysis notebook generating all study figures from the validated `export-phase2` bundle (never SQLite directly).
 - README quickstart (~10-min: clone, install, run, see one synthetic patient via `--demo`).
 - `docs/data-contract.md` final pass + drift CI green.
 - Reference dataset pointer (MIMIC-III access instructions + Geneva sample path if shareable).
 - v1.0 git tag cut in parallel with preprint submission.
 
-**Test inventory:** ≥4 tests. Notebook runs end-to-end; all figures regenerate from SQLite; README quickstart smoke test on a fresh clone; data-contract drift CI passes.
+**Test inventory:** ≥4 tests. Notebook runs end-to-end; all figures regenerate from the export bundle; README quickstart smoke test on a fresh clone; data-contract drift CI passes.
 
 ## Deliberately deferred
 

@@ -30,7 +30,7 @@ Turn the shipped simulator into an independently reproducible open source resear
 7. **No clinical data dependency in the paper pipeline:** S10's newly visible data annotations require canonical clinical frames that are absent from the Phase 2 export. The official export only figures therefore omit these annotations rather than manufacture them. Retain the existing S10 view for exploratory adapter backed use.
 8. **Privacy by default:** the notebook does not read or generate keyfiles, print clinician names, plot free text, render raw event payloads or place raw patient/clinician identifiers in titles or figure filenames. Published real cohort outputs require manual disclosure review; synthetic examples may ship.
 9. **Chart stack:** use the installed plotnine/matplotlib stack for static SVG/PDF and optional PNG. No Plotly/D3 dependency in Session 12; interactivity is not a release criterion.
-10. **Keep scope bounded:** implement in two independently reviewable slices, S12a (analysis contract and figures) then S12b (quickstart, docs and release gate). If S12a needs a new scientific decision, stop and record it rather than silently extending the code.
+10. **Keep scope bounded:** implement in three independently reviewable slices: S12a (bundle reader, summaries and synthetic fixture), S12b (figures and notebook), then S12c (quickstart, docs and release gate). If S12a or S12b needs a new scientific decision, stop and record it rather than silently extending the code.
 
 ## 4. Export bundle reader contract (S12a)
 
@@ -38,26 +38,32 @@ Add `src/ehr_simulator/analysis/bundle.py` exposing a read only `load_phase2_bun
 
 Required validation, before writing any output:
 
-1. Require `manifest.json`, `export_schema_version == "phase2_export_v1"`, all eight required CSVs and precisely the declared per file SHA256 and data row counts; reject missing, extra declared files or unreadable CSV.
-2. Validate required headers against `export_phase2.headers` or a **frozen** analysis side schema; refuse duplicate key rows and inconsistent joins across the study, version/hash, case and timepoint keys. Do not import the web layer.
+1. Require `manifest.json`, `export_schema_version == "phase2_export_v1"`, all eight required CSVs and precisely the declared per file SHA256 and data row counts; reject missing files, unreadable CSV and any declared file outside the required set and the optional `practice_timepoints.csv`/`practice_answers.csv`. Declared practice files are digest and row count checked like any other, then ignored (item 6).
+2. Validate required headers against a **frozen** analysis side copy of the `phase2_export_v1` headers in `analysis/schema.py`, pinned to `export_phase2.headers` by a lockstep test (the same pattern as the duplicated `study_id` pattern): an exporter header change must fail that test, never silently change the analysis contract; refuse duplicate key rows and inconsistent joins across the study, version/hash, case and timepoint keys. Do not import the web layer.
 3. Require a single manifest `study_id`, registered versions in `configuration_history.csv`, and matching `config_hash` on all joined records; check `configuration_history.csv` versions are parseable without assuming the active YAML.
-4. Use `(study_id, clinician_id, patient_id, config_version)` as the internal activated case key and `(case key, t_index)` as the timepoint key. Preserve `timepoint_minutes` and the pinned version for plotted x coordinates.
-5. Read numeric values strictly; preserve nullable booleans and status strings. Refuse impossible values and duplicate rows rather than averaging them. Do not interpret `""` or `"unknown"` as false or zero.
+4. Use `(study_id, clinician_id, patient_id)` as the internal activated case key and `(case key, t_index)` as the timepoint key. `config_version`/`config_hash` are attributes pinned per case, not key parts: refuse a case whose rows carry more than one version or hash. Preserve `timepoint_minutes` and the pinned version for plotted x coordinates.
+5. Read numeric values strictly; preserve nullable booleans and status strings. Refuse impossible values and duplicate rows rather than averaging them. Do not interpret `""` or `"unknown"` as false or zero. Exported cells pass through the S9c `guard_cell` formula guard (a leading `'` before `= + - @` and their full width variants; plain signed numbers unguarded): compare categorical/multi select values against the guarded form of each historical option, never strip a leading `'` blindly. Multi select `response_value` is the pipe delimited option list in historical `questions_json` order; split it and refuse any option absent from that version's question.
 6. Treat `practice_*` files as excluded from all measured results, even if present. A valid zero case bundle yields an explicit `no activated cases` result, not invented data.
 7. No writes to the input bundle. Render to a separate output directory with a refuse by default overwrite policy; validate first, then stage and publish output atomically where practical.
 
 Document the `phase2_export_v1` input contract and the report schema separately from the generated canonical data contract. A future incompatible export schema must refuse loudly rather than yield plausible but wrong graphics.
 
-## 5. Figure and descriptive analysis contract (S12a)
+## 5. Figure and descriptive analysis contract (S12b)
 
 Implement pure transformations and plot construction in `src/ehr_simulator/analysis/summary.py` and `figures.py`; the notebook must only orchestrate these reusable functions. Output SVG and PDF for all figures, plus machine readable `summary.csv` / `denominators.csv` and `analysis_manifest.json` containing input manifest digest, software version, exact configuration versions, figure inventory and descriptive analysis settings.
 
-The required figure set is:
+The figure set below is **provisional** (owner decision 2026-10-13, §13): it is the reference descriptive set, not the manuscript's final figure list. The study analysis plan is being developed and arrives only after S12. Therefore:
+
+* The stable contract S12 ships is the **bundle reader and the summary tables** (`load_phase2_bundle`, `summary.py` outputs, `denominators.csv`). Figure stems, layouts and their count are not a public contract and may change in a later release without a breaking change.
+* `figures.py` exposes figures through a registry (`stem → builder over the validated bundle`); `analysis_manifest.json` lists what was generated from the registry. Adding a plan figure later is one new builder over existing summaries, never a new reader, join or derivation path.
+* Plan specific estimands, models and inferential outputs are out of S12 and go into a follow on session once the plan is approved (§13).
+
+Provisional figure set:
 
 | Output stem | Content | Rules |
 | --- | --- | --- |
-| `figure_01_divergence` | AI versus no AI answers by configured timepoint, question and pinned config version | Numeric Likert/probability: individual observations and median, with n. Categorical: proportion per option and n. Multi select: independent per option proportions, which need not sum to one. No invented ordinal scale for nominal options. Use question order from each historical `questions_json`. No free text contents. |
-| `figure_02_case_flow` | Planned schedule items, activated cases, completed/incomplete/open states and replacement flow | Keep planned separate from realised. Replacements stay traceable without double counting original and replacement as the same case. Show denominators and arm explicitly. |
+| `figure_01_divergence` | AI versus no AI answers by configured timepoint, question and pinned config version | Per `response_type`: `likert` and `probability-0-100`: individual observations and median, with n. `categorical`: proportion per option and n. `multi-select`: independent per option proportions, which need not sum to one. No invented ordinal scale for nominal options. Use question order from each historical `questions_json`. `free-text`: never plotted (no facet). |
+| `figure_02_case_flow` | Planned schedule items, activated cases, completed/incomplete/open states and replacement flow | Keep planned separate from realised. Replacements stay traceable without double counting original and replacement as the same case. Show denominators and arm explicitly. Chart form: stacked horizontal bars per arm and config version (planned → activated → completed / incomplete / open); replacement planned / activated / pending shown as labelled counts beside the incomplete segment, not as a flow diagram (plotnine has no Sankey). |
 | `figure_03_response_provenance` | Answered, genuinely missing and not applicable responses by question, timepoint, version and arm | Distinguish clinician versus rule values; display missing reason breakdown and counts of unreached timepoints. Do not count hidden branches as missing. |
 | `figure_04_attention` | Wall clock elapsed and valid foreground/active time distributions by arm and timepoint | Separate units and measures; show counts excluded by missing/gapped/invalid telemetry. Never plot an absent duration as 0. |
 | `figure_05_intervention` | AI delivered/viewed, intervention failure, leakage and PP determinacy | Conditional to reached primary observations. ITT remains the grouping variable. Use separate panels or clearly labelled rates, including unknown/indeterminate counts. No AI arm has AI viewed as not applicable, not automatically false. |
@@ -68,19 +74,20 @@ A supplementary **case level** divergence image may be generated by explicit pat
 
 A figure may use the Phase 2 case and question facts only. Without the clinical adapter input, `newly_visible_data` annotations are not part of the reproducible figure set. This distinction must be stated in the notebook and README.
 
-## 6. Notebook and synthetic reference bundle (S12a)
+## 6. Notebook (S12b) and synthetic reference bundle (S12a)
 
 Add `notebooks/phase2_analysis.ipynb` with these sections: environment/input; export/manifest validation; cohort and configuration provenance; case flow; responses and divergence; timing/attention; intervention integrity and PP; output manifest and interpretation limitations.
 
 * Parameters come from `EHR_SIM_PHASE2_BUNDLE` and `EHR_SIM_ANALYSIS_OUT`. Defaults point to a **committed synthetic** miniature Phase 2 export bundle and a local ignored output directory. Run headlessly through `nbclient` (or `jupyter nbconvert --execute`) in CI, on Python 3.11 and 3.12.
 * The committed miniature bundle must be generated from the **shipped S11n exporter** with synthetic clinicians, both arms, multiple timepoints, a conditional question and at least one incomplete/replacement or explicitly missing state. Store no pseudonym secret/keyfile, names, real Geneva records, or restricted MIMIC material. Its manifest must validate; document fixture regeneration.
+* **Deterministic regeneration.** The builder (`tests/fixtures/analysis_bundle/build_analysis_bundle.py --check`, run in CI beside the Geneva/MIMIC drift gates) drives the app with a FakeClock and a fixed test only pseudonym secret held as a constant in the builder, never written as a file into the fixture. The shipped exporter still emits run dependent values: `arm_assignments.activated_at` (SQLite `CURRENT_TIMESTAMP`), `session_id` and `render_id` (`uuid4`), event `server_ts` and the manifest's `generated_at_utc`. `--check` therefore compares a **normalised** bundle: those columns replaced by stable ordinal placeholders (consistent across tables, so joins survive), CSV SHA256 and manifest recomputed. The committed fixture is the normalised form, and its manifest must validate through `load_phase2_bundle`. Do not change the exporter or the app to make output deterministic.
 * The notebook is a thin consumer of `analysis/`, not a second implementation of joins, rates or thresholds. It contains a readable method note with eligibility, missingness, descriptive summaries and limitations. No random results or hidden downloaded inputs.
-* Report generation must complete from this bundle after a clean `uv sync --locked --group analysis`; add a small opt in `analysis` dependency group (for example `nbclient`/`ipykernel`) and update `uv.lock`. Do not force notebook tooling on the main server runtime.
+* Report generation must complete from this bundle after a clean `uv sync --locked --group analysis`; add a small opt in `analysis` dependency group (`nbclient`, `nbformat`, `ipykernel`; the notebook pins kernel name `python3`, provided by `ipykernel`) and update `uv.lock`. Do not force notebook tooling on the main server runtime.
 * For a real study, an operator first runs `export-phase2` with their local secret, moves **only the validated bundle** into their analysis environment and points the notebook at it. The notebook cannot recover raw identities and must not ask for their secret.
 
-## 7. `--demo` and README quickstart (S12b)
+## 7. `--demo` and README quickstart (S12c)
 
-Add `--demo` to `ehr-simulator serve` as a friendly, explicit alias for the existing **config free synthetic** FastAPI path. `--demo` requires no input data, activation, pseudonym secret or YAML. It must not create a measured Phase 2 case or change the study configuration. It may use the existing non study local SQLite persistence; document the exact location and clean reset procedure. Forbid combining `--demo` with `--config`/`--questions` (exit 2), and bind to `127.0.0.1` by default. Show a conspicuous `synthetic demonstration` indicator in this mode so it cannot be confused with a clinical study.
+Add `--demo` to `ehr-simulator serve` as a friendly, explicit alias for the existing **config free synthetic** FastAPI path. `--demo` requires no input data, activation, pseudonym secret or YAML. It must not create a measured Phase 2 case or change the study configuration. It may use the existing non study local SQLite persistence; document the exact location and clean reset procedure. Forbid combining `--demo` with `--config`/`--questions` (exit 2), and keep the existing `127.0.0.1` default bind. The config free path already exists: the new work is the flag, the refusal and the indicator. Show a conspicuous `synthetic demonstration` indicator in this mode so it cannot be confused with a clinical study.
 
 The top of README must have a **tested** approximately ten minute path:
 
@@ -94,7 +101,7 @@ uv run ehr-simulator serve --demo
 
 Follow with a distinct research operator guide for Phase 2: validate config, activate config, serve, back up, export with secret, run the notebook and interpret provenance. Correct the stale README statement about Geneva UI; distinguish real Geneva support from the fact that non public source data is **not bundled**. Clearly label placeholder Phase 2 clinical questions and profile choices as examples, not ready for a preregistered clinical experiment.
 
-## 8. Reference data, generated documentation and open source hygiene (S12b)
+## 8. Reference data, generated documentation and open source hygiene (S12c)
 
 * Add `docs/reference-data.md` describing synthetic built in data, checked in Geneva/MIMIC fixture shapes and how to obtain MIMIC III from its official access controlled source. Link the official access/credential process; do not distribute MIMIC records. State that real Geneva source data and AI artifacts are not included. Include a Geneva sample path **only if explicit sharing permission exists**; otherwise refer to the safe synthetic fixture in `tests/fixtures/geneva/`.
 * Regenerate `docs/data-contract.md` via `python scripts/gen_data_contract.py`; never hand edit the generated body. Require `--check`, Geneva/MIMIC sidecar drift gates and relevant adapter regression tests green.
@@ -107,10 +114,10 @@ Follow with a distinct research operator guide for Phase 2: validate config, act
 | Path | Action |
 | --- | --- |
 | `specs/session-12-phase25-release.md` | New approved spec |
-| `src/ehr_simulator/analysis/{__init__,bundle,summary,figures}.py` | New pure reader, summaries and static figure builder |
+| `src/ehr_simulator/analysis/{__init__,schema,bundle,summary,figures}.py` | New frozen input schema, pure reader, summaries and static figure builder |
 | `notebooks/phase2_analysis.ipynb` | New parameterised notebook |
 | `tests/fixtures/analysis_bundle/` and fixture builder | New synthetic reproducible bundle, drift guard |
-| `tests/test_analysis_bundle.py`, `tests/test_analysis_figures.py`, `tests/test_notebook.py` | New tests |
+| `tests/test_analysis_schema.py` (header lockstep), `tests/test_analysis_bundle.py`, `tests/test_analysis_figures.py`, `tests/test_notebook.py` | New tests |
 | `src/ehr_simulator/cli/serve.py`, UI template/CSS if needed | Add visibly synthetic `--demo` mode only |
 | `tests/test_cli.py` and CI workflow | Demo, analysis execution and docs smoke gates |
 | `README.md`, `docs/analysis.md`, `docs/reference-data.md`, `docs/release-checklist.md`, `CLAUDE.md`, `TODOS.md`, `specs/ROADMAP.md` | Documentation reconciliation |
@@ -153,7 +160,7 @@ Target **at least 20 newly scoped checks** (the roadmap minimum of four is a flo
 
 19. Headless notebook executes on the committed synthetic bundle on Python 3.11 and 3.12, with all expected figure files.
 20. Independently compare notebook numeric summary tables with the analysis library output; rerunning with the same input/settings gives equal values and figure inventory (do not require cross platform byte identical SVG).
-21. Execute README's exact clone/install/`serve --demo` path in a clean checkout CI smoke (or equivalent isolated checkout) and fetch the synthetic patient page.
+21. Execute README's install/`serve --demo` path in a clean checkout: CI clones the tested commit locally (`git clone file://$GITHUB_WORKSPACE` into a temp directory, not GitHub, which may not have the commit), runs `uv sync --locked`, starts `serve --demo` in the background, polls until it answers, signs in and fetches the synthetic patient page.
 22. Run the generated data contract `--check`, fixture drift gates, Ruff, complete non real data pytest suite and Playwright E2E, in CI.
 
 ## 11. Manual scientific and release acceptance
@@ -167,17 +174,21 @@ Target **at least 20 newly scoped checks** (the roadmap minimum of four is a flo
 
 ## 12. Implementation sequencing and stop conditions
 
-**S12a — reproducible analysis (first review/ship):** bundle verifier, pure summaries, five figures, synthetic fixture, notebook, tests 1–13 and 16–20. Freeze the figure definitions and output names during scientific review.
+**S12a — analysis contract (first review/ship):** frozen schema + lockstep test, bundle verifier, pure summaries, deterministic synthetic fixture and its drift gate; tests 1–8, 13 (summary level) and 15 (bundle refusal half). No figures.
 
-**S12b — adopter and release polish (second review/ship):** `--demo`, README and reference docs, contract drift, security/permission audit, CI clean checkout smoke, tests 14–15 and 21–22, owner release checklist and eventual manual tag.
+**S12b — figures and notebook (second review/ship):** five figures, analysis manifest, output publication, notebook, `analysis` dependency group and CI execution; tests 9–12, 13 (figure level), 15 (output directory half) and 16–20. Not blocked by the analysis plan: the five figures are built as the provisional reference set (§5). Freeze only the reader, summary and denominator semantics during scientific review; figure stems stay provisional.
 
-If either slice exceeds the established one to two day target, split before implementation and add a short follow on spec. Do not compromise S11's provenance, privacy, randomisation or timepoint visibility safeguards to shorten the release path.
+**S12c — adopter and release polish (third review/ship):** `--demo`, README and reference docs, contract drift, security/permission audit, CI clean checkout smoke, tests 14–15 and 21–22, owner release checklist and eventual manual tag.
+
+If any slice exceeds the established one to two day target, split before implementation and add a short follow on spec. Do not compromise S11's provenance, privacy, randomisation or timepoint visibility safeguards to shorten the release path.
 
 ## 13. Explicit non goals and open owner decisions
 
 **Non goals:** raw Geneva or credentialed MIMIC publication, automated preprint submission, registered trial analysis, inferential model fitting, power calculations, interactive dashboards, cloud study hosting, data ingestion redesign, DICOM/FHIR, web analytics, clinician facing UI redesign.
 
-**Owner decision before freezing S12a:** Is the manuscript's required figure list exactly the five descriptive outputs above, or is there an approved study specific statistical analysis plan to incorporate separately? Do not label a descriptive graphic a treatment effect estimate. This decision does not block building the validated bundle reader or synthetic notebook.
+**Owner decision (resolved 2026-10-13):** the five figure list is provisional. A study specific statistical analysis plan is being developed and will be available only after S12 ships. S12 builds the provisional descriptive set on a stable reader/summary contract (§5); the plan's figures and any estimand are a follow on session with its own spec, consuming `analysis/` unchanged. Do not label a descriptive graphic a treatment effect estimate.
 
-**Owner decision before S12b release:** Does a shareable Geneva example exist under appropriate data permissions? If not, release only synthetic/sanitised fixtures and access instructions. Confirm the preprint submission event before creating the v1.0.0 tag.
+**Open owner decision before the v1.0.0 tag:** does v1.0.0 ship with the provisional figure set, or wait for the plan's figures if the preprint needs them? Either way, S12 implementation is not blocked.
+
+**Owner decision before S12c release:** Does a shareable Geneva example exist under appropriate data permissions? If not, release only synthetic/sanitised fixtures and access instructions. Confirm the preprint submission event before creating the v1.0.0 tag.
 
