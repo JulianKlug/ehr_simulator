@@ -1,0 +1,54 @@
+{% import "_panel_macros.html" as m %}
+<section class="panel panel-neuro_support panel-state-{{ state }}"
+         aria-label="neuro_support panel — {{ m.aria_state(state) }}"
+         data-panel="neuro_support"
+         data-state="{{ state }}">
+    <header>Neurological / Support</header>
+    <div class="panel-content" data-panel-content>
+    {% if state.startswith("empty") %}
+        {{ m.empty_message("neurological / support") }}
+    {% elif state == "error" %}
+        <p class="error">Render failed: {{ error }}</p>
+    {% else %}
+        {% if state == "partial" %}
+            <p class="flash-warn">Partial data at this timepoint.</p>
+        {% endif %}
+        <figure class="chart vitals-chart neuro-chart" data-panel="neuro_support">
+            <figcaption class="visually-hidden">Neurological / support — shared time axis ({{ labels | join(", ") }})</figcaption>
+            <div class="vitals-figure" data-figure="neuro">
+                <div class="vitals-stack">
+                    {% for panel in panels %}
+                    <div class="vitals-row{% if panel.is_bottom %} vitals-row-bottom{% endif %}"
+                         data-group="{{ panel.group }}">
+                        <p class="vitals-row-label">{{ panel.label }}{% if panel.unit %} <small>({{ panel.unit }})</small>{% endif %}</p>
+                        <div class="vitals-svg">{{ panel.svg | safe }}</div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+            <table class="values-table neuro-values" aria-label="neurological / support values by timepoint">
+                <thead>
+                    <tr>
+                        <th scope="col">t (min)</th>
+                        {% for var in variables %}
+                        <th scope="col">{{ labels[loop.index0] }}{% if units.get(var) %} <small>({{ units[var] }})</small>{% endif %}</th>
+                        {% endfor %}
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for row in pivot_rows %}
+                    <tr{% if row.is_current %} class="row-current" aria-current="time"{% endif %}>
+                        <th scope="row">{{ "%.0f"|format(row.t) }}</th>
+                        {% for c in row.cells %}
+                        <td class="cell-{{ variables[loop.index0] }}"
+                            title="{{ variables[loop.index0] }} at t={{ '%.0f'|format(row.t) }} min">{{ m.range_cell(c) }}</td>
+                        {% endfor %}
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {{ m.fallback_table(fallback_rows, "neurological / support") }}
+        </figure>
+    {% endif %}
+    </div>
+</section>

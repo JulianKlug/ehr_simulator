@@ -24,8 +24,7 @@ renderers display.
 
 from __future__ import annotations
 
-import json
-from collections.abc import Iterable
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
@@ -33,14 +32,27 @@ from typing import Any, Literal, Protocol, runtime_checkable
 import pandas as pd
 
 from ehr_simulator.config.study import AIInterventionConfig
-from ehr_simulator.ingestion.canonical import LAB_VAR_SET as _LAB_VARS
-from ehr_simulator.ingestion.canonical import VITAL_VAR_SET as _VITAL_VARS
+from ehr_simulator.ingestion.canonical import (
+    AGGREGATE_BOUNDS,
+    IMAGING_DERIVED_VAR_SET,
+    IMAGING_FINDING_FIELDS,
+    LAB_VAR_SET,
+    NEURO_SUPPORT_VAR_SET,
+    VITAL_VAR_SET,
+)
 from ehr_simulator.ingestion.provenance import AIArtifactProvenance
+from ehr_simulator.web.ai_payload import check_payload, decode, exposed_ai_field_ids, plan_display
+from ehr_simulator.web.clinical_fields import displayed_scalar_ids
 
 PanelState = Literal[
     "loading", "empty-expected", "empty-unexpected", "partial", "error", "unavailable"
 ]
-PanelName = Literal["vitals", "labs", "admission", "imaging", "ai"]
+#: Every aggregate family id: medians and their bounds.
+_FAMILY_MEMBERS = frozenset(AGGREGATE_BOUNDS) | {
+    b for pair in AGGREGATE_BOUNDS.values() for b in pair
+}
+
+PanelName = Literal["vitals", "neuro_support", "labs", "admission", "imaging", "ai"]
 
 #: S11g: imaging columns the imaging panel shows.
 _IMAGING_SHOWN_COLUMNS = ("modality", "report_text")
@@ -62,9 +74,6 @@ class DatasetLike(Protocol):
     admission: pd.DataFrame
     imaging: pd.DataFrame
     ai_output: pd.DataFrame
-
-
-_AI_REQUIRED_KEYS = frozenset({"prob_deterioration_6h", "prob_mrs_0_2_90d"})
 
 
 @dataclass(frozen=True)
@@ -117,6 +126,8 @@ def slice_to_timepoint(
     patient_id: str,
     t_minutes: float,
     timepoint_index: int,
+    *,
+    timepoints: Sequence[float] | None = None,
 ) -> PatientSlice:
     """Filter every frame to ``patient_id`` AND ``t_minutes <= t``, then derive
     panel states by inspecting the unsliced dataset (the only function authorized
@@ -124,6 +135,9 @@ def slice_to_timepoint(
 
     ADMISSION has no ``t_minutes`` column → filter only by ``patient_id``.
     Returns a frozen dataclass; renderers consume sliced frames + state labels only.
+
+    ``timepoints`` (S8): the sequence the walk uses (study mode always passes
+    it). Absent → the dataset derived fallback, which spans the whole stay.
     """
     pid = patient_id
     t = float(t_minutes)
@@ -142,33 +156,40 @@ def slice_to_timepoint(
     panel_states: dict[str, PanelState] = {}
     panel_errors: dict[str, str | None] = {
         "vitals": None,
+        "neuro_support": None,
         "labs": None,
         "admission": None,
         "imaging": None,
         "ai": None,
     }
 
-    panel_states["vitals"] = _scalar_panel_state(
-        sliced=scalar_at_or_before,
-        full=scalar_full,
-        variables=_VITAL_VARS,
-        t=t,
-    )
-    panel_states["labs"] = _scalar_panel_state(
-        sliced=scalar_at_or_before,
-        full=scalar_full,
-        variables=_LAB_VARS,
-        t=t,
-    )
+    for panel, variables in (
+        ("vitals", VITAL_VAR_SET),
+        ("neuro_support", NEURO_SUPPORT_VAR_SET),
+        ("labs", LAB_VAR_SET),
+    ):
+        panel_states[panel] = _scalar_panel_state(
+            sliced=scalar_at_or_before, full=scalar_full, variables=variables
+        )
     panel_states["admission"] = "empty-expected" if admission_pid.empty else "loading"
-    panel_states["imaging"] = _imaging_panel_state(imaging_at_or_before, imaging_full, t=t)
+    panel_states["imaging"] = _imaging_panel_state(
+        imaging_at_or_before,
+        imaging_full,
+        scalar_sliced=scalar_at_or_before,
+        scalar_full=scalar_full,
+        admission=admission_pid,
+    )
     panel_states["ai"] = _ai_panel_state(ai_at_or_before, ai_full, t=t)
 
     return PatientSlice(
         patient_id=pid,
         t_minutes=t,
         timepoint_index=timepoint_index,
-        timepoints=patient_timepoints(dataset, pid),
+        timepoints=(
+            tuple(float(tp) for tp in timepoints)
+            if timepoints is not None
+            else patient_timepoints(dataset, pid)
+        ),
         scalar_ts=scalar_at_or_before,
         admission=admission_pid,
         imaging=imaging_at_or_before,
@@ -183,34 +204,75 @@ def _scalar_panel_state(
     sliced: pd.DataFrame,
     full: pd.DataFrame,
     variables: frozenset[str],
-    t: float,
 ) -> PanelState:
-    sliced_vars = set(sliced.loc[sliced.variable.isin(variables), "variable"].unique())
-    full_vars = set(full.loc[full.variable.isin(variables), "variable"].unique())
+    """S8 §10.1: ``partial`` reads rows at or before ``t`` only.
 
-    if not full_vars:
+    ``full`` only separates the two empty states, which render identically
+    (§9.2). Sparse sampling and later first measurements are normal.
+    """
+    if not full.variable.isin(variables).any():
         return "empty-expected"
-    if not sliced_vars:
+    rows = sliced.loc[sliced.variable.isin(variables)]
+    if rows.empty:
         return "empty-unexpected"
-
-    vars_at_current_t = set(
-        sliced.loc[
-            (sliced.variable.isin(variables)) & (sliced.t_minutes == t),
-            "variable",
-        ].unique()
-    )
-    if vars_at_current_t != sliced_vars:
-        return "partial"
-    if full_vars - sliced_vars:
+    if _aggregate_inconsistent(rows):
         return "partial"
     return "loading"
 
 
-def _imaging_panel_state(sliced: pd.DataFrame, full: pd.DataFrame, *, t: float) -> PanelState:
-    if full.empty:
+def _aggregate_inconsistent(rows: pd.DataFrame) -> bool:
+    """A family bucket has a bound without its median, or breaks
+    ``min <= median <= max``. Example: ``hr_max=90`` alone at t=60 → True.
+
+    One pivot over every family member present (this runs per request).
+    """
+    members = rows.loc[rows.variable.isin(_FAMILY_MEMBERS) & rows.value.notna()]
+    if members.empty:
+        return False
+    wide = members.groupby(["t_minutes", "variable"])["value"].first().unstack()
+    for median, (low, high) in AGGREGATE_BOUNDS.items():
+        if low not in wide and high not in wide:
+            continue
+        family = wide.reindex(columns=[low, median, high])
+        has_bound = family[low].notna() | family[high].notna()
+        if (has_bound & family[median].isna()).any():
+            return True
+        if _exceeds(family[low], family[median]) or _exceeds(family[median], family[high]):
+            return True
+    return False
+
+
+#: Inverse normalisation leaves float noise: Geneva NIHSS min 1.0000000000000009
+#: with median 1.0 is one value, not an inconsistency.
+_BOUND_ORDER_REL_TOL = 1e-9
+
+
+def _exceeds(lower: pd.Series, upper: pd.Series) -> bool:
+    """``lower > upper`` beyond float noise (NaN never exceeds)."""
+    scale = upper.abs().clip(lower=1.0)
+    return bool(((lower - upper) > _BOUND_ORDER_REL_TOL * scale).any())
+
+
+def _imaging_panel_state(
+    sliced: pd.DataFrame,
+    full: pd.DataFrame,
+    *,
+    scalar_sliced: pd.DataFrame,
+    scalar_full: pd.DataFrame,
+    admission: pd.DataFrame,
+) -> PanelState:
+    """Canonical IMAGING rows, imaging derived scalars and the admission
+    imaging findings (present from t=0) all count as imaging data (S8 §5.2)."""
+    if admission["field"].isin(IMAGING_FINDING_FIELDS).any():
+        return _imaging_report_state(sliced)
+    if full.empty and not scalar_full.variable.isin(IMAGING_DERIVED_VAR_SET).any():
         return "empty-expected"
-    if sliced.empty:
+    if sliced.empty and not scalar_sliced.variable.isin(IMAGING_DERIVED_VAR_SET).any():
         return "empty-unexpected"
+    return _imaging_report_state(sliced)
+
+
+def _imaging_report_state(sliced: pd.DataFrame) -> PanelState:
     null_reports = sliced["report_text"].isna().sum() + (sliced["report_text"] == "").sum()
     if null_reports > 0:
         return "partial"
@@ -222,16 +284,14 @@ def _ai_panel_state(sliced: pd.DataFrame, full: pd.DataFrame, *, t: float) -> Pa
         return "empty-expected"
     if sliced.empty:
         return "empty-unexpected"
+    state: PanelState = "loading"
     for raw in sliced["output_json"]:
-        try:
-            payload = json.loads(raw)
-        except (TypeError, ValueError):
+        payload = decode(raw)
+        if payload is None:
             return "error"
-        if not isinstance(payload, dict):
-            return "error"
-        if not _AI_REQUIRED_KEYS.issubset(payload.keys()):
-            return "partial"
-    return "loading"
+        if check_payload(payload).state == "partial":
+            state = "partial"
+    return state
 
 
 # ---------------------------------------------------------------------------
@@ -319,15 +379,10 @@ def measured_ai_state(measured: MeasuredAI) -> tuple[PanelState, dict[str, Any]]
     """Panel state + decoded payload of a measured AI row."""
     if measured.unavailable is not None:
         return "unavailable", {}
-    try:
-        payload = json.loads(measured.output_json or "")
-    except (TypeError, ValueError):
+    payload = decode(measured.output_json)
+    if payload is None:
         return "error", {}
-    if not isinstance(payload, dict):
-        return "error", {}
-    if not _AI_REQUIRED_KEYS.issubset(payload.keys()):
-        return "partial", payload
-    return "loading", payload
+    return check_payload(payload).state, payload
 
 
 class AIDelivery(StrEnum):
@@ -365,23 +420,26 @@ def ai_delivery(patient_slice: PatientSlice, ctx: InterventionContext) -> dict[s
 
 
 def exposed_field_ids(
-    patient_slice: PatientSlice, ai_payload_keys: Iterable[str] = ()
+    patient_slice: PatientSlice, ai_payloads: Sequence[Mapping[str, Any]] = ()
 ) -> frozenset[str]:
     """Clinician facing ``<source>:<name>`` ids for one slice.
 
-    Mirrors the renderers: every admission field; only vital/lab scalar
-    variables (other variables are counted, never shown); the imaging
-    columns the imaging panel shows; the keys of the AI payload on screen.
-    Example: ``{"admission:age", "scalar:hr", "ai:prob_deterioration_6h"}``.
+    Mirrors the renderers: every admission field; only the scalar ids a
+    panel shows, aggregate bounds included (other variables are counted,
+    never shown); the imaging columns the imaging panel shows; the AI
+    fields the renderer shows of ``ai_payloads`` (the decoded payloads on
+    screen, time order; legacy Geneva history rows show probability only).
+    Example: ``{"admission:age", "scalar:hr_max", "ai:probability"}``.
     """
     ids = {f"admission:{field}" for field in patient_slice.admission["field"].astype(str)}
 
-    shown_vars = _VITAL_VARS | _LAB_VARS
+    shown_vars = displayed_scalar_ids()
     scalar_vars = set(patient_slice.scalar_ts["variable"].astype(str))
     ids.update(f"scalar:{var}" for var in scalar_vars & shown_vars)
 
     if not patient_slice.imaging.empty:
         ids.update(f"imaging:{column}" for column in _IMAGING_SHOWN_COLUMNS)
 
-    ids.update(f"ai:{key}" for key in ai_payload_keys)
+    for payload, detail in zip(ai_payloads, plan_display(ai_payloads), strict=True):
+        ids.update(exposed_ai_field_ids(payload, detail))
     return frozenset(ids)

@@ -37,8 +37,8 @@ def test_slice_to_timepoint_filters_data_above_t(synthetic) -> None:
         ("synth_001", 0.0, 0, "imaging", "loading"),
         ("synth_001", 0.0, 0, "ai", "loading"),
         ("synth_001", 0.0, 0, "admission", "loading"),
-        # synth_002 at t=60: labs were skipped at t=60 → partial.
-        ("synth_002", 60.0, 1, "labs", "partial"),
+        # synth_002 at t=60: labs were skipped at t=60 → sparse, not partial (S8 §10.1).
+        ("synth_002", 60.0, 1, "labs", "loading"),
         # synth_002 at t=60: vitals are present at t=60 → loading.
         ("synth_002", 60.0, 1, "vitals", "loading"),
         # synth_003 has no imaging at all → empty-expected.
@@ -87,3 +87,85 @@ def test_dataset_like_protocol_accepts_all_three_dataset_classes(
     assert isinstance(synthetic, DatasetLike)
     assert isinstance(geneva, DatasetLike)
     assert isinstance(mimic, DatasetLike)
+
+
+# ---------------------------------------------------------------------------
+# S8 §10.1: partial reads rows at or before t only
+# ---------------------------------------------------------------------------
+
+
+def _scalar_dataset(rows: list[tuple[float, str, float]]):
+    import pandas as pd
+
+    from ehr_simulator.ingestion.canonical import CanonicalShape, empty_frame
+    from ehr_simulator.ingestion.geneva import GenevaDataset
+
+    scalar = pd.DataFrame(
+        [
+            {
+                "patient_id": "p",
+                "t_minutes": t,
+                "variable": v,
+                "value": x,
+                "unit": "",
+                "source": "EHR",
+            }
+            for t, v, x in rows
+        ]
+    )
+    admission = pd.DataFrame([{"patient_id": "p", "field": "age", "value": "70"}])
+    return GenevaDataset(
+        scalar_ts=scalar,
+        admission=admission,
+        imaging=empty_frame(CanonicalShape.IMAGING),
+        ai_output=empty_frame(CanonicalShape.AI_OUTPUT),
+    )
+
+
+@pytest.mark.parametrize(
+    ("rows", "panel", "expected"),
+    [
+        ([(0.0, "hr_max", 90.0)], "vitals", "partial"),  # bound without median
+        ([(0.0, "hr_min", 80.0), (0.0, "hr", 70.0)], "vitals", "partial"),  # min > median
+        ([(0.0, "nihss", 4.0), (0.0, "nihss_max", 3.0)], "neuro_support", "partial"),
+        ([(0.0, "hr", 70.0), (60.0, "sbp", 120.0)], "vitals", "loading"),  # sbp first after t
+        ([(0.0, "hr", 70.0), (0.0, "hr_max", 90.0)], "vitals", "loading"),  # one bound is fine
+        ([(0.0, "gcs", 14.0)], "neuro_support", "loading"),
+        ([(0.0, "glucose", 5.0), (60.0, "crp", 3.0)], "labs", "loading"),
+        ([(60.0, "glucose", 5.0)], "labs", "empty-unexpected"),
+        ([(0.0, "tmax_gt_6", 12.0)], "imaging", "loading"),
+        ([(60.0, "tmax_gt_6", 12.0)], "imaging", "empty-unexpected"),
+        ([(0.0, "hr", 70.0)], "neuro_support", "empty-expected"),
+    ],
+)
+def test_partial_rules_read_rows_at_or_before_t(rows, panel: str, expected: str) -> None:
+    sliced = slice_to_timepoint(_scalar_dataset(rows), "p", 0.0, 0)
+    assert sliced.panel_states[panel] == expected
+
+
+def test_bound_order_tolerates_inverse_normalisation_noise() -> None:
+    """Real Geneva NIHSS bucket: min 1.0000000000000009 > median 1.0 by float noise."""
+    rows = [(0.0, "nihss_min", 1.0000000000000009), (0.0, "nihss", 1.0)]
+    rows.append((0.0, "nihss_max", 0.9999999999999996))
+    sliced = slice_to_timepoint(_scalar_dataset(rows), "p", 0.0, 0)
+    assert sliced.panel_states["neuro_support"] == "loading"
+
+
+def test_admission_imaging_findings_make_imaging_present() -> None:
+    import pandas as pd
+
+    dataset = _scalar_dataset([(0.0, "hr", 70.0)])
+    dataset.admission = pd.DataFrame(
+        [{"patient_id": "p", "field": "vascular_occlusion", "value": "True"}]
+    )
+    sliced = slice_to_timepoint(dataset, "p", 0.0, 0)
+    assert sliced.panel_states["imaging"] == "loading"
+
+
+def test_slice_timepoints_are_the_explicit_walk(synthetic) -> None:
+    """S8 §9.1: the study sequence, never the patient's whole stay."""
+    study = (0.0, 60.0)
+    sliced = slice_to_timepoint(synthetic, "synth_001", 60.0, 1, timepoints=study)
+    assert sliced.timepoints == study
+    fallback = slice_to_timepoint(synthetic, "synth_001", 60.0, 1)
+    assert fallback.timepoints == (0.0, 60.0, 180.0)

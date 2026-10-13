@@ -53,7 +53,7 @@ __all__ = [
 ]
 
 #: The instrumented information panels (``section[data-panel]``).
-PANEL_IDS = ("admission", "vitals", "labs", "imaging", "ai")
+PANEL_IDS = ("admission", "vitals", "neuro_support", "labs", "imaging", "ai")
 
 #: Every panel primitive's kind starts with it.
 PANEL_KIND_PREFIX = "panel."

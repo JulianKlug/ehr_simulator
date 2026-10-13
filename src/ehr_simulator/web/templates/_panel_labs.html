@@ -1,23 +1,24 @@
+{% import "_panel_macros.html" as m %}
 <section class="panel panel-labs panel-state-{{ state }}"
-         aria-label="labs panel — {{ state }}"
+         aria-label="labs panel — {{ m.aria_state(state) }}"
          data-panel="labs"
          data-state="{{ state }}">
     <header>Labs</header>
     <div class="panel-content" data-panel-content>
-    {% if state == "empty-expected" %}
-        <p class="empty">No labs recorded for this patient.</p>
-    {% elif state == "empty-unexpected" %}
-        <p class="empty">No labs at this timepoint yet (data exists later).</p>
+    {% if state.startswith("empty") %}
+        {{ m.empty_message("labs") }}
     {% elif state == "error" %}
         <p class="error">Render failed: {{ error }}</p>
     {% else %}
         {% if state == "partial" %}
             <p class="flash-warn">Partial labs at this timepoint.</p>
         {% endif %}
+        {#- S8: up to 72 hourly columns; the label column stays put. -#}
+        <div class="table-scroll">
         <table class="values-table labs-table" aria-label="labs by timepoint">
             <thead>
                 <tr>
-                    <th scope="col">Lab</th>
+                    <th scope="col" class="sticky-col">Lab</th>
                     {% for t in timepoints %}
                     <th scope="col"{% if t == current_t %} class="col-current" aria-current="time"{% endif %}>
                         t = {{ "%.0f"|format(t) }} min
@@ -28,15 +29,16 @@
             <tbody>
                 {% for row in table_rows %}
                 <tr>
-                    <th scope="row">{{ row.variable }}{% if row.unit %} <small>({{ row.unit }})</small>{% endif %}</th>
+                    <th scope="row" class="sticky-col">{{ row.label }}{% if row.unit %} <small>({{ row.unit }})</small>{% endif %}</th>
                     {% for v in row.cells %}
                     {% set t = timepoints[loop.index0] %}
-                    <td title="{{ row.variable }} at t={{ '%.0f'|format(t) }} min"{% if t == current_t %} class="cell-current"{% endif %}>{% if v is none %}—{% else %}{{ "%.2f"|format(v) }}{% endif %}</td>
+                    <td title="{{ row.label }} at t={{ '%.0f'|format(t) }} min"{% if t == current_t %} class="cell-current"{% endif %}>{{ m.number(v) }}</td>
                     {% endfor %}
                 </tr>
                 {% endfor %}
             </tbody>
         </table>
+        </div>
     {% endif %}
     </div>
 </section>

@@ -779,3 +779,98 @@ body.chrome-epic [role="tabpanel"][hidden] {
     margin: 0 0 0.4rem 0;
     color: var(--color-error);
 }
+
+/* S8: wide observation tables (labs, perfusion) scroll horizontally while
+ * the label column stays visible. */
+.table-scroll {
+    overflow-x: auto;
+    max-width: 100%;
+}
+
+.table-scroll .values-table {
+    width: auto;
+}
+
+.values-table .sticky-col {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    text-align: left;
+    white-space: nowrap;
+    background: #fafafa;
+}
+
+.values-table thead .sticky-col {
+    background: #f3f3f3;
+}
+
+.perfusion-table th[aria-current="time"],
+.perfusion-table td.cell-current {
+    background: #fff8d6;
+    border-color: #c9a200;
+}
+
+/* S8: aggregate bounds next to the median in values tables. */
+.values-table small.range {
+    color: var(--color-muted);
+    white-space: nowrap;
+}
+
+.vitals-row-label {
+    margin: 0.25rem 0 0;
+    font-size: 0.85em;
+    font-weight: 600;
+    color: var(--color-muted);
+}
+
+/* S8: admission sections; treatment set apart from the baseline. */
+.admission-section h3,
+.panel-imaging h3 {
+    margin: 0.75rem 0 0.25rem;
+    font-size: 0.95em;
+}
+
+.admission-section.admission-treatment {
+    border-top: 2px solid var(--color-panel-border);
+    margin-top: 0.75rem;
+}
+
+.imaging-findings {
+    width: auto;
+}
+
+.imaging-findings th {
+    text-align: left;
+}
+
+/* S8: Geneva AI prediction + bounded contributors. */
+.ai-probability {
+    font-size: 1.6em;
+    font-weight: 600;
+    margin: 0.25rem 0;
+}
+
+.ai-contributors th,
+.ai-history th {
+    text-align: left;
+}
+
+.ai-contributors td.contribution {
+    min-width: 8rem;
+    white-space: nowrap;
+}
+
+.contrib-bar {
+    display: inline-block;
+    height: 0.6em;
+    margin-right: 0.4em;
+    vertical-align: middle;
+}
+
+.contrib-bar.contrib-up {
+    background: #b0413e;
+}
+
+.contrib-bar.contrib-down {
+    background: #2f6db5;
+}

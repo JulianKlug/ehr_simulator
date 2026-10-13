@@ -317,6 +317,33 @@ def test_batch_inherits_render_context(telemetry_harness: Any) -> None:
         assert mono > 0
 
 
+def test_neuro_support_panel_events_accepted(telemetry_harness: Any) -> None:
+    """S8 §2.1: the panel id vocabulary grows by ``neuro_support``."""
+    study, config = telemetry_harness
+    neuro = {
+        "panel.mount": {
+            "panel_id": "neuro_support",
+            "expanded": True,
+            "collapsible": True,
+            "state": "empty-expected",
+        },
+        "panel.viewport": {"panel_id": "neuro_support", "intersection_ratio": 0.5},
+        "panel.open": {"panel_id": "neuro_support"},
+        "panel.close": {"panel_id": "neuro_support"},
+    }
+    with study.boot(config) as client:
+        _, render_id = _open_case(client)
+        batch = [
+            _event(render_id, i + 1, kind, payload=payload)
+            for i, (kind, payload) in enumerate(neuro.items())
+        ]
+        response = _post(client, batch)
+        rows = _browser_rows(client)
+
+    assert response.status_code == HTTP_NO_CONTENT
+    assert [r[0] for r in rows] == list(neuro)
+
+
 def test_foreign_render_refused(telemetry_harness: Any) -> None:
     study, config = telemetry_harness
     with study.boot(config) as client:

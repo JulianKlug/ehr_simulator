@@ -30,6 +30,15 @@ Round-03 (session-02 feedback round-03 — design decisions):
   bottom-most panel.
 - Top + right spines are off (theme_minimal default); bottom + left
   ``axis_line`` are explicitly drawn for emphasis.
+
+S8 aggregate families (Geneva hourly ``min``/``median``/``max``): the median
+is the line, each bucket's bounds a light vertical bar (never a ribbon,
+which would interpolate between buckets); the line breaks at gaps over one
+bucket::
+
+    max  ┬           ┬
+    med  ●───────────●       ●      (gap > 60 min: no line)
+    min  ┴           │       ┴
 """
 
 from __future__ import annotations
@@ -40,10 +49,16 @@ from io import BytesIO
 import pandas as pd
 import plotnine as p9
 
+from ehr_simulator.ingestion.canonical import AGGREGATE_BOUNDS
+
 _SVG_OPEN_RE = re.compile(r"(<svg\b[^>]*?)(/?>)", re.DOTALL)
 
 VITALS_COLORS = {
     "hr": "#c0392b",
+    "map": "#2c3e8f",
+    "nihss": "#5d4037",
+    "gcs": "#00796b",
+    "fio2": "#0277bd",
     "sbp": "#1f6feb",
     "dbp": "#7aa7ef",
     "rr": "#8e44ad",
@@ -74,6 +89,11 @@ _PANEL_HEIGHT = 1.8
 
 #: A path needs two points; plotnine warns on (and draws nothing for) fewer.
 _MIN_LINE_POINTS = 2
+
+#: S8: the median line joins adjacent Geneva buckets only (one hour).
+RANGE_LINE_MAX_GAP_MINUTES = 60.0
+_RANGE_BAR_ALPHA = 0.35
+_RANGE_BAR_SIZE = 2.2
 
 
 def _line_layers(
@@ -270,9 +290,25 @@ def render_grouped_bp_svg(
         )
 
     if has_data:
+        # S8: with bounds, bars per bucket and the lines break at gaps.
+        bars = _bp_range_bars(frame)
+        line_group = "variable"
+        if not bars.empty:
+            plot_df = plot_df.sort_values(["variable", "t_minutes"])
+            gaps = plot_df.groupby("variable", observed=True)["t_minutes"].diff()
+            segment = (gaps > RANGE_LINE_MAX_GAP_MINUTES).groupby(plot_df["variable"]).cumsum()
+            plot_df["line_group"] = plot_df["variable"].astype(str) + ":" + segment.astype(str)
+            line_group = "line_group"
+            plot = plot + p9.geom_linerange(
+                data=bars,
+                mapping=p9.aes(x="t_minutes", ymin="ymin", ymax="ymax", color="variable"),
+                inherit_aes=False,
+                alpha=_RANGE_BAR_ALPHA,
+                size=_RANGE_BAR_SIZE,
+            )
         plot = (
             plot
-            + _line_layers(plot_df, group="variable", size=1.0)
+            + _line_layers(plot_df, group=line_group, mapping=p9.aes(group=line_group), size=1.0)
             + p9.geom_point(size=3.0)
             + p9.geom_text(
                 p9.aes(label="value"),
@@ -296,6 +332,125 @@ def render_grouped_bp_svg(
         "data-bp-missing": ",".join(missing_vars) if missing_vars else None,
     }
     return _stamp_root_attrs(raw, attrs)
+
+
+def family_frame(
+    frame: pd.DataFrame, *, min_var: str, median_var: str, max_var: str
+) -> pd.DataFrame:
+    """One row per bucket: ``t_minutes, low, median, high`` (NaN when absent).
+
+    Example: rows ``hr_min=60, hr=70`` at t=0 → ``(0.0, 60.0, 70.0, NaN)``.
+    A duplicated ``(t, variable)`` keeps its first value; nothing is
+    interpolated.
+    """
+    members = (min_var, median_var, max_var)
+    sub = frame.loc[frame["variable"].astype(str).isin(members) & frame["value"].notna()]
+    wide = sub.groupby(["t_minutes", "variable"])["value"].first().unstack()
+    wide = wide.reindex(columns=list(members))
+    wide.columns = ["low", "median", "high"]
+    return wide.reset_index().sort_values("t_minutes").reset_index(drop=True)
+
+
+def _range_bars(family: pd.DataFrame) -> pd.DataFrame:
+    """Per-bucket bars from the median to each available bound.
+
+    A bucket without a median draws no bar (the panel is ``partial``).
+    """
+    has_bound = family["low"].notna() | family["high"].notna()
+    bars = family.loc[family["median"].notna() & has_bound].copy()
+    bars["ymin"] = bars["low"].fillna(bars["median"])
+    bars["ymax"] = bars["high"].fillna(bars["median"])
+    return bars
+
+
+def _segments(t_minutes: pd.Series) -> pd.Series:
+    """Line segment id per point: a gap over one bucket starts a new one."""
+    return (t_minutes.diff() > RANGE_LINE_MAX_GAP_MINUTES).cumsum()
+
+
+def render_range_timeline_svg(
+    frame: pd.DataFrame,
+    *,
+    min_var: str,
+    median_var: str,
+    max_var: str,
+    x_range: tuple[float, float] | None = None,
+    is_bottom: bool = True,
+) -> str:
+    """Aggregate family timeline: median line + points, per-bucket range bars.
+
+    Missing bounds are never invented: a bucket with one bound draws the
+    bar from the median to it. The root ``<svg>`` carries
+    ``data-variable="{median_var}"`` and ``data-range="true"``.
+    """
+    family = family_frame(frame, min_var=min_var, median_var=median_var, max_var=max_var)
+    points = family.loc[family["median"].notna(), ["t_minutes", "median"]]
+    points = points.rename(columns={"median": "value"}).reset_index(drop=True)
+    points["segment"] = _segments(points["t_minutes"])
+    bars = _range_bars(family)
+    color = VITALS_COLORS.get(median_var, _DEFAULT_COLOR)
+    figsize = _panel_figsize(is_bottom=is_bottom)
+    scale_x = p9.scale_x_continuous(name="t (min)", limits=x_range)
+
+    if points.empty:
+        phantom = pd.DataFrame({"t_minutes": [0.0], "value": [0.0]})
+        plot = (
+            p9.ggplot(phantom, p9.aes(x="t_minutes", y="value"))
+            + p9.geom_blank()
+            + scale_x
+            + p9.scale_y_continuous(name=median_var)
+            + _panel_theme(is_bottom=is_bottom, figure_size=figsize)
+        )
+    else:
+        plot = p9.ggplot(points, p9.aes(x="t_minutes", y="value"))
+        if not bars.empty:
+            plot = plot + p9.geom_linerange(
+                data=bars,
+                mapping=p9.aes(x="t_minutes", ymin="ymin", ymax="ymax"),
+                inherit_aes=False,
+                color=color,
+                alpha=_RANGE_BAR_ALPHA,
+                size=_RANGE_BAR_SIZE,
+            )
+        plot = (
+            plot
+            + _line_layers(
+                points, group="segment", mapping=p9.aes(group="segment"), color=color, size=1.0
+            )
+            + p9.geom_point(color=color, size=3.2)
+            + p9.geom_text(
+                p9.aes(label="value"),
+                format_string="{:.1f}",
+                color="#222222",
+                size=8,
+                nudge_y=0,
+                va="bottom",
+                ha="left",
+            )
+            + scale_x
+            + p9.scale_y_continuous(name=median_var, expand=(0.5, 0.5))
+            + _panel_theme(is_bottom=is_bottom, figure_size=figsize)
+        )
+
+    buf = BytesIO()
+    plot.save(buf, format="svg", verbose=False)
+    raw = buf.getvalue().decode("utf-8")
+    return _stamp_root_attrs(raw, {"data-variable": median_var, "data-range": "true"})
+
+
+def _bp_range_bars(frame: pd.DataFrame) -> pd.DataFrame:
+    """Range bars of every BP family in ``frame`` (``variable`` = family median)."""
+    parts = []
+    for median in _BP_VARS:
+        low, high = AGGREGATE_BOUNDS[median]
+        bars = _range_bars(family_frame(frame, min_var=low, median_var=median, max_var=high))
+        if not bars.empty:
+            parts.append(bars.assign(variable=median))
+    if not parts:
+        return pd.DataFrame(columns=["t_minutes", "ymin", "ymax", "variable"])
+    bars = pd.concat(parts, ignore_index=True)
+    bars["variable"] = pd.Categorical(bars["variable"], categories=_BP_VARS, ordered=True)
+    return bars
 
 
 def _stamp_root_attrs(svg_text: str, attrs: dict[str, str | None]) -> str:

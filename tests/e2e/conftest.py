@@ -383,3 +383,35 @@ def live_phase2_server(
 def phase2_db(phase2_work_dir: Path) -> Path:
     """Path of ``live_phase2_server``'s live DB (read it, never write)."""
     return phase2_work_dir / _DB_FILENAME
+
+
+@pytest.fixture(scope="session")
+def live_geneva_server(tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
+    """S8: non study app on the Geneva shaped canonical dataset, in process."""
+    from ehr_simulator.web.app import create_app
+    from tests.support.geneva_ui import geneva_shaped_dataset
+
+    work_dir = tmp_path_factory.mktemp("e2e-geneva-work")
+    app = create_app(
+        log_dir=work_dir / "logs",
+        dataset_loader=geneva_shaped_dataset,
+        db_path=work_dir / _DB_FILENAME,
+        backup_dir=work_dir / "backups",
+    )
+    port = _free_port()
+    config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning", ws="none")
+    server = uvicorn.Server(config)
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+
+    deadline = time.monotonic() + _READY_TIMEOUT_SECONDS
+    while not server.started:
+        if not thread.is_alive() or time.monotonic() > deadline:
+            raise RuntimeError("in-process uvicorn did not start")
+        time.sleep(0.05)
+
+    try:
+        yield f"http://127.0.0.1:{port}"
+    finally:
+        server.should_exit = True
+        thread.join(timeout=10)

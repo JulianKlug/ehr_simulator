@@ -1,7 +1,7 @@
 """Integration tests for the FastAPI routes.
 
 Covers index listing, full vs HTMX partial responses, chrome A/B selection,
-fixture-state acceptance (synth_003 empty-expected imaging, synth_002 partial
+fixture-state acceptance (synth_003 empty-expected imaging, synth_002 sparse
 labs), error containment when a panel renderer raises (D9), boundary errors
 (D6/D10), the data-leak regression (#21), and the lifespan boot-failure path
 (D17).
@@ -91,7 +91,7 @@ def test_patient_route_renders_full_page_on_browser_request(client: TestClient) 
     assert "/static/theme.css" in body
     soup = BeautifulSoup(body, "html.parser")
     assert soup.select_one("#patient-view") is not None
-    for panel in ("vitals", "labs", "admission", "imaging", "ai"):
+    for panel in ("vitals", "neuro_support", "labs", "admission", "imaging", "ai"):
         assert soup.select_one(f"section[data-panel='{panel}']") is not None, (
             f"missing panel {panel}"
         )
@@ -135,16 +135,20 @@ def test_synth_003_imaging_panel_is_empty_expected_at_t0(client: TestClient) -> 
     soup = BeautifulSoup(r.text, "html.parser")
     section = soup.select_one("section[data-panel='imaging']")
     assert section is not None
-    assert section.get("aria-label") == "imaging panel — empty-expected"
+    # S8 §9.2: the precise empty state is in data-state only.
+    assert section.get("aria-label") == "imaging panel — empty"
+    assert section.get("data-state") == "empty-expected"
 
 
-def test_synth_002_labs_panel_is_partial_at_t_index_1(client: TestClient) -> None:
+def test_synth_002_sparse_labs_are_not_partial_at_t_index_1(client: TestClient) -> None:
+    """S8 §10.1: no lab draw at the current bucket is normal sparsity."""
     r = client.get("/patient/synth_002/timepoint/1")
     assert r.status_code == 200
     soup = BeautifulSoup(r.text, "html.parser")
     section = soup.select_one("section[data-panel='labs']")
     assert section is not None
-    assert section.get("aria-label") == "labs panel — partial"
+    assert section.get("aria-label") == "labs panel — loading"
+    assert section.select_one(".flash-warn") is None
 
 
 def test_route_oob_t_index_returns_404(client: TestClient) -> None:
@@ -340,9 +344,10 @@ def test_vitals_panel_partial_dbp_renders_panel_note(
     tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
 ) -> None:
     """When DBP is missing from the slice but SBP is present, the BP panel
-    SVG carries ``data-bp-missing="dbp"`` and a panel-level note ('DBP
-    missing at this timepoint.') renders below the BP SVG. This is the
-    round-03 partial-within-group behavior.
+    SVG carries ``data-bp-missing="dbp"`` and a panel-level note ('No DBP
+    recorded up to this timepoint.') renders below the BP SVG. This is the
+    round-03 partial-within-group behavior; S8 words it over the whole
+    visible slice, never about later data.
     """
     from ehr_simulator.ingestion.synthetic import load_synthetic
     from ehr_simulator.web.app import create_app
@@ -369,8 +374,7 @@ def test_vitals_panel_partial_dbp_renders_panel_note(
     assert bp_svg.get("data-bp-missing") == "dbp"
     note = soup.select_one("p.vitals-panel-note[data-group='bp']")
     assert note is not None, "expected per-panel BP partial note"
-    assert "DBP" in note.get_text()
-    assert "missing" in note.get_text().lower()
+    assert note.get_text(strip=True) == "No DBP recorded up to this timepoint."
 
 
 def test_renderer_exception_detail_is_not_shown_to_clinicians(

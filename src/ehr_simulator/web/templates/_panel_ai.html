@@ -1,5 +1,6 @@
+{% import "_panel_macros.html" as m %}
 <section class="panel panel-ai panel-state-{{ state }}"
-         aria-label="ai panel — {{ state }}"
+         aria-label="ai panel — {{ m.aria_state(state) }}"
          data-panel="ai"
          {%- if measured %} data-intervention="ai"{% endif %}
          data-state="{{ state }}">
@@ -8,16 +9,62 @@
     {#- S11g: a measured AI case shows only the frozen row for exactly t. -#}
     {% if state == "unavailable" %}
         <p class="error">AI output unavailable for this timepoint.</p>
-    {% elif state == "empty-expected" %}
-        <p class="empty">No AI output for this patient.</p>
-    {% elif state == "empty-unexpected" %}
-        <p class="empty">No AI output at this timepoint yet (data exists later).</p>
+    {% elif state.startswith("empty") %}
+        {{ m.empty_message("AI") }}
     {% elif state == "error" %}
         <p class="error">Render failed: {{ error }}</p>
     {% else %}
         {% if state == "partial" %}
             <p class="flash-warn">AI payload incomplete.</p>
         {% endif %}
+        {#- S8: one probability and at most ten contributors, never raw JSON. -#}
+        {% if prediction %}
+        <div class="ai-prediction">
+            <h3>Predicted probability{% if outcome_label %} of {{ outcome_label }}{% endif %}</h3>
+            {% if prediction.probability is not none %}
+            <p class="ai-probability">{{ "%.1f"|format(prediction.probability * 100) }}%</p>
+            {% endif %}
+            <p class="ai-model">Model {{ prediction.model_id }} · t = {{ "%.0f"|format(prediction.t_minutes) }} min</p>
+            {% set contributors = prediction.contributors %}
+            {% if contributors and contributors.all %}
+            <h4>Top model contributors</h4>
+            <table class="values-table ai-contributors" aria-label="top model contributors">
+                <thead>
+                    <tr><th scope="col">Feature</th><th scope="col">Effect</th><th scope="col">Contribution</th></tr>
+                </thead>
+                {% for group, effect in [(contributors.increasing, "increases model output"), (contributors.decreasing, "decreases model output")] %}
+                {% if group %}
+                <tbody class="contributors-{{ 'up' if loop.first else 'down' }}">
+                    {% for c in group %}
+                    <tr>
+                        <th scope="row">{% if c.label %}{{ c.label }}{% else %}<code>{{ c.feature }}</code>{% endif %}</th>
+                        <td>{{ effect }}</td>
+                        <td class="contribution">
+                            <span class="contrib-bar contrib-{{ 'up' if c.value > 0 else 'down' }}"
+                                  style="width: {{ '%.0f'|format(100 * (c.value|abs) / prediction.max_abs) }}%"></span>
+                            {{ "%+.3f"|format(c.value) }}
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+                {% endif %}
+                {% endfor %}
+            </table>
+            <p class="ai-note"><small>Contributions explain the model output; they are not causes.</small></p>
+            {% endif %}
+        </div>
+        {% endif %}
+        {% if history %}
+        <table class="values-table ai-history" aria-label="earlier predicted probabilities">
+            <thead><tr><th scope="col">t (min)</th><th scope="col">Predicted probability</th></tr></thead>
+            <tbody>
+                {% for h in history %}
+                <tr><th scope="row">{{ "%.0f"|format(h.t_minutes) }}</th><td>{% if h.probability is none %}—{% else %}{{ "%.1f"|format(h.probability * 100) }}%{% endif %}</td></tr>
+                {% endfor %}
+            </tbody>
+        </table>
+        {% endif %}
+        {% if rows %}
         <ul class="ai-list">
             {% for row in rows %}
             <li>
@@ -31,6 +78,7 @@
             </li>
             {% endfor %}
         </ul>
+        {% endif %}
     {% endif %}
     </div>
 </section>

@@ -940,6 +940,32 @@ def test_complete_zero_exposure_differs_from_missing(xh: LifecycleHarness) -> No
     assert not _rows(bundle, "panel_summaries.csv", patient_id=patient_id, t_index="1")
 
 
+def test_neuro_support_panel_is_exported(xh: LifecycleHarness) -> None:
+    """S8 §2.1: panel_summaries.csv carries the new panel id."""
+    with _tab(xh) as client:
+        patient_id = _started_patient(_start(client))
+        render_id = _page(client, patient_id)
+        _claim(client, patient_id, TAB_A, render_id)
+        mount = {
+            "panel_id": "neuro_support",
+            "expanded": True,
+            "collapsible": True,
+            "state": "loading",
+        }
+        events = [
+            _event(render_id, 1, "browser.timepoint_enter", client_mono_ms=0.0),
+            _event(render_id, 2, "panel.mount", client_mono_ms=10.0, payload=mount),
+            _event(render_id, 3, "browser.timepoint_exit", client_mono_ms=3000.0),
+        ]
+        assert _post(client, TAB_A, events).status_code == HTTP_NO_CONTENT
+
+    bundle = _bundle(xh)
+    rows = _rows(
+        bundle, "panel_summaries.csv", patient_id=patient_id, t_index="0", panel_id="neuro_support"
+    )
+    assert rows[0]["mounted"] == "true"
+
+
 def test_two_question_schemas_export_long(
     xh: LifecycleHarness, study_fixture_dir: Path
 ) -> None:  # 21
