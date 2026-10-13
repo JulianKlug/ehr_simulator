@@ -1,11 +1,12 @@
-# Analysis input contract (`phase2_export_v1`) and summary tables
+# Analysis input contract (`phase2_export_v1`), summary tables and report
 
-Session 12a. Spec: `specs/session-12-phase25-release.md` §4, §5.
+Sessions 12a, 12b. Spec: `specs/session-12-phase25-release.md` §4, §5, §6.
 
 The analysis package (`src/ehr_simulator/analysis/`) reads **only** a bundle written by `ehr-simulator export-phase2`. It never opens SQLite and never asks for a pseudonym secret or keyfile.
 
 ```
 export-phase2 bundle ─► load_phase2_bundle ─► ValidatedStudyBundle ─► build_summaries
+                                                                     ─► figures ─► publish_report
 ```
 
 ## Input: what the reader accepts
@@ -74,7 +75,7 @@ export-phase2 bundle ─► load_phase2_bundle ─► ValidatedStudyBundle ─�
 | `response_provenance` | version × question × t × arm | observations, reached, reached and applicable, answered (clinician / rule), not applicable, value not exported, missing by S11l reason |
 | `option_proportions` | … × answer source × option | Categorical and multi-select shares in historical option order. Multi-select shares are independent. `proportion` is `<NA>` when there are no answers. |
 | `numeric_responses` | … × answer source | Likert / probability n, median, min, max (`<NA>` when n = 0). `numeric_observations` lists the points. |
-| `attention` | version × t × arm | Over reached observations: S10 elapsed n / median. Foreground / active n / median come only from `telemetry_status == complete`, with counts per telemetry status. |
+| `attention` | version × t × arm | Over reached observations: S10 elapsed n / median. Foreground / active n / median come only from `telemetry_status == complete`, with counts per telemetry status. `attention_observations` lists the known durations (a blank one has no row). |
 | `intervention` | version × t × arm | Over reached observations: AI delivered / viewed true / false / unknown (AI arm only), no AI viewing `not_applicable`, failures by reason, leakage, PP compliant / noncompliant / indeterminate. |
 | `denominators` | one per measure | `summary`, `measure`, version, arm, t, question, `population`, `n`, `denominator`, `missing_unknown` |
 
@@ -82,6 +83,54 @@ Unknown values are never treated as zero:
 - A blank duration, delivery, viewing or PP value is counted as unknown.
 - Medians use known values only.
 - Free text is summarised only by its response status.
+
+## Report: figures and published outputs (S12b)
+
+The figure set is **provisional**. The stable contract is the reader and the summary tables above. Figure stems, layouts and their number may change once the study analysis plan exists.
+
+```
+publish_report(bundle_dir, out_dir, overwrite=Overwrite.REFUSE)
+    refuse: out_dir exists (REFUSE) · out_dir overlaps the bundle   ─► nothing read or written
+    load_phase2_bundle + build_summaries                           ─► AnalysisError: nothing written
+    <parent>/.<name>.staging-<id>/  ─► rename to <out_dir>          (REPLACE: old report aside, restored on failure)
+```
+
+| Path | Content |
+| --- | --- |
+| `figures/<stem>.svg`, `.pdf` | One per `figures.FIGURES` entry. SVG text stays text. Neither format carries a creation date. |
+| `tables/<summary>.csv` | The six S12a tables. `<NA>` is written as an empty cell, never 0. Text cells pass the S9c formula guard. |
+| `denominators.csv` | The S12a `denominators` table |
+| `analysis_manifest.json` | Written last. It holds: <br>• `analysis_schema_version` (`phase2_analysis_v1`) <br>• input schema, manifest SHA256 and `study_id` <br>• software versions <br>• every `config_version` + `config_hash` <br>• `cohort` <br>• settings <br>• the figure inventory <br>• each table's rows and SHA256. <br>There is no timestamp, so equal inputs give an equal manifest. |
+
+| Stem | Source tables | Shows |
+| --- | --- | --- |
+| `figure_01_divergence` | `numeric_observations`, `numeric_responses`, `option_proportions` | Answers per timepoint: <br>• likert / probability: individual values plus the median <br>• option questions: per option share (multi-select shares are independent) <br>• `n=` per arm <br>• rule answers dotted / hollow <br>• no free text |
+| `figure_02_case_flow` | `case_flow` | Planned items beside activated cases by lifecycle state, with replacement counts as text |
+| `figure_03_response_provenance` | `response_provenance` | Answered (clinician / rule), not applicable, and missing by S11l reason |
+| `figure_04_attention` | `attention_observations`, `attention` | Elapsed, foreground and active seconds, with `excl k` for reached observations that have no valid duration |
+| `figure_05_intervention` | `intervention` | Delivered, viewed, failure, leakage and PP, as yes / no / unknown / not applicable counts by ITT arm |
+
+Every figure follows these rules:
+- One column wide (3.5 in).
+- The arm is shown by colour **and** shape.
+- One strip per `version · question` (or `arm · version · question`). A question missing from a version shows `not in this version`.
+- The caption states the population, the denominator and "Descriptive only".
+- An empty cohort renders `No activated cases`.
+- Plotted text comes only from constants, config versions, question ids, option labels and counts.
+
+`figures.case_divergence_figure(bundle, patient_id)` draws one explicitly selected patient, one line per case (`case 1…`). It is not part of the report.
+
+## Notebook
+
+`notebooks/phase2_analysis.ipynb` only orchestrates the functions above. Run it after `uv sync --group analysis`.
+
+| Variable | Default |
+| --- | --- |
+| `EHR_SIM_PHASE2_BUNDLE` | `../tests/fixtures/analysis_bundle/walked` |
+| `EHR_SIM_ANALYSIS_OUT` | `../analysis_out/phase2` (git ignored) |
+| `EHR_SIM_ANALYSIS_OVERWRITE` | `refuse` (`replace` swaps atomically) |
+
+`uv run pytest -m notebook` executes it twice on the synthetic bundle. It checks that the tables equal the library's and that the manifest is stable. The S10 `newly_visible_data` annotations need clinical source data that the export does not carry, so they are not part of this figure set.
 
 ## Reference bundles
 

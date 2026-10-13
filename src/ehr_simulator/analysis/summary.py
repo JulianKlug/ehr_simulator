@@ -49,6 +49,7 @@ __all__ = [
     "denominators",
     "intervention",
     "attention",
+    "attention_observations",
     "numeric_observations",
     "numeric_responses",
     "option_proportions",
@@ -395,6 +396,32 @@ def attention(bundle: ValidatedStudyBundle) -> pd.DataFrame:
         columns += [f"{m}_n", f"{m}_median_seconds"]
     frame = _frame(rows, [*columns, *TELEMETRY_COLUMNS], ["t_index", *counts])
     return frame.astype({c: "Float64" for c in medians})
+
+
+ATTENTION_MEASURES = ("elapsed", "foreground", "active")
+
+
+def attention_observations(bundle: ValidatedStudyBundle) -> pd.DataFrame:
+    """One row per known duration of a reached observation (for point plots).
+
+    Same eligibility as :func:`attention`: foreground / active only where
+    ``telemetry_status`` is ``complete``. A blank duration has no row,
+    never a 0 second one.
+    """
+    tp = bundle.timepoints
+    reached = tp[tp["timepoint_reached"]]
+    valid = reached["telemetry_status"] == VALID_TELEMETRY
+    parts = []
+    for measure in ATTENTION_MEASURES:
+        source = reached if measure == "elapsed" else reached[valid]
+        part = source[[*TIMEPOINT_KEYS, f"{measure}_seconds"]].rename(
+            columns={f"{measure}_seconds": "seconds"}
+        )
+        parts.append(part.dropna(subset=["seconds"]).assign(measure=measure))
+    frame = pd.concat(parts, ignore_index=True)
+    return frame[[*TIMEPOINT_KEYS, "measure", "seconds"]].astype(
+        {"t_index": "Int64", "seconds": "Float64"}
+    )
 
 
 FAILURE_COLUMNS = [f"failure_{reason.value}" for reason in FailureReason]

@@ -16,6 +16,7 @@ from ehr_simulator.analysis import load_phase2_bundle
 from ehr_simulator.analysis.summary import (
     AnalysisSummaries,
     Cohort,
+    attention_observations,
     build_summaries,
     numeric_observations,
 )
@@ -196,6 +197,18 @@ def test_missing_telemetry_is_excluded_not_zero(walked: AnalysisSummaries) -> No
     assert row["foreground_n"] == row["active_n"] == 0
     assert pd.isna(row["foreground_median_seconds"]) and pd.isna(row["active_median_seconds"])
     assert row["elapsed_n"] == 1  # S10 wall clock is independent of browser telemetry
+
+
+def test_attention_observations_match_the_counts(walked: AnalysisSummaries) -> None:
+    """Point rows: known durations only, same eligibility as ``attention``."""
+    points = attention_observations(load_phase2_bundle(FIXTURES / WALKED))
+
+    assert points["seconds"].notna().all() and (points["seconds"] > 0).all()
+    counts = points.groupby(["config_version", "t_index", "arm", "measure"]).size()
+    for r in walked.attention.to_dict("records"):
+        for measure in ("elapsed", "foreground", "active"):
+            key = (r["config_version"], r["t_index"], r["arm"], measure)
+            assert counts.get(key, 0) == r[f"{measure}_n"], key
 
 
 def test_indeterminate_delivery_and_pp_are_kept(walked: AnalysisSummaries) -> None:

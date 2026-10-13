@@ -46,6 +46,8 @@ UNIT_MODULES = frozenset(
     {
         "test_ai_payload",
         "test_analysis_bundle",
+        "test_analysis_figures",
+        "test_analysis_report",
         "test_analysis_schema",
         "test_analysis_summary",
         "test_answer_capture",
@@ -78,7 +80,7 @@ UNIT_MODULES = frozenset(
     }
 )
 SLOW_MODULES = frozenset({"test_export_phase2", "test_phase2_integration"})
-UNSTAGED_MARKERS = ("e2e", "real_data")
+UNSTAGED_MARKERS = ("e2e", "real_data", "notebook")
 
 
 @pytest.hookimpl(tryfirst=True)

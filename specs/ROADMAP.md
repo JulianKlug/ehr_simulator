@@ -245,7 +245,7 @@ What shipped:
 
 Spec: `specs/session-12-phase25-release.md` (slices S12a analysis contract, S12b figures + notebook, S12c release).
 
-S12a (bundle reader, summaries, synthetic fixture) shipped; S12b, S12c next.
+S12a (bundle reader, summaries, synthetic fixture) and S12b (figures, report publication, notebook) shipped; S12c next.
 
 Goal: publication-quality divergence view + reproducible analysis notebook + open-source v1.0 release. This is a **must-have** for v1.0 per the design doc — "do not ship v1.0 without it."
 

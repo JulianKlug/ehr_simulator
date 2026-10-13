@@ -5,6 +5,8 @@ never SQLite, a pseudonym secret or a keyfile::
 
     export-phase2 bundle ─► bundle.load_phase2_bundle ─► ValidatedStudyBundle
                                                        ─► summary.build_summaries
+                                                       ─► figures.FIGURES (S12b)
+    report.publish_report: all of the above ─► one atomically published directory
 
 No ``web``, ``db`` or exporter import: ``schema`` holds a frozen copy of the
 ``phase2_export_v1`` contract.
