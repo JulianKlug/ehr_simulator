@@ -107,6 +107,74 @@ def test_cli_serve_reload_with_config_warns_and_disables(
     assert "--reload disabled when --config is set" in captured.err
 
 
+DEMO_BANNER = 'class="demo-banner"'
+
+
+@pytest.mark.parametrize("flag", ["--config", "--questions"])
+def test_cli_serve_demo_refuses_a_study_flag(
+    captured_calls: list[dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+    study_fixture_dir: Path,
+    flag: str,
+) -> None:
+    """S12c: a demo never becomes a study."""
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["serve", "--demo", flag, str(study_fixture_dir / "questions.yaml")])
+
+    assert exc_info.value.code == 2
+    assert captured_calls == []
+    assert "--demo cannot be combined" in capsys.readouterr().err
+
+
+def test_cli_serve_demo_disables_reload(
+    captured_calls: list[dict[str, Any]],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cli.main(["serve", "--demo", "--reload"])
+
+    assert len(captured_calls) == 1
+    assert captured_calls[0]["reload"] is False
+    assert captured_calls[0]["host"] == "127.0.0.1"
+    assert "--reload disabled with --demo" in capsys.readouterr().err
+
+
+def test_cli_serve_demo_boots_the_bannered_synthetic_walk(
+    captured_calls: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """S12c test 14: clean directory → login → index → synth_001, no study row."""
+    from fastapi.testclient import TestClient
+
+    monkeypatch.chdir(tmp_path)
+    cli.main(["serve", "--demo"])
+    app_instance = captured_calls[0]["app"]
+
+    with TestClient(app_instance) as client:
+        login = client.get("/login")
+        assert DEMO_BANNER in login.text
+
+        signed_in = client.post("/login", data={"clinician_name": "Demo"}, follow_redirects=False)
+        assert signed_in.status_code == 303
+
+        index = client.get("/")
+        assert DEMO_BANNER in index.text
+        assert "synth_001" in index.text
+
+        patient = client.get("/patient/synth_001/timepoint/0")
+        assert patient.status_code == 200
+        assert DEMO_BANNER in patient.text
+
+    # The documented demo location; no study identity, configuration or arm.
+    with sqlite3.connect(tmp_path / "data" / "ehr_simulator.db") as conn:
+        for table in ("study_identity", "active_configuration", "arm_assignments"):
+            assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
+
+
+def test_plain_server_has_no_demo_banner(client: Any) -> None:
+    assert DEMO_BANNER not in client.get("/").text
+
+
 # ---------------------------------------------------------------------------
 # validate-config
 # ---------------------------------------------------------------------------

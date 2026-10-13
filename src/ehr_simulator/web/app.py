@@ -33,6 +33,7 @@ import contextlib
 import sys
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -73,6 +74,13 @@ _TEMPLATES_DIR = _THIS_DIR / "templates"
 _STATIC_DIR = _THIS_DIR / "static"
 
 
+class DemoMode(StrEnum):
+    """Whether every page carries the synthetic demonstration banner (S12c)."""
+
+    OFF = "off"
+    SYNTHETIC = "synthetic"
+
+
 def create_app(
     *,
     log_dir: Path = Path("logs"),
@@ -80,6 +88,7 @@ def create_app(
     db_path: Path | None = None,
     backup_dir: Path | None = None,
     clock: Clock = system_clock,
+    demo: DemoMode = DemoMode.OFF,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -223,6 +232,8 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
     app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    # S12c: `serve --demo` marks every full page so it cannot pass for a study.
+    app.state.templates.env.globals["synthetic_demo"] = demo is DemoMode.SYNTHETIC
     # Study mode is opt-in via app_from_study_config; bare create_app() has
     # no questions to ask, so the pane stays hidden and /answer returns 409.
     app.state.study = None

@@ -241,11 +241,11 @@ What shipped:
 - **Integration gate (S11o):** end to end scenarios in `tests/test_phase2_integration.py`, `tests/e2e/test_phase2_walk.py`, `tests/e2e/test_multitab_walk.py`.
 - **Clinician characteristics (S11p):** role, years of practice, country and specialty collected before the first measured case, locked once it starts, exported as `clinicians.csv`.
 
-### Session 12 — Phase 2.5 polished divergence + v1.0 release [NEXT]
+### Session 12 — Phase 2.5 polished divergence + v1.0 release [SHIPPED; tag pending]
 
 Spec: `specs/session-12-phase25-release.md` (slices S12a analysis contract, S12b figures + notebook, S12c release).
 
-S12a (bundle reader, summaries, synthetic fixture) and S12b (figures, report publication, notebook) shipped; S12c next.
+S12a (bundle reader, summaries, synthetic fixture), S12b (figures, report publication, notebook) and S12c (`serve --demo`, README quickstart + clean clone CI smoke, reference/analysis/release docs, build allowlist) shipped. The v1.0.0 version bump and tag are owner steps in `docs/release-checklist.md`, coordinated with the preprint. No Geneva sample is published (no sharing permission).
 
 Goal: publication-quality divergence view + reproducible analysis notebook + open-source v1.0 release. This is a **must-have** for v1.0 per the design doc — "do not ship v1.0 without it."
 

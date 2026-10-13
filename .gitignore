@@ -2,8 +2,16 @@
 docs/data-contract.md.tmp
 logs/
 data/
+# Packaged Geneva units table; `data/` above would drop it from the sdist.
+!src/ehr_simulator/ingestion/data/
 exports/
 *.keyfile.csv
+# Study databases, pseudonym secrets (README: keys/pseudonym.secret).
+*.db
+*.db-wal
+*.db-shm
+keys/
+*.secret
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

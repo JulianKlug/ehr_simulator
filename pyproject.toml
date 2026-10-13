@@ -2,6 +2,9 @@
 name = "ehr_simulator"
 version = "0.0.1"
 description = "Browser-based EHR simulator for clinician-AI decision studies."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2",
@@ -43,6 +46,11 @@ analysis = [
 [build-system]
 requires = ["hatchling>=1.32,<2"]
 build-backend = "hatchling.build"
+
+# Allowlist: hatch reads only the root .gitignore, so local files ignored
+# elsewhere (configs/.gitignore: pilot patient ids) would otherwise ship.
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "README.md", "LICENSE"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ehr_simulator"]
