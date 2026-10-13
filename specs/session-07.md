@@ -132,7 +132,7 @@ Sidecar contract: header exactly `case_admission_id`; each id matches `^\d+_\d+$
 
 ### Explore D: model identity
 
-Neither artifact embeds a model name or version. Shipped alongside: `final_model_config.json` (hyperparameters, `timestamp: 20260215_162922`) and `xgb_final_model.model` (254 591 bytes).
+Neither artifact embeds a model name or version. Shipped alongside: `final_model_config.json` (hyperparameters, training timestamp) and `xgb_final_model.model` (size withheld).
 
 - `model_system_version` = lowercase hex SHA256 of the raw bytes of `xgb_final_model.model` (§5.3).
 - `model_id` = explicit `geneva_ai.model_id` (operator chosen label, e.g. `opsum_end_xgb`).

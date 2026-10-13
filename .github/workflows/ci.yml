@@ -31,7 +31,7 @@ jobs:
         run: uv run ruff format --check .
       - name: Test
         # Overrides the default -m so the slow stage runs too.
-        run: uv run pytest -m 'not e2e and not real_data'
+        run: uv run pytest -m 'not e2e and not real_data and not notebook'
       - name: Notebook
         run: uv run pytest -m notebook
       - name: Data-contract drift check

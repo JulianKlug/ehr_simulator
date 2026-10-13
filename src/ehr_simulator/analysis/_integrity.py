@@ -37,10 +37,12 @@ from ehr_simulator.analysis.schema import (
     AnswerSource,
     BranchState,
     LifecycleState,
+    PracticeFiles,
     ResponseStatus,
     ResponseType,
     guard_cell,
 )
+from ehr_simulator.answer_codec import PROBABILITY_MAX, PROBABILITY_MIN
 
 if TYPE_CHECKING:
     from ehr_simulator.analysis.bundle import ConfigVersion
@@ -80,7 +82,7 @@ def link(
     study_id: str,
     frames: Mapping[str, pd.DataFrame],
     versions: Mapping[str, ConfigVersion],
-    practice_included: bool,
+    practice: PracticeFiles,
 ) -> Linked:
     for name, frame in frames.items():
         _single_study(name, frame, study_id)
@@ -91,11 +93,12 @@ def link(
     _registered_events(frames[EVENTS], registered)
 
     cases = _cases(frames[TIMEPOINTS], versions)
+    _per_protocol(frames[TIMEPOINTS])
     answers = _answers(frames[ANSWERS], frames[TIMEPOINTS], versions)
     _panels(frames[PANELS], frames[TIMEPOINTS])
     cases = _audit(frames[AUDIT], cases, registered)
     _counts(frames[COUNTS], versions, frames[AUDIT], cases, frames[TIMEPOINTS], answers)
-    _clinicians(frames[CLINICIANS], cases, frames[AUDIT], practice_included)
+    _clinicians(frames[CLINICIANS], cases, frames[AUDIT], practice)
     _events(frames[EVENTS], cases)
     return Linked(cases=cases, answers=answers)
 
@@ -169,6 +172,14 @@ def _cases(timepoints: pd.DataFrame, versions: Mapping[str, ConfigVersion]) -> p
     columns = [*CASE_KEY, *CASE_COLUMNS]
     cases = pd.DataFrame(rows, columns=columns)
     return cases.astype(timepoints[columns].dtypes.to_dict())
+
+
+def _per_protocol(timepoints: pd.DataFrame) -> None:
+    """S11l: a reached, determinate observation has a known PP value, so the
+    compliant / noncompliant / indeterminate counts add up to ``reached``."""
+    determinate = timepoints["timepoint_reached"] & timepoints["pp_determinate"]
+    if timepoints.loc[determinate, "pp_compliant"].isna().any():
+        raise AnalysisError(f"{TIMEPOINTS}: a reached, determinate row has no pp_compliant")
 
 
 # ---------------------------------------------------------------------------
@@ -268,7 +279,7 @@ def _decoded(row: object, question: Question, where: str) -> tuple[object, tuple
     if kind == ResponseType.LIKERT:
         return _bounded_int(cell, question.scale_min, question.scale_max, where), None
     if kind == ResponseType.PROBABILITY:
-        return _bounded_int(cell, 0, 100, where), None
+        return _bounded_int(cell, PROBABILITY_MIN, PROBABILITY_MAX, where), None
     if kind == ResponseType.CATEGORICAL:
         matches = [o for o in question.options if guard_cell(o) == cell]
         if len(matches) != 1:
@@ -447,27 +458,31 @@ def _counts(
 
 
 def _clinicians(
-    clinicians: pd.DataFrame, cases: pd.DataFrame, audit: pd.DataFrame, practice_included: bool
+    clinicians: pd.DataFrame, cases: pd.DataFrame, audit: pd.DataFrame, practice: PracticeFiles
 ) -> None:
     _unique(CLINICIANS, clinicians, ("clinician_id",))
     listed = set(clinicians["clinician_id"])
     measured = set(cases["clinician_id"]) | set(audit["clinician_id"])
     if not measured <= listed:
         raise AnalysisError(f"{CLINICIANS}: a case or schedule clinician is not listed")
-    if not practice_included and listed != measured:
+    if practice is PracticeFiles.ABSENT and listed != measured:
         raise AnalysisError(f"{CLINICIANS}: lists a clinician without a case or schedule")
 
 
 def _events(events: pd.DataFrame, cases: pd.DataFrame) -> None:
-    """Event ids unique; an event of a case carries that case's configuration."""
+    """Event ids unique; every event belongs to a case (S11n exports case
+    events only) and carries that case's configuration."""
     _unique(EVENTS, events, ("event_id",))
-    pinned = events[events["config_version"] != ""]
-    joined = pinned.merge(
+    joined = events.merge(
         cases[["clinician_id", "patient_id", *PROVENANCE]],
         on=["clinician_id", "patient_id"],
-        how="inner",
+        how="left",
         suffixes=("", "_case"),
+        indicator=True,
     )
+    if (joined["_merge"] != "both").any():
+        raise AnalysisError(f"{EVENTS}: an event of no case")
+    joined = joined[joined["config_version"] != ""]
     for column in PROVENANCE:
         if (joined[column] != joined[f"{column}_case"]).any():
             raise AnalysisError(f"{EVENTS}: an event differs from its case's {column}")

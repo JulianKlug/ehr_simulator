@@ -18,6 +18,7 @@ from ehr_simulator.analysis.summary import (
     Cohort,
     attention_observations,
     build_summaries,
+    denominators,
     numeric_observations,
 )
 from tests.support.analysis_bundle import EMPTY, FIXTURES, WALKED
@@ -235,6 +236,30 @@ def test_denominators_are_consistent(walked: AnalysisSummaries) -> None:
     assert (d["n"] >= 0).all() and (d["missing_unknown"] >= 0).all()
     assert (d["n"] + d["missing_unknown"] <= d["denominator"]).all()
     assert set(d["config_version"]) == {"v1", "v2"}
+
+
+def test_withheld_free_text_is_never_missing(walked: AnalysisSummaries) -> None:
+    """Free text not routinely exported is answered, not missing / unknown."""
+    provenance = walked.response_provenance.copy()
+    free = provenance.index[0]
+    provenance.loc[free, "response_type"] = "free-text"
+    provenance.loc[free, "reached_value_exported"] = 0
+    row = provenance.loc[free]
+
+    d = denominators(
+        case_flow=walked.case_flow,
+        response_provenance=provenance,
+        attention=walked.attention,
+        intervention=walked.intervention,
+    )
+
+    rows = d[
+        (d["question_id"] == row["question_id"])
+        & (d["config_version"] == row["config_version"])
+        & (d["arm"] == row["arm"])
+        & (d["t_index"] == row["t_index"])
+    ]
+    assert rows["measure"].tolist() == ["answered"]
 
 
 # ---------------------------------------------------------------------------

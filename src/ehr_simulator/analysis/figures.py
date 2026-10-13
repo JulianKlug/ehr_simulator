@@ -70,18 +70,21 @@ from ehr_simulator.analysis.schema import (
     TimepointTelemetry,
 )
 from ehr_simulator.analysis.summary import (
+    ARMS,
     ATTENTION_MEASURES,
     NUMERIC_TYPES,
     OPTION_TYPES,
     POPULATION_APPLICABLE,
     POPULATION_CASES,
     POPULATION_REACHED,
+    SOURCES,
     VALID_TELEMETRY,
     AnalysisSummaries,
     Cohort,
     attention_observations,
     numeric_observations,
 )
+from ehr_simulator.answer_codec import PROBABILITY_MAX, PROBABILITY_MIN
 
 __all__ = [
     "FIGURES",
@@ -98,9 +101,13 @@ __all__ = [
 
 ONE_COLUMN_INCHES = 3.5
 BASE_FONT_SIZE = 8
-TEXT_SIZE = 5.5
+#: Smallest text drawn (pt): legible when printed at one column.
+TEXT_SIZE = 6
 PANEL_INCHES = 1.0
 HEADER_INCHES = 1.6
+#: A figure fits one page: panels shrink, but never below the minimum.
+MAX_FIGURE_INCHES = 9.5
+MIN_PANEL_INCHES = 0.75
 #: Figure 1 / case figure rows: many short panels, versions side by side.
 ANSWER_PANEL_INCHES = 1.0
 STRIP_WRAP = 44
@@ -108,14 +115,14 @@ FACET_WRAP = 34
 NOTE_WRAP = 22
 CAPTION_WRAP = 62
 
-ARMS = (Arm.AI.value, Arm.NO_AI.value)
 ARM_LABELS = {Arm.AI.value: "AI", Arm.NO_AI.value: "No AI"}
 ARM_COLORS = {Arm.AI.value: "#0072B2", Arm.NO_AI.value: "#D55E00"}
 ARM_SHAPES = {Arm.AI.value: "o", Arm.NO_AI.value: "^"}
+#: The arm's marker as text: compact, colour independent count labels, e.g. "▲ n=2".
+ARM_GLYPHS = {Arm.AI.value: "●", Arm.NO_AI.value: "▲"}
 #: Arm offset along x, as a share of the timepoint span, so arms never overlap.
 ARM_DODGE = {Arm.AI.value: -0.02, Arm.NO_AI.value: 0.02}
 
-SOURCES = (AnswerSource.CLINICIAN.value, AnswerSource.RULE.value)
 SOURCE_LABELS = {AnswerSource.CLINICIAN.value: "clinician", AnswerSource.RULE.value: "rule"}
 SOURCE_LINETYPES = {AnswerSource.CLINICIAN.value: "solid", AnswerSource.RULE.value: "dotted"}
 #: Point ``fill`` key: the arm colour for clinician answers, white for rule answers.
@@ -123,6 +130,9 @@ HOLLOW = "hollow"
 FILL_VALUES = {**ARM_COLORS, HOLLOW: "white"}
 
 NOTE_COLOR = "#4d4d4d"
+#: Bar segment outline: keeps light fills (e.g. white "not applicable") visible.
+OUTLINE_COLOR = "#4d4d4d"
+OUTLINE_WIDTH = 0.2
 DESCRIPTIVE_NOTE = "Descriptive only; no inferential comparison."
 SOURCE_NOTE = "Rule answers (auto_value): dotted lines, hollow markers."
 NO_CASES = "No activated cases"
@@ -133,10 +143,12 @@ TIME_LABEL = "Minutes from first contact"
 COUNT_LABEL = "Count"
 
 #: Headroom above stacked bars for the ``n=`` / total labels.
-COUNT_EXPAND = (0, 0, 0.18, 0)
+COUNT_EXPAND = (0, 0, 0.35, 0)
 FLOW_EXPAND = (0, 0, 0.6, 0)
 #: Room right of the last timepoint for the ``case k`` labels.
 CASE_X_EXPAND = (0.05, 0, 0.3, 0)
+#: Room left / right of the first / last timepoint for its count labels.
+LABEL_X_EXPAND = (0.18, 0)
 CASE_LABEL_SHIFT = 0.18
 
 FIGURE_FORMATS = ("svg", "pdf")
@@ -196,8 +208,13 @@ def _dodge(version: ConfigVersion) -> dict[str, float]:
     return {arm: share * _span(version) for arm, share in ARM_DODGE.items()}
 
 
+#: Significant digits of a timepoint label: distinct float minutes never collide.
+T_LABEL_DIGITS = 15
+
+
 def _t_label(minutes: float) -> str:
-    return f"{minutes:g}"
+    """``60.0`` → ``"60"``; ``1440.125`` keeps every digit (``:g`` keeps six)."""
+    return f"{minutes:.{T_LABEL_DIGITS}g}"
 
 
 def _ordered(frame: pd.DataFrame, column: str, order: list[str]) -> pd.DataFrame:
@@ -207,16 +224,23 @@ def _ordered(frame: pd.DataFrame, column: str, order: list[str]) -> pd.DataFrame
     return out
 
 
-def _theme(panels: float, panel_inches: float = PANEL_INCHES) -> theme:
+def _theme(
+    panels: float,
+    panel_inches: float = PANEL_INCHES,
+    min_panel_inches: float = MIN_PANEL_INCHES,
+) -> theme:
+    panels = max(panels, 1)
+    fitted = (MAX_FIGURE_INCHES - HEADER_INCHES) / panels
+    panel_inches = max(min(panel_inches, fitted), min_panel_inches)
     return theme_bw(base_size=BASE_FONT_SIZE) + theme(
-        figure_size=(ONE_COLUMN_INCHES, HEADER_INCHES + panel_inches * max(panels, 1)),
+        figure_size=(ONE_COLUMN_INCHES, HEADER_INCHES + panel_inches * panels),
         legend_position="top",
         legend_title=element_text(size=6.5),
         legend_text=element_text(size=6),
         axis_text=element_text(size=6),
         strip_text=element_text(size=6),
         plot_title=element_text(size=9),
-        plot_caption=element_text(size=5.5, ha="left"),
+        plot_caption=element_text(size=TEXT_SIZE, ha="left"),
     )
 
 
@@ -242,7 +266,7 @@ def _placeholder(title: str, caption: str, text: str = NO_CASES) -> ggplot:
         + geom_text(size=BASE_FONT_SIZE, color=NOTE_COLOR)
         + labs(title=title, caption=caption)
         + theme_void(base_size=BASE_FONT_SIZE)
-        + theme(figure_size=(ONE_COLUMN_INCHES, 2.0), plot_caption=element_text(size=5.5))
+        + theme(figure_size=(ONE_COLUMN_INCHES, 2.0), plot_caption=element_text(size=TEXT_SIZE))
     )
 
 
@@ -314,7 +338,7 @@ def _y_range(question) -> tuple[float, float]:
     if question.response_type == ResponseType.LIKERT:
         return float(question.scale_min), float(question.scale_max)
     if question.response_type == ResponseType.PROBABILITY:
-        return 0.0, 100.0
+        return float(PROBABILITY_MIN), float(PROBABILITY_MAX)
     return 0.0, 1.0  # proportion / selection indicator
 
 
@@ -365,7 +389,7 @@ def _count_texts(layers, panel, version, question, counts: Mapping[tuple[int, st
                     "x": _minutes(version, t_index) + dodge[arm],
                     "y": low - 0.2 * row * (high - low),
                     "arm": arm,
-                    "label": f"n={counts.get((t_index, arm), 0)}",
+                    "label": f"{ARM_GLYPHS[arm]} n={counts.get((t_index, arm), 0)}",
                 }
             )
 
@@ -451,7 +475,8 @@ def _answer_plot(
         )
         + labs(title=title, caption=caption, x=TIME_LABEL, y=ANSWER_LABEL)
         + scale_y_continuous(breaks=_value_breaks)
-        + _theme(len(layers.panels), ANSWER_PANEL_INCHES)
+        # Answer panels carry two count rows: they never shrink (may exceed a page).
+        + _theme(len(layers.panels), ANSWER_PANEL_INCHES, ANSWER_PANEL_INCHES)
     )
     if not f["points"].empty:
         p += geom_point(
@@ -476,16 +501,16 @@ def _answer_plot(
     if not f["texts"].empty:
         p += geom_text(
             data=f["texts"],
-            mapping=aes("x", "y", label="label", color="arm"),
-            size=TEXT_SIZE - 1,
-            show_legend=False,
+            mapping=aes("x", "y", label="label"),
+            size=TEXT_SIZE,
+            color=NOTE_COLOR,
         )
     if not f["notes"].empty:
         # Translucent white box: readable over the answers, which stay visible.
         p += geom_label(
             data=f["notes"],
             mapping=aes("x", "y", label="label"),
-            size=TEXT_SIZE - 0.5,
+            size=TEXT_SIZE,
             color=NOTE_COLOR,
             fill="white",
             alpha=0.75,
@@ -507,14 +532,15 @@ def divergence_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggp
         f"Population: {POPULATION_APPLICABLE}; columns: config version, colour /",
         "shape: ITT arm. Likert / probability: individual answers (small) and median",
         "(large, joined). Categorical / multi-select: share of answers naming each",
-        "option; multi-select shares are independent. n = answers with an exported",
-        "value. Free text is not shown.",
+        "option; multi-select shares are independent. ● / ▲ n = AI / No AI answers",
+        "with an exported value. Free text is not shown.",
         SOURCE_NOTE,
         DESCRIPTIVE_NOTE,
     )
     if s.cohort is Cohort.NO_ACTIVATED_CASES:
         return _placeholder(DIVERGENCE_TITLE, caption)
-    return _answer_plot(_divergence_layers(bundle, s), bundle, DIVERGENCE_TITLE, caption)
+    plot = _answer_plot(_divergence_layers(bundle, s), bundle, DIVERGENCE_TITLE, caption)
+    return plot + scale_x_continuous(expand=LABEL_X_EXPAND)
 
 
 # ---------------------------------------------------------------------------
@@ -655,7 +681,12 @@ def case_flow_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
 
     return (
         ggplot(seg, aes("bar", "count", fill="segment"))
-        + geom_col(position=position_stack(reverse=True), width=0.7)
+        + geom_col(
+            position=position_stack(reverse=True),
+            width=0.7,
+            color=OUTLINE_COLOR,
+            size=OUTLINE_WIDTH,
+        )
         + geom_text(
             aes(label="label", group="segment"),
             position=position_stack(vjust=0.5, reverse=True),
@@ -751,17 +782,22 @@ def _stacked_plot(
     totals = _ordered(_with_facet(totals, "row", rows, "col", cols), "t", t_labels)
     return (
         ggplot(data, aes("t", "count", fill="category"))
-        + geom_col(position=position_stack(reverse=True), width=0.7)
+        + geom_col(
+            position=position_stack(reverse=True),
+            width=0.7,
+            color=OUTLINE_COLOR,
+            size=OUTLINE_WIDTH,
+        )
         + geom_text(
             aes(label="label", group="category"),
             position=position_stack(vjust=0.5, reverse=True),
-            size=TEXT_SIZE - 0.5,
+            size=TEXT_SIZE,
         )
         + geom_text(
             data=totals,
             mapping=aes("t", "count", label="label"),
             va="bottom",
-            size=TEXT_SIZE - 0.5,
+            size=TEXT_SIZE,
             color=NOTE_COLOR,
             inherit_aes=False,
         )
@@ -821,16 +857,19 @@ PROVENANCE_CATEGORIES = {
         for reason, code in MISSING_CODES.items()
     },
 }
+MISSING_COLORS = {
+    MissingReason.TECHNICAL_FAILURE: "#CC79A7",
+    MissingReason.CASE_ABANDONED: "#D55E00",
+    MissingReason.REACHED_UNANSWERED: "#E69F00",
+    MissingReason.PENDING: "#F0E442",
+    MissingReason.TIMEPOINT_NEVER_REACHED: "#999999",
+    MissingReason.UNKNOWN: "#009E73",  # light enough for the black "M?" label
+}
 PROVENANCE_COLORS = {
     "answered_clinician": "#0072B2",
     "answered_rule": "#56B4E9",
-    "not_applicable": "#DDDDDD",
-    "missing_technical_failure": "#CC79A7",
-    "missing_case_abandoned": "#D55E00",
-    "missing_reached_unanswered": "#E69F00",
-    "missing_pending": "#F0E442",
-    "missing_timepoint_never_reached": "#999999",
-    "missing_unknown": "#000000",
+    "not_applicable": "#FFFFFF",  # outlined
+    **{f"missing_{reason.value}": MISSING_COLORS[reason] for reason in MissingReason},
 }
 
 
@@ -898,7 +937,7 @@ def attention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
         f"Population: {POPULATION_REACHED}. Points: individual durations; bars: median.",
         "Elapsed = S10 wall clock; foreground / active = S11j browser telemetry, only",
         f"where telemetry_status is {VALID_TELEMETRY.value}. An absent duration is never 0:",
-        "'excl k' = reached observations without a valid duration.",
+        "'● / ▲ excl k' = AI / No AI reached observations without a valid duration.",
         f"Telemetry exclusions: {excluded}." if excluded else "No telemetry exclusions.",
         DESCRIPTIVE_NOTE,
     )
@@ -938,7 +977,8 @@ def attention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
             missing = r["reached"] - r[f"{measure}_n"]
             if missing:
                 y = top[measure] * EXCLUDED_LABEL_HEIGHT[r["arm"]]
-                texts.append({**base, "y": y, "label": f"excl {missing}"})
+                label = f"{ARM_GLYPHS[r['arm']]} excl {missing}"
+                texts.append({**base, "y": y, "label": label})
 
     for version, measure in product(versions, ATTENTION_MEASURES):
         if ((obs["config_version"] == version) & (obs["measure"] == measure)).any():
@@ -964,6 +1004,7 @@ def attention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
         + facet_wrap("facet", ncol=len(versions), scales="free_y", drop=False)
         + _arm_scales()
         + labs(title=ATTENTION_TITLE, caption=caption, x=TIME_LABEL, y="Seconds")
+        + scale_x_continuous(expand=LABEL_X_EXPAND)
         + _theme(len(measures))
     )
     if points:
@@ -984,9 +1025,9 @@ def attention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
     if texts:
         p += geom_text(
             data=frame(texts, [*base_cols, "label"]),
-            mapping=aes("x", "y", label="label", color="arm"),
-            size=TEXT_SIZE - 0.5,
-            show_legend=False,
+            mapping=aes("x", "y", label="label"),
+            size=TEXT_SIZE,
+            color=NOTE_COLOR,
         )
     if notes:
         p += geom_text(
@@ -1047,7 +1088,7 @@ OUTCOME_COLORS = {
     Outcome.YES.value: "#0072B2",
     Outcome.NO.value: "#E69F00",
     Outcome.UNKNOWN.value: "#999999",
-    Outcome.NOT_APPLICABLE.value: "#EEEEEE",
+    Outcome.NOT_APPLICABLE.value: "#FFFFFF",  # outlined
 }
 INTERVENTION_MEASURES = {
     InterventionMeasure.DELIVERED: "AI delivered",

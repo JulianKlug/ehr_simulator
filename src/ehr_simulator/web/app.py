@@ -54,6 +54,7 @@ from ehr_simulator.db.exceptions import (
 from ehr_simulator.db.ingestion_issues import record_batch as record_ingestion_issues
 from ehr_simulator.db.migrations import apply_migrations
 from ehr_simulator.db.study_identity import bind as bind_study_identity
+from ehr_simulator.db.study_identity import fetch as fetch_study_identity
 from ehr_simulator.ingestion.exceptions import AdapterError
 from ehr_simulator.ingestion.provenance import ai_provenance_of
 from ehr_simulator.ingestion.synthetic import load_synthetic
@@ -129,6 +130,20 @@ def create_app(
         )
         app.state.db = connect(db_path_resolved)
         versions = apply_migrations(app.state.db)
+
+        # S12c: a demo login must never land in a study's append-only events.
+        bound_study = fetch_study_identity(app.state.db)
+        if demo is DemoMode.SYNTHETIC and bound_study is not None:
+            log.error("demo refused on a study database", event_kind="app.boot.failed")
+            print(
+                f"Refusing to boot: --demo on the database of study {bound_study!r}; "
+                "use another --db-path.",
+                file=sys.stderr,
+            )
+            with contextlib.suppress(Exception):
+                app.state.db.close()
+            raise SystemExit(1)
+
         # S11a: study mode binds the database to exactly one study. A
         # mismatching or nonempty unbound legacy database fails startup
         # here — before the clinician cache, ingestion issues, or any

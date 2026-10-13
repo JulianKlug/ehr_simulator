@@ -43,6 +43,7 @@ from ehr_simulator.analysis.schema import (
     PANELS,
     REQUIRED_FILES,
     TIMEPOINTS,
+    PracticeFiles,
     header,
 )
 from ehr_simulator.config.loader import compute_config_hash_from_models
@@ -148,7 +149,8 @@ def load_phase2_bundle(path: Path | str) -> ValidatedStudyBundle:
             _verified_rows(root, name, header(columns), manifest)  # checked, then excluded
 
     versions = _versions(frames[HISTORY], manifest)
-    linked = _integrity.link(manifest.study_id, frames, versions, manifest.practice_included)
+    practice = PracticeFiles.DECLARED if manifest.practice_included else PracticeFiles.ABSENT
+    linked = _integrity.link(manifest.study_id, frames, versions, practice)
 
     return ValidatedStudyBundle(
         study_id=manifest.study_id,

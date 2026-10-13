@@ -78,4 +78,4 @@ EHR_SIM_PHASE2_BUNDLE="$PWD/BUNDLE" EHR_SIM_ANALYSIS_OUT="$PWD/analysis_out/phas
 ```
 
 - **Equal inputs, equal report.** The same bundle and settings give equal tables and an equal `analysis_manifest.json`, which has no timestamp. SVG bytes may differ across platforms.
-- **Existing output.** An existing output directory is refused, unless `EHR_SIM_ANALYSIS_OVERWRITE=replace`, which swaps the whole report atomically.
+- **Existing output.** An existing output directory is refused, unless `EHR_SIM_ANALYSIS_OVERWRITE=replace`, which swaps a previous report (or fills an empty directory) atomically. Any other directory is refused, never deleted.

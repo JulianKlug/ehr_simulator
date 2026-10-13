@@ -263,7 +263,7 @@ def test_n_labels_count_answers_per_arm(walked) -> None:
         & (numeric["t_index"] == 0)
     ]["n"].sum()
     labels = confidence[confidence["arm"] == Arm.AI]["label"].tolist()
-    assert labels[0] == f"n={n}"
+    assert labels[0] == f"● n={n}"
     assert len(labels) == len(bundle.versions["v1"].timepoints_minutes)
 
 
@@ -327,7 +327,7 @@ def test_unknown_telemetry_is_excluded_never_zero(walked) -> None:
     ]
     assert not ((foreground["x"] - x).abs() < 10).any()  # no point for the gap
 
-    excluded = _labelled(plot, "excl 1")
+    excluded = _labelled(plot, "● excl 1")
     keys = set(zip(excluded["version"], excluded["measure"], excluded["arm"], strict=True))
     assert ("v2", "foreground (s)", Arm.AI.value) in keys
     assert ("v2", "active (s)", Arm.AI.value) in keys
@@ -408,3 +408,43 @@ def test_case_figure_refuses_an_unknown_patient(walked) -> None:
     bundle, _summaries = walked
     with pytest.raises(AnalysisError, match="no activated case"):
         case_divergence_figure(bundle, "synth_999")
+
+
+def test_timepoint_labels_keep_distinct_minutes_apart() -> None:
+    """``:g`` rounds to six digits: 1440.12 and 1440.125 must not share a bar."""
+    from ehr_simulator.analysis.figures import _t_label
+
+    assert _t_label(1440.12) != _t_label(1440.125)
+    assert _t_label(60.0) == "60"
+
+
+# ---------------------------------------------------------------------------
+# Print legibility (review: one column, greyscale, small text)
+# ---------------------------------------------------------------------------
+
+MIN_TEXT_POINTS = 6
+MAX_PAGE_INCHES = 9.5
+
+
+@pytest.mark.parametrize("stem", STEMS)
+def test_text_is_legible_in_print(walked, stem: str) -> None:
+    """At least 6 pt, and arm text is told apart by its words, not its colour."""
+    bundle, summaries = walked
+    plot = build_figure(stem, bundle, summaries)
+
+    texts = [layer for layer in plot.layers if "label" in layer.mapping]
+    assert texts
+    for layer in texts:
+        assert layer.geom.aes_params["size"] >= MIN_TEXT_POINTS
+        assert "color" not in layer.mapping
+    assert plot.theme.getp(("plot_caption", "size")) >= MIN_TEXT_POINTS
+
+
+@pytest.mark.parametrize(
+    "stem", ["figure_02_case_flow", "figure_04_attention", "figure_05_intervention"]
+)
+def test_figures_fit_a_page(walked, stem: str) -> None:
+    """Panels shrink to fit a page, never below legibility (figures 1, 3 may not fit)."""
+    bundle, summaries = walked
+    _width, height = build_figure(stem, bundle, summaries).theme.getp("figure_size")
+    assert height <= MAX_PAGE_INCHES

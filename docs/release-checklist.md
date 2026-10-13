@@ -56,6 +56,7 @@ Work through this list before every tagged release. Steps marked **owner** are m
 - [ ] A colleague with a fresh checkout reaches `synth_001` from the README quickstart.
 - [ ] Descriptive-only claims are reviewed. No inferential statistic or estimand appears without an approved analysis plan.
 - [ ] Decide whether the release ships the provisional figure set or waits for the analysis plan's figures.
+- [ ] Figure height: at one column, panels shrink to fit 9.5 in but never below 0.75 in (figure 1 never shrinks). With the reference bundle, figure 1 (16.6 in) and figure 3 (10.6 in) exceed a page; decide on a per-version split or a two-column layout for the real study's question count.
 
 ## 7. Version and tag (owner, after all of the above and the preprint submission)
 

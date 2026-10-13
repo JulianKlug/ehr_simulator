@@ -32,14 +32,16 @@ timepoints with <kbd>]</kbd> and <kbd>[</kbd>.
 
 `--demo` is the config free synthetic mode. It needs no data, study config or
 secret, and it never creates a study case. A **Synthetic demonstration**
-banner sits on every page. It cannot be combined with `--config`/`--questions`.
+banner sits on every page. It cannot be combined with `--config`/`--questions`,
+and it refuses to boot on a study's database (`--db-path`, `EHR_SIM_DB_PATH`).
 
-The demo writes `./data/ehr_simulator.db`, `./data/backups/` and `./logs/`
-under the directory you started it from. To reset it, stop the server and
-delete them:
+The demo writes `./data/ehr_simulator.db`, its backups
+`./data/backups/ehr_simulator_*.db` and `./logs/` under the directory you
+started it from. To reset it, stop the server and delete the demo files only
+(study databases and their backups under `data/backups/<study_id>/` stay):
 
 ```bash
-rm -rf data/ehr_simulator.db data/ehr_simulator.db-wal data/ehr_simulator.db-shm data/backups logs
+rm -f data/ehr_simulator.db data/ehr_simulator.db-wal data/ehr_simulator.db-shm data/backups/ehr_simulator_*.db
 ```
 
 Running a study is a separate path: see *Running a Phase 2 study* below.

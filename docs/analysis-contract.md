@@ -82,7 +82,7 @@ export-phase2 bundle ─► load_phase2_bundle ─► ValidatedStudyBundle ─�
 Unknown values are never treated as zero:
 - A blank duration, delivery, viewing or PP value is counted as unknown.
 - Medians use known values only.
-- Free text is summarised only by its response status.
+- Free text is summarised only by its response status. It has no `value_exported` denominator row: free text withheld from the routine export is answered, not missing (S12c review).
 
 ## Report: figures and published outputs (S12b)
 
@@ -94,6 +94,8 @@ publish_report(bundle_dir, out_dir, overwrite=Overwrite.REFUSE)
     load_phase2_bundle + build_summaries                           ─► AnalysisError: nothing written
     <parent>/.<name>.staging-<id>/  ─► rename to <out_dir>          (REPLACE: old report aside, restored on failure)
 ```
+
+`REPLACE` replaces only an empty directory or a previous report (an `analysis_manifest.json` of this schema), never a symbolic link. Both modes re-check the output right before the rename, so a report published meanwhile by another run is kept.
 
 | Path | Content |
 | --- | --- |
@@ -128,7 +130,7 @@ Every figure follows these rules:
 | --- | --- |
 | `EHR_SIM_PHASE2_BUNDLE` | `../tests/fixtures/analysis_bundle/walked` |
 | `EHR_SIM_ANALYSIS_OUT` | `../analysis_out/phase2` (git ignored) |
-| `EHR_SIM_ANALYSIS_OVERWRITE` | `refuse` (`replace` swaps atomically) |
+| `EHR_SIM_ANALYSIS_OVERWRITE` | `refuse` (`replace` swaps a previous report atomically) |
 
 `uv run pytest -m notebook` executes it twice on the synthetic bundle. It checks that the tables equal the library's and that the manifest is stable. The S10 `newly_visible_data` annotations need clinical source data that the export does not carry, so they are not part of this figure set.
 

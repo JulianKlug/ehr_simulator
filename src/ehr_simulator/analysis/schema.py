@@ -139,6 +139,13 @@ class FailureReason(StrEnum):
     OTHER_INTEGRITY_FAILURE = "other_integrity_failure"
 
 
+class PracticeFiles(StrEnum):
+    """Manifest ``practice_included``: practice clinicians may be listed."""
+
+    DECLARED = "declared"
+    ABSENT = "absent"
+
+
 class ProfileStatus(StrEnum):
     COMPLETE = "complete"
     MISSING = "missing"

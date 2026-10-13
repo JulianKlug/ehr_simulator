@@ -13,8 +13,11 @@ which this package may not import)::
         analysis_manifest.json       last: inputs, versions, settings, inventory
     rename to <parent>/<name>/        (REPLACE: the old one aside first)
 
-Any failure (interrupts included) removes the staging directory and puts a
-replaced report back. The input bundle is only read.
+REPLACE only ever removes an empty directory or a previous report (its
+manifest names this schema), never a symbolic link; both modes re-check the
+output right before the rename, so a report published meanwhile by another
+run is never replaced. Any failure (interrupts included) removes the staging
+directory and puts a replaced report back. The input bundle is only read.
 """
 
 from __future__ import annotations
@@ -102,17 +105,19 @@ def publish_report(
     token = uuid.uuid4().hex
     staging = out_dir.parent / f".{out_dir.name}.staging-{token}"
     aside = out_dir.parent / f".{out_dir.name}.previous-{token}"
-    published = False
     staging.mkdir()
     try:
         inventory = _write_staging(bundle, summaries, staging)
+
+        # Rendering takes minutes: the output may have appeared meanwhile.
+        _check_output(out_dir, overwrite)
         if out_dir.exists():
             out_dir.rename(aside)
         staging.rename(out_dir)
-        published = True
         _fsync_dir(out_dir.parent)
     except BaseException:
-        # Interrupts too: never strand a previous report under its aside name.
+        # Interrupts too: a staging directory already renamed was published.
+        published = not staging.exists()
         shutil.rmtree(staging, ignore_errors=True)
         if published:
             shutil.rmtree(out_dir, ignore_errors=True)
@@ -129,8 +134,30 @@ def _check_preconditions(bundle_path: Path, out_dir: Path, overwrite: Overwrite)
     bundle, out = bundle_path.resolve(), out_dir.resolve()
     if out == bundle or out.is_relative_to(bundle) or bundle.is_relative_to(out):
         raise AnalysisError("the output directory must not overlap the input bundle")
-    if out_dir.exists() and overwrite is Overwrite.REFUSE:
+    _check_output(out_dir, overwrite)
+
+
+def _check_output(out_dir: Path, overwrite: Overwrite) -> None:
+    """REPLACE removes only an empty directory or a previous report."""
+    if out_dir.is_symlink():
+        raise AnalysisError(f"{out_dir} is a symbolic link; name the directory itself")
+    if not out_dir.exists():
+        return
+    if overwrite is Overwrite.REFUSE:
         raise AnalysisError(f"{out_dir} already exists; choose another directory or replace it")
+    if not out_dir.is_dir() or (any(out_dir.iterdir()) and not _is_report(out_dir)):
+        raise AnalysisError(f"{out_dir} is not an analysis report; refusing to replace it")
+
+
+def _is_report(directory: Path) -> bool:
+    try:
+        manifest = json.loads((directory / MANIFEST_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return (
+        isinstance(manifest, dict)
+        and manifest.get("analysis_schema_version") == ANALYSIS_SCHEMA_VERSION
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -359,6 +359,7 @@ def numeric_responses(bundle: ValidatedStudyBundle) -> pd.DataFrame:
 
 TELEMETRY_COLUMNS = [f"telemetry_{status.value}" for status in TimepointTelemetry]
 TIMEPOINT_KEYS = ["config_version", "t_index", "arm"]
+ATTENTION_MEASURES = ("elapsed", "foreground", "active")
 
 
 def _reached_groups(bundle: ValidatedStudyBundle) -> dict[tuple, pd.DataFrame]:
@@ -377,28 +378,22 @@ def attention(bundle: ValidatedStudyBundle) -> pd.DataFrame:
         g = groups.get((version, t_index, arm), empty)
         valid = g[g["telemetry_status"] == VALID_TELEMETRY]
         row = {"config_version": version, "t_index": t_index, "arm": arm, "reached": len(g)}
-        for measure, values in (
-            ("elapsed", g["elapsed_seconds"].dropna()),
-            ("foreground", valid["foreground_seconds"].dropna()),
-            ("active", valid["active_seconds"].dropna()),
-        ):
+        for measure in ATTENTION_MEASURES:
+            source = g if measure == "elapsed" else valid
+            values = source[f"{measure}_seconds"].dropna()
             row[f"{measure}_n"] = len(values)
             row[f"{measure}_median_seconds"] = values.median() if len(values) else pd.NA
         for status, column in zip(TimepointTelemetry, TELEMETRY_COLUMNS, strict=True):
             row[column] = int((g["telemetry_status"] == status).sum())
         rows.append(row)
 
-    measures = ["elapsed", "foreground", "active"]
-    counts = ["reached", *(f"{m}_n" for m in measures), *TELEMETRY_COLUMNS]
-    medians = [f"{m}_median_seconds" for m in measures]
+    counts = ["reached", *(f"{m}_n" for m in ATTENTION_MEASURES), *TELEMETRY_COLUMNS]
+    medians = [f"{m}_median_seconds" for m in ATTENTION_MEASURES]
     columns = [*TIMEPOINT_KEYS, "reached"]
-    for m in measures:
+    for m in ATTENTION_MEASURES:
         columns += [f"{m}_n", f"{m}_median_seconds"]
     frame = _frame(rows, [*columns, *TELEMETRY_COLUMNS], ["t_index", *counts])
     return frame.astype({c: "Float64" for c in medians})
-
-
-ATTENTION_MEASURES = ("elapsed", "foreground", "active")
 
 
 def attention_observations(bundle: ValidatedStudyBundle) -> pd.DataFrame:
@@ -551,6 +546,10 @@ def denominators(
             r["question_id"],
         )
 
+        # Free text is withheld unless explicitly exported: never missing.
+        if r["response_type"] == ResponseType.FREE_TEXT:
+            continue
+
         exported = r["reached_value_exported"]
         add(
             "response_provenance",
@@ -564,7 +563,7 @@ def denominators(
         )
 
     for r in attention.to_dict("records"):
-        for measure in ("elapsed", "foreground", "active"):
+        for measure in ATTENTION_MEASURES:
             n = r[f"{measure}_n"]
             add("attention", measure, r, POPULATION_REACHED, n, r["reached"], r["reached"] - n)
 

@@ -221,13 +221,72 @@ def test_output_overlapping_the_bundle_is_refused(tmp_path: Path, inside: str) -
 
 def test_replace_swaps_the_whole_directory(tmp_path: Path, fast_registry: None) -> None:
     out = tmp_path / "report"
-    out.mkdir()
+    publish_report(FIXTURES / WALKED, out)
     (out / "stale.txt").write_text("old")
 
     publish_report(FIXTURES / WALKED, out, overwrite=Overwrite.REPLACE)
 
     assert not (out / "stale.txt").exists()
     assert (out / MANIFEST_NAME).is_file()
+    assert _leftovers(tmp_path) == []
+
+
+def test_replace_fills_an_empty_directory(tmp_path: Path, fast_registry: None) -> None:
+    out = tmp_path / "report"
+    out.mkdir()
+
+    publish_report(FIXTURES / WALKED, out, overwrite=Overwrite.REPLACE)
+
+    assert (out / MANIFEST_NAME).is_file()
+    assert _leftovers(tmp_path) == []
+
+
+def test_replace_refuses_a_directory_that_is_not_a_report(
+    tmp_path: Path, fast_registry: None
+) -> None:
+    """REPLACE deletes only a previous report, e.g. never a mistyped home dir."""
+    out = tmp_path / "notes"
+    out.mkdir()
+    (out / "keep.txt").write_text("unrelated")
+
+    with pytest.raises(AnalysisError, match="not an analysis report"):
+        publish_report(FIXTURES / WALKED, out, overwrite=Overwrite.REPLACE)
+
+    assert _tree(out) == {"keep.txt": b"unrelated"}
+    assert _leftovers(tmp_path) == []
+
+
+def test_replace_refuses_a_symlinked_output(tmp_path: Path, fast_registry: None) -> None:
+    target = tmp_path / "real_report"
+    publish_report(FIXTURES / WALKED, target)
+    before = _tree(target)
+    link = tmp_path / "report"
+    link.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(AnalysisError, match="symbolic link"):
+        publish_report(FIXTURES / WALKED, link, overwrite=Overwrite.REPLACE)
+
+    assert link.is_symlink()
+    assert _tree(target) == before
+
+
+def test_refuse_never_replaces_an_output_created_while_rendering(
+    tmp_path: Path, fast_registry: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent run that publishes first keeps its report."""
+    out = tmp_path / "report"
+    save = report.save_figure
+
+    def concurrent_publish(*args, **kwargs):
+        out.mkdir()
+        (out / "keep.txt").write_text("other run")
+        return save(*args, **kwargs)
+
+    monkeypatch.setattr(report, "save_figure", concurrent_publish)
+    with pytest.raises(AnalysisError, match="already exists"):
+        publish_report(FIXTURES / WALKED, out)
+
+    assert _tree(out) == {"keep.txt": b"other run"}
     assert _leftovers(tmp_path) == []
 
 

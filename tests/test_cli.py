@@ -171,6 +171,36 @@ def test_cli_serve_demo_boots_the_bannered_synthetic_walk(
             assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone() == (0,)
 
 
+def test_cli_serve_demo_refuses_a_study_database(
+    captured_calls: list[dict[str, Any]], tmp_path: Path
+) -> None:
+    """A demo login must never land in a study's append-only events."""
+    from fastapi.testclient import TestClient
+
+    from ehr_simulator.db import apply_migrations, study_identity
+
+    db_path = tmp_path / "study_pilot.db"
+    conn = connect(db_path)
+    apply_migrations(conn)
+    study_identity.bind(conn, "pilot")
+    conn.close()
+
+    cli.main(["serve", "--demo", "--db-path", str(db_path), "--backup-dir", str(tmp_path / "b")])
+    # TestClient surfaces the lifespan SystemExit(1) through anyio's portal
+    # (see test_app.py), so the contract is "boot refused", not the exit type.
+    refused = False
+    try:
+        with TestClient(captured_calls[0]["app"]):
+            pass
+    except BaseException:  # noqa: BLE001
+        refused = True
+
+    assert refused
+    with sqlite3.connect(db_path) as check:
+        assert check.execute("SELECT COUNT(*) FROM events").fetchone() == (0,)
+    assert not (tmp_path / "b").exists()
+
+
 def test_plain_server_has_no_demo_banner(client: Any) -> None:
     assert DEMO_BANNER not in client.get("/").text
 

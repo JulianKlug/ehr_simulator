@@ -27,6 +27,7 @@ from tests.support.analysis_bundle import (
 TIMEPOINTS = "timepoints.csv"
 ANSWERS = "answers.csv"
 PANELS = "panel_summaries.csv"
+EVENTS = "behavioral_events.csv"
 AUDIT = "randomisation_audit.csv"
 HISTORY = "configuration_history.csv"
 COUNTS = "configuration_counts.csv"
@@ -293,6 +294,27 @@ def test_refuses_a_broken_replacement_link(bundle: Path) -> None:
 
     edit_csv(bundle, AUDIT, tamper)
     _refuses(bundle, "not linked")
+
+
+def test_refuses_an_event_of_no_case(bundle: Path) -> None:
+    """Every exported event belongs to an activated case (S11n events table)."""
+
+    def tamper(rows: list[Row]) -> None:
+        rows[0]["patient_id"] = "synth_999"
+
+    edit_csv(bundle, EVENTS, tamper)
+    _refuses(bundle, "event of no case")
+
+
+def test_refuses_a_determinate_reached_observation_without_pp(bundle: Path) -> None:
+    """Reached ∧ pp_determinate ⇒ pp_compliant known; else PP counts drop it."""
+
+    def tamper(rows: list[Row]) -> None:
+        row = _first(rows, timepoint_reached="true", pp_determinate="true")
+        row["pp_compliant"] = ""
+
+    edit_csv(bundle, TIMEPOINTS, tamper)
+    _refuses(bundle, "pp_compliant")
 
 
 def test_refuses_counts_that_differ_from_the_rows(bundle: Path) -> None:

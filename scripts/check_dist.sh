@@ -27,8 +27,9 @@ if [[ -n "${untracked}" ]]; then
 fi
 
 # The wheel ships the package and its licence only.
+wheel_files="$(unzip -Z1 "${wheel}")"
 foreign="$(
-    unzip -Z1 "${wheel}" | grep -vE '^ehr_simulator/|^ehr_simulator-[^/]+\.dist-info/' || true
+    grep -vE '^ehr_simulator/|^ehr_simulator-[^/]+\.dist-info/' <<<"${wheel_files}" || true
 )"
 if [[ -n "${foreign}" ]]; then
     echo "check_dist: wheel carries files outside the package:" >&2
@@ -36,6 +37,6 @@ if [[ -n "${foreign}" ]]; then
     exit 1
 fi
 
-unzip -Z1 "${wheel}" | grep -qx 'ehr_simulator/ingestion/data/geneva_units.json'
-unzip -Z1 "${wheel}" | grep -qE '^ehr_simulator-[^/]+\.dist-info/licenses/LICENSE$'
+grep -qx 'ehr_simulator/ingestion/data/geneva_units.json' <<<"${wheel_files}"
+grep -qE '^ehr_simulator-[^/]+\.dist-info/licenses/LICENSE$' <<<"${wheel_files}"
 echo "check_dist: ok"
