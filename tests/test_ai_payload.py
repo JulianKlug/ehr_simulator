@@ -83,6 +83,13 @@ def test_malformed_payload_is_partial(payload: dict) -> None:
     assert check_payload(payload).state == "partial"
 
 
+@pytest.mark.parametrize("base_value", [math.nan, math.inf, -math.inf])
+def test_non_finite_base_value_is_partial(base_value: float) -> None:
+    checked = check_payload(_geneva(0.4, base_value=base_value, contributions={"age": 0.1}))
+    assert checked.state == "partial"
+    assert checked.contributors is None
+
+
 def test_partial_geneva_keeps_fields_that_passed() -> None:
     bad_probability = check_payload(_geneva(2.0, base_value=0.0, contributions={"age": 0.1}))
     assert bad_probability.probability is None

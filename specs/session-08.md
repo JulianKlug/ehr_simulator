@@ -570,7 +570,7 @@ requires a finite `probability` in `[0, 1]`.
 
 If `explanation` exists:
 
-1. `base_value` must be numeric
+1. `base_value` must be a finite number
 2. `contributions` must be a mapping of feature name to finite numeric value
 
 A valid probability without an explanation is a normal state, not `partial`.
@@ -1300,7 +1300,30 @@ Real Geneva patient `1014413_2451` (test split, most scalar rows of the first fi
 | Inline SVG | 8 charts, 192 KB |
 | Chromium `loadEventEnd` (3 runs) | 1.15–1.30 s |
 
-The page is server bound: 9 plotnine renders at ~100–120 ms each, serialised by `_PANEL_RENDER_LOCK`. TTI on this machine is under 2 s; the baseline laptop trace (item 41) is still to be recorded.
+The page is server bound: 9 plotnine renders at ~100–120 ms each, serialised by `_PANEL_RENDER_LOCK`.
+
+### Baseline laptop (clinician laptop), Chrome DevTools, 2026-10-13
+
+| Metric | Trace 1 | Trace 2 |
+|---|---|---|
+| Patient | `100023_4784` | `1030145_4574` |
+| Timepoint index | 2 | 0 |
+| Layout | epic | epic |
+| First Contentful Paint | 1.49 s | 1.41 s |
+| DOM ready | 1.60 s | 1.47 s |
+| Load complete | 1.62 s | 1.49 s |
+| Largest Contentful Paint | 1.64 s | 1.49 s |
+| Click interaction duration | 53 ms | 38 ms |
+
+Trace files: `Trace-20261013T090255.json.gz`, `Trace-20261013T091217.json.gz` (kept outside the repo).
+
+What these show, and what they do not:
+
+1. **Browser page load passed**: both full loads complete (and reach LCP) within the 2 s target on the baseline laptop.
+2. **Formal TTI was not measured.** FCP, DOM ready, load and LCP are page load milestones, not Time to Interactive.
+3. **Click durations are DevTools interaction durations** of one click each. They do not measure an HTMX timepoint transition (request, server render, swap).
+4. **Worst case is unverified**: both views are early timepoints (index 0 and 2), not the §12.2 representative 24 timepoint view. Later views carry more chart points and table columns.
+5. The laptop's CPU, RAM, OS and Chrome version are not recorded in these notes.
 
 ## 22.2 §12.3 SLA (resolved)
 
@@ -1313,11 +1336,51 @@ Measured on the workstation above:
 | Slicing walk, 30 × 12 | 6.5 s (10.6 s before collapsing the aggregate family check into one pivot) |
 | Slowest page render, 30 patients at t = 660 | 1.49 s |
 
-Headroom is ~35 % on the slicing walk; about half of each slice is the pre-S8 per-patient filter over the full frames. A slower baseline laptop may need a per-patient frame cache.
+A later run measured 8.2 s (slowest page 1.34 s), so headroom is 18–35 %; about half of each slice is the pre-S8 per-patient filter over the full frames. A slower baseline laptop may need a per-patient frame cache.
 
-## 22.3 Acceptance (2026-10-12)
+## 22.3 Acceptance (2026-10-13)
 
-- Criteria 1–16 and 19–21: covered by the test inventory (items 1–40, 42) and the real data checks.
-- Criterion 18: a clinician walked a Phase 2 demo on real Geneva data (8 test split patients, timepoints 2, 12, 24, 48 h, AI and no AI arms).
-- Criterion 17 / item 41: measured on the dev workstation (§22.1, ~1.2 s load); no Chrome trace of the baseline laptop was recorded.
-- Found during the demo setup: inverse normalisation leaves bounds a few ulps off the median, which read as `partial`; bound order now uses a 1e-9 relative tolerance (`2118e18`).
+| # | Criterion (§19) | Status | Evidence |
+|---|---|---|---|
+| 1 | Geneva study starts via `serve --config` | Satisfied | Geneva Phase 2 demo served; `test_study_timepoints_stay_authoritative` |
+| 2 | Loaded and validated once at boot | Satisfied | `test_dataset_loader_called_once` |
+| 3 | Study configured timepoints | Satisfied | `test_study_timepoints_stay_authoritative`, `test_slice_timepoints_are_the_explicit_walk` |
+| 4 | No future data in clinician facing output | Satisfied, with accepted limitations below | `test_no_future_value_reaches_any_surface`, `test_slice_never_holds_rows_after_t`, preflight slice guard |
+| 5 | Every inventory variable has a display location | Satisfied | `test_clinical_fields.py`, real data `test_inventory_labels_arrive_in_expected_frames` |
+| 6 | Min / median / max as one series with range bars | Satisfied | `test_charts.py` S8 tests, `test_geneva_fixture_renders_every_clinical_panel` |
+| 7 | NIHSS and GCS visible | Satisfied | same, Neuro / Support panel |
+| 8 | Complete lab set | Satisfied | `test_lab_registry_is_the_full_set_in_fixed_order`, `test_sparse_labs_render_dashes_not_warnings` |
+| 9 | Baseline grouped into sections | Satisfied | `test_admission_sections_and_other` |
+| 10 | Treatment and referral visible | Satisfied | same |
+| 11 | Imaging derived variables visible | Satisfied (findings via ADMISSION, §1.3.1) | `test_imaging_derived_values_prevent_empty_state`, `test_mimic_imaging_derived_scalars_render` |
+| 12 | Probability + bounded explanation, no raw JSON | Satisfied | `test_ai_payload.py`, `test_geneva_ai_html_is_not_the_shap_dictionary` |
+| 13 | No AI case behaviour unchanged | Satisfied | `test_no_ai_case_has_no_ai_surface`; demo no AI arm had no AI panel |
+| 14 | Preflight matches what is shown | Satisfied | `test_exposed_field_ids_match_new_panels`, contributor and spaced admission preflight tests |
+| 15 | Synthetic UI functional | Satisfied | full suite, e2e synthetic walks |
+| 16 | No client side charting dependency | Satisfied | plotnine SVG only; no new JS |
+| 17 | Representative Geneva TTI < 2 s | **Accepted limitation** | Baseline page load 1.49–1.62 s (§22.1); formal TTI and the 24 timepoint worst case not measured |
+| 18 | Clinician navigates a real Geneva patient end to end | Satisfied | Clinician walked the Geneva Phase 2 demo; traces on the clinician laptop (§22.1) |
+| 19 | No text or `aria-label` distinguishes never from later | Satisfied, `data-state` residual accepted (§9.2) | `test_future_existence_is_not_clinician_facing` |
+| 20 | Telemetry and export accept `neuro_support` | Satisfied | `test_neuro_support_panel_events_accepted`, `test_neuro_support_panel_is_exported` |
+| 21 | §1.3 real data assertions | Satisfied after the §1.3.1 amendment | `test_inventory_labels_arrive_in_expected_frames` |
+
+Accepted limitations:
+
+1. Formal TTI, full HTMX transition latency and the 24 timepoint worst case on the baseline laptop are unverified (criterion 17).
+2. `data-state` keeps the precise empty state for telemetry; visible only through developer tools (§9.2).
+3. Non study mode (no `--config`, developer use only) walks the dataset's own timeline, so its timepoint count reflects the length of stay. Study mode always uses the study timepoints.
+4. The slicing walk took 6.5 s and 8.2 s on two workstation runs against the 10 s budget (§22.2): thin headroom, unmeasured on the baseline laptop.
+
+Fixes after the clinician demo: bound order tolerates inverse normalisation noise (`2118e18`); a non finite explanation `base_value` makes the payload `partial`; the BP note reads `No DBP recorded up to this timepoint.` (it covers the whole visible slice, so "missing at this timepoint" overstated it).
+
+### Final verification (2026-10-13)
+
+| Check | Result |
+|---|---|
+| `ruff check`, `ruff format --check` | clean |
+| Unit + integration + slow, Python 3.11.14 | 1651 passed |
+| Unit + integration + slow, Python 3.12.12 (separate env, `uv sync --locked`) | 1651 passed |
+| E2E (Playwright, incl. `test_geneva_walk.py`) | 28 passed |
+| CI shell steps replayed locally (contract + fixture drift, CLI, DB, export, Phase 2 export smokes) | all OK |
+| `real_data` (Geneva, Geneva AI, MIMIC, S8 inventory, slicing walk, page budget) | 6 passed |
+| GitHub Actions CI | not run: the branch is not pushed |

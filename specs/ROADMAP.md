@@ -154,7 +154,7 @@ Scope:
 
 **Acceptance:** clinician can navigate a real Geneva patient end-to-end on a laptop in-person.
 
-Status: shipped 2026-10-12 (spec `specs/session-08.md`, commits `f17b2ff` .. `2118e18`). Every Geneva study variable maps to a canonical id and a panel through a display registry: aggregate vitals as range bars, a sixth Neuro / Support panel, the full lab set, grouped admission, imaging derived volumes and findings, and a bounded AI explanation (probability + top five contributors per sign, pinned `outcome_label`). Empty states no longer reveal future data, and preflight checks exactly what is shown. The perf SLA was split into a 10 s slicing walk and a 2 s per page render budget (spec §22.2). Acceptance: a clinician walked a Phase 2 demo on real Geneva data.
+Status: shipped 2026-10-12 (spec `specs/session-08.md`, commits `f17b2ff` onward). Every Geneva study variable maps to a canonical id and a panel through a display registry: aggregate vitals as range bars, a sixth Neuro / Support panel, the full lab set, grouped admission, imaging derived volumes and findings, and a bounded AI explanation (probability + top five contributors per sign, pinned `outcome_label`). Empty states no longer reveal future data, and preflight checks exactly what is shown. The perf SLA was split into a 10 s slicing walk and a 2 s per page render budget (spec §22.2). Acceptance: a clinician walked a Phase 2 demo on real Geneva data; baseline laptop page load 1.49–1.62 s (formal TTI and the 24 timepoint worst case not measured, accepted). Criteria table in spec §22.3.
 
 ### Session 9 — Question gating + answer capture + CSV export (split) [SHIPPED]
 

@@ -94,7 +94,7 @@ def _valid_contributions(explanation: object) -> Mapping[str, float] | None:
     """The contributions mapping when the explanation is well formed."""
     if not isinstance(explanation, Mapping):
         return None
-    if not _is_number(explanation.get(BASE_VALUE_KEY)):
+    if not _finite(explanation.get(BASE_VALUE_KEY)):
         return None
     contributions = explanation.get(CONTRIBUTIONS_KEY)
     if not isinstance(contributions, Mapping):
@@ -128,7 +128,7 @@ def check_payload(payload: Mapping[str, Any]) -> CheckedPayload:
     """Family detection then validation (§6.3).
 
     ``probability`` present → Geneva: a finite probability in ``[0, 1]``,
-    an optional explanation (numeric ``base_value``, contributions of
+    an optional explanation (finite ``base_value``, contributions of
     finite numbers). Any failed check → ``partial``, failed field unset.
     Every synthetic key → synthetic. Otherwise ``partial``.
     """

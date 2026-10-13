@@ -344,9 +344,10 @@ def test_vitals_panel_partial_dbp_renders_panel_note(
     tmp_log_dir: Path, tmp_db_path: Path, tmp_backup_dir: Path
 ) -> None:
     """When DBP is missing from the slice but SBP is present, the BP panel
-    SVG carries ``data-bp-missing="dbp"`` and a panel-level note ('DBP
-    missing at this timepoint.') renders below the BP SVG. This is the
-    round-03 partial-within-group behavior.
+    SVG carries ``data-bp-missing="dbp"`` and a panel-level note ('No DBP
+    recorded up to this timepoint.') renders below the BP SVG. This is the
+    round-03 partial-within-group behavior; S8 words it over the whole
+    visible slice, never about later data.
     """
     from ehr_simulator.ingestion.synthetic import load_synthetic
     from ehr_simulator.web.app import create_app
@@ -373,8 +374,7 @@ def test_vitals_panel_partial_dbp_renders_panel_note(
     assert bp_svg.get("data-bp-missing") == "dbp"
     note = soup.select_one("p.vitals-panel-note[data-group='bp']")
     assert note is not None, "expected per-panel BP partial note"
-    assert "DBP" in note.get_text()
-    assert "missing" in note.get_text().lower()
+    assert note.get_text(strip=True) == "No DBP recorded up to this timepoint."
 
 
 def test_renderer_exception_detail_is_not_shown_to_clinicians(

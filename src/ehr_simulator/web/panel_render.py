@@ -370,7 +370,7 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
       the bottom-most panel only.
     - Partial-within-BP: if SBP or DBP is missing from the slice, the BP
       panel renders a faint dashed expected band at the missing variable's
-      reference range and the panel-level note "DBP missing at this
+      reference range and the panel-level note "No DBP recorded up to this
       timepoint." appears below the BP panel.
     - S8: Geneva min/max bounds render as per-bucket range bars.
 
@@ -426,10 +426,10 @@ def _render_vitals(patient_slice: PatientSlice, request: Request) -> str:
 
         if bp_missing and present_bp:
             # Specific to round-03: the BP panel internally annotates which
-            # of SBP/DBP is missing, layered on top of the panel-level
-            # "Partial data at this timepoint." badge.
+            # of SBP/DBP is missing. S8: missing means absent from the whole
+            # visible slice, so the note says that and nothing about later data.
             missing_label = ", ".join(v.upper() for v in bp_missing)
-            bp_partial_note = f"{missing_label} missing at this timepoint."
+            bp_partial_note = f"No {missing_label} recorded up to this timepoint."
 
         pivot_rows, fallback_rows = _scalar_tables(rows, variables_present, units, current_t)
 
