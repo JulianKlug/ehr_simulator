@@ -45,6 +45,9 @@ from tests.support.telemetry import TAB_ID
 UNIT_MODULES = frozenset(
     {
         "test_ai_payload",
+        "test_analysis_bundle",
+        "test_analysis_schema",
+        "test_analysis_summary",
         "test_answer_capture",
         "test_answer_codec",
         "test_behavioral_timing",

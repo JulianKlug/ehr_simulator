@@ -1,0 +1,3 @@
+study_id,config_version,config_hash,scheduled_items_generated,activated_cases,completed_cases,incomplete_cases,open_cases,expected_timepoints,reached_primary_timepoints,answer_rows_present
+example_phase2,v1,a52b63cd646eb17b7df0b17afd954ab9829328087daf1836c80d6d61fc87f62c,6,4,2,1,1,12,9,34
+example_phase2,v2,f3496926ce317e861962cd320fe3920c48ab1ce54ac11dedc9b88ef53a7907fd,3,2,2,0,0,6,6,40
