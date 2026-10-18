@@ -430,6 +430,7 @@ INTERVENTION_COUNTS = [
     "viewed_unknown",
     "viewed_not_applicable",
     "intervention_failure",
+    "intervention_failure_unknown",
     *FAILURE_COLUMNS,
     "leakage",
     "pp_compliant",
@@ -442,7 +443,11 @@ def intervention(bundle: ValidatedStudyBundle) -> pd.DataFrame:
     """AI delivery, viewing and PP over reached primary observations, grouped
     by ITT arm. Delivered / viewed apply to the AI arm only (``<NA>`` on the
     no AI arm, whose AI exposure is ``leakage``); no AI viewing is
-    ``viewed_not_applicable``, never false."""
+    ``viewed_not_applicable``, never false.
+
+    Failure is unknown, never false, on an AI arm observation whose delivery
+    is unknown (owner decision, S12c review); a recorded failure stays true.
+    """
     groups = _reached_groups(bundle)
     empty = bundle.timepoints.iloc[0:0]
     rows = []
@@ -451,6 +456,8 @@ def intervention(bundle: ValidatedStudyBundle) -> pd.DataFrame:
         is_ai = arm == Arm.AI
         delivered, viewed = g["ai_delivered"], g["ai_viewed"]
         determinate = g["pp_determinate"]
+        failed = g["intervention_failure"]
+        failure_unknown = int((delivered.isna() & ~failed).sum()) if is_ai else 0
         row = {
             "config_version": version,
             "t_index": t_index,
@@ -463,7 +470,8 @@ def intervention(bundle: ValidatedStudyBundle) -> pd.DataFrame:
             "viewed_false": int(viewed.eq(False).sum()) if is_ai else pd.NA,
             "viewed_unknown": int(viewed.isna().sum()) if is_ai else pd.NA,
             "viewed_not_applicable": 0 if is_ai else len(g),
-            "intervention_failure": int(g["intervention_failure"].sum()),
+            "intervention_failure": int(failed.sum()),
+            "intervention_failure_unknown": failure_unknown,
             "leakage": int(g["intervention_leakage"].sum()),
             "pp_compliant": int((determinate & g["pp_compliant"].eq(True)).sum()),
             "pp_noncompliant": int((determinate & g["pp_compliant"].eq(False)).sum()),
@@ -589,6 +597,15 @@ def denominators(
             )
         else:
             add("intervention", "leakage", r, POPULATION_REACHED, r["leakage"], r["reached"], 0)
+        add(
+            "intervention",
+            "intervention_failure",
+            r,
+            POPULATION_REACHED,
+            r["intervention_failure"],
+            r["reached"],
+            r["intervention_failure_unknown"],
+        )
         add(
             "intervention",
             "pp_compliant",

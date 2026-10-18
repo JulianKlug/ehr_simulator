@@ -52,9 +52,21 @@ Every table and figure strip is keyed by `config_version` (with its `config_hash
 | Option answers | `answers.csv`: `response_value` (read as `value_options`, guarded form matched against the historical options), `response_type` ∈ {categorical, multi-select} | Each option's share among answers, in the historical option order. Multi-select shares are independent and need not sum to 1. No ordinal scale is invented. |
 | Free text | – | Never plotted or summarised beyond its response status |
 | Attention | `timepoints.csv`: `elapsed_seconds` (S10 wall clock), `foreground_seconds`, `active_seconds`, `telemetry_status` | Three separate measures. Foreground and active time count only when `telemetry_status = complete`. Each other status is counted as excluded. |
-| Intervention | `timepoints.csv`: `ai_delivered`, `ai_viewed`, `intervention_failure`, `intervention_failure_reasons`, `intervention_leakage`, `pp_compliant`, `pp_determinate` | Over reached observations. On the no AI arm, AI viewing is `not applicable`, not false. Unknown is a category of its own. |
+| Intervention | `timepoints.csv`: `ai_delivered`, `ai_viewed`, `intervention_failure`, `intervention_failure_reasons`, `intervention_leakage`, `pp_compliant`, `pp_determinate` | Over reached observations. On the no AI arm, AI viewing is `not applicable`, not false. Unknown is a category of its own. An AI arm observation with unknown delivery has an unknown failure, not "no failure" (owner decision, S12c review; the export still writes `false`). |
 
 **Unknown is never zero.** A blank duration, delivery, viewing or PP cell is counted as unknown. Medians use known values only. An absent duration is never plotted as 0. "AI viewed" is the pinned S11k/S11l derivation recorded in the export. The analysis applies no threshold of its own.
+
+## Reading the figures
+
+| Figure | How to read it |
+| --- | --- |
+| 1 Divergence | One panel per question and version. A two option question plots the share answering the option named in the strip (the other is its complement). A question with more options draws one line per option, labelled at its right end. Lines: AI solid, No AI dashed; rule answers dotted (AI) or dash-dot (No AI), with hollow markers. A line never crosses a timepoint where its series has no value. Below the values, one row per arm gives `n` answers per timepoint. |
+| 2 Case flow | Planned schedule items beside activated cases by lifecycle state. |
+| 3 Response provenance | One tile per question × arm × timepoint. The codes carry the meaning, e.g. `AC2 MU1` = two clinician answers, one reached but unanswered. The fill only shows the share missing (none / some / all). Hidden (`NA`) is evaluated first, so a conditional question at an unreached timepoint can be `NA` rather than pending, abandoned or never reached. |
+| 4 Attention | Points are durations, horizontal ticks medians. `● / ▲ excl k` counts reached observations without a valid duration. |
+| 5 Intervention | Delivered and viewed for the AI arm, AI leakage for the no AI arm (yes = leakage occurred), failure and PP for both. Yes / no / unknown (`?`) per timepoint. |
+
+All five fit one column (3.5 in) and one page on the reference bundle. Arms differ by colour and shape, lines by type, and category fills by lightness, so a greyscale print stays readable.
 
 ## What the figures do not show
 

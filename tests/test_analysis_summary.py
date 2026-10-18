@@ -221,6 +221,24 @@ def test_indeterminate_delivery_and_pp_are_kept(walked: AnalysisSummaries) -> No
     assert (failed["delivered_false"], failed["failure_display_failure"]) == (1, 1)
 
 
+def test_unknown_delivery_makes_failure_unknown_not_false(walked: AnalysisSummaries) -> None:
+    """Owner decision (S12c review): blank ``ai_delivered`` on the AI arm → failure unknown."""
+    silent = _one(walked.intervention, config_version="v2", arm="ai", t_index=1)
+    assert (silent["intervention_failure"], silent["intervention_failure_unknown"]) == (0, 1)
+
+    failed = _one(walked.intervention, config_version="v2", arm="ai", t_index=0)
+    assert (failed["intervention_failure"], failed["intervention_failure_unknown"]) == (1, 0)
+
+    d = _one(
+        walked.denominators,
+        measure="intervention_failure",
+        config_version="v2",
+        arm="ai",
+        t_index=1,
+    )
+    assert (d["n"], d["denominator"], d["missing_unknown"]) == (0, 1, 1)
+
+
 def test_no_ai_viewing_is_not_applicable_and_leakage_stays_itt(
     walked: AnalysisSummaries,
 ) -> None:

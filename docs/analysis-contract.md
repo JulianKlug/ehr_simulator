@@ -76,11 +76,12 @@ export-phase2 bundle ─► load_phase2_bundle ─► ValidatedStudyBundle ─�
 | `option_proportions` | … × answer source × option | Categorical and multi-select shares in historical option order. Multi-select shares are independent. `proportion` is `<NA>` when there are no answers. |
 | `numeric_responses` | … × answer source | Likert / probability n, median, min, max (`<NA>` when n = 0). `numeric_observations` lists the points. |
 | `attention` | version × t × arm | Over reached observations: S10 elapsed n / median. Foreground / active n / median come only from `telemetry_status == complete`, with counts per telemetry status. `attention_observations` lists the known durations (a blank one has no row). |
-| `intervention` | version × t × arm | Over reached observations: AI delivered / viewed true / false / unknown (AI arm only), no AI viewing `not_applicable`, failures by reason, leakage, PP compliant / noncompliant / indeterminate. |
+| `intervention` | version × t × arm | Over reached observations: AI delivered / viewed true / false / unknown (AI arm only), no AI viewing `not_applicable`, `intervention_failure` (true) and `intervention_failure_unknown`, failures by reason, leakage, PP compliant / noncompliant / indeterminate. |
 | `denominators` | one per measure | `summary`, `measure`, version, arm, t, question, `population`, `n`, `denominator`, `missing_unknown` |
 
 Unknown values are never treated as zero:
 - A blank duration, delivery, viewing or PP value is counted as unknown.
+- **Intervention failure is unknown when delivery is unknown** (owner decision, S12c review; changes the frozen S12a contract). An AI arm observation with a blank `ai_delivered` and no recorded failure counts in `intervention_failure_unknown`, never as "no failure". A recorded failure stays true. The exporter is unchanged: it writes `intervention_failure = false` for such rows; only the analysis reads them as unknown. The `intervention_failure` denominators row (both arms) carries them as `missing_unknown`.
 - Medians use known values only.
 - Free text is summarised only by its response status. It has no `value_exported` denominator row: free text withheld from the routine export is answered, not missing (S12c review).
 
@@ -106,15 +107,15 @@ publish_report(bundle_dir, out_dir, overwrite=Overwrite.REFUSE)
 
 | Stem | Source tables | Shows |
 | --- | --- | --- |
-| `figure_01_divergence` | `numeric_observations`, `numeric_responses`, `option_proportions` | Answers per timepoint: <br>• likert / probability: individual values plus the median <br>• option questions: per option share (multi-select shares are independent) <br>• `n=` per arm <br>• rule answers dotted / hollow <br>• no free text |
+| `figure_01_divergence` | `numeric_observations`, `numeric_responses`, `option_proportions` | One panel per question and version: <br>• likert / probability: individual values plus the median; likert ticks are the scale's integers <br>• two option questions: the first option's share, named in the strip <br>• more options: one line per option, labelled at its right end (multi-select shares are independent) <br>• one `● / ▲ n=` count row per arm <br>• line type per arm × source (AI solid, No AI dashed, rule AI dotted, rule No AI dash-dot); rule markers hollow <br>• a line breaks where its series has no value <br>• no free text |
 | `figure_02_case_flow` | `case_flow` | Planned items beside activated cases by lifecycle state, with replacement counts as text |
-| `figure_03_response_provenance` | `response_provenance` | Answered (clinician / rule), not applicable, and missing by S11l reason |
-| `figure_04_attention` | `attention_observations`, `attention` | Elapsed, foreground and active seconds, with `excl k` for reached observations that have no valid duration |
-| `figure_05_intervention` | `intervention` | Delivered, viewed, failure, leakage and PP, as yes / no / unknown / not applicable counts by ITT arm |
+| `figure_03_response_provenance` | `response_provenance` | One tile grid per version: questions × ITT arm · timepoint. Each tile names its non-zero categories as code + count (answered clinician / rule, not applicable, missing by S11l reason); fill = share missing; an `n` row gives the case timepoints |
+| `figure_04_attention` | `attention_observations`, `attention` | Elapsed, foreground and active seconds (median = horizontal tick), with `excl k` for reached observations that have no valid duration |
+| `figure_05_intervention` | `intervention` | Delivered and viewed (AI arm), failure (both arms), AI leakage (No AI arm) and PP, as yes / no / unknown counts by ITT arm. Rows that would be all not applicable are omitted |
 
 Every figure follows these rules:
-- One column wide (3.5 in).
-- The arm is shown by colour **and** shape.
+- One column wide (3.5 in), at most 9.5 in tall on the reference bundle. Captions start at the figure's left edge.
+- The arm is shown by colour **and** shape. Category fills are ≥ 15 L* apart, so they stay distinct in greyscale; codes on dark fills are white.
 - One strip per `version · question` (or `arm · version · question`). A question missing from a version shows `not in this version`.
 - The caption states the population, the denominator and "Descriptive only".
 - An empty cohort renders `No activated cases`.

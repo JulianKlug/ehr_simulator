@@ -10,7 +10,9 @@ a leaking no AI case. v2 adds a multi-select and a probability question.
 from __future__ import annotations
 
 import dataclasses
+import itertools
 import re
+from enum import StrEnum
 from pathlib import Path
 
 import pandas as pd
@@ -23,6 +25,7 @@ from ehr_simulator.analysis.figures import (
     NO_CASES,
     NO_DURATIONS,
     NOT_IN_VERSION,
+    ONE_COLUMN_INCHES,
     SINGLE_ARM,
     build_figure,
     case_divergence_figure,
@@ -168,7 +171,8 @@ def test_divergence_rows_follow_each_version_snapshot(walked) -> None:
             if q.response_type in ("likert", "probability-0-100"):
                 expected.append(q.question_id)
             elif q.response_type in ("categorical", "multi-select"):
-                expected += [f"{q.question_id}: {option}" for option in q.options]
+                binary = len(q.options) == 2
+                expected.append(f"{q.question_id}: {q.options[0]}" if binary else q.question_id)
         mine = [f.removeprefix(f"{version.version} · ") for f in facets]
         mine = [f for f, full in zip(mine, facets, strict=True) if full.startswith(version.version)]
         present = [m for m in mine if m in expected]
@@ -252,7 +256,7 @@ def test_n_labels_count_answers_per_arm(walked) -> None:
     bundle, summaries = walked
     plot = build_figure("figure_01_divergence", bundle, summaries)
 
-    texts = pd.concat([f for f in _frames(plot) if "label" in f.columns and "arm" in f.columns])
+    texts = _layer_frame(plot, Layer.COUNTS)
     confidence = texts[(texts["panel"] == "confidence") & (texts["version"] == "v1")]
     # v1 AI t0: X and Z both answered confidence → n=2 (S12a numeric_responses).
     numeric = summaries.numeric_responses
@@ -263,8 +267,43 @@ def test_n_labels_count_answers_per_arm(walked) -> None:
         & (numeric["t_index"] == 0)
     ]["n"].sum()
     labels = confidence[confidence["arm"] == Arm.AI]["label"].tolist()
-    assert labels[0] == f"● n={n}"
+    assert labels[0] == f"n={n}"
     assert len(labels) == len(bundle.versions["v1"].timepoints_minutes)
+
+    keys = _layer_frame(plot, Layer.KEYS)
+    mine = keys[(keys["panel"] == "confidence") & (keys["version"] == "v1")]
+    assert sorted(mine["label"]) == ["▲", "●"]  # one count row per arm, keyed once
+
+
+class Layer(StrEnum):
+    """Figure 1 text / line layers, told apart by geom and alignment."""
+
+    LINES = "lines"  # drawn segments
+    MEDIANS = "medians"  # large markers: medians / shares, one per series point
+    COUNTS = "counts"  # centred n per timepoint
+    KEYS = "keys"  # right aligned arm glyphs
+    ENDS = "ends"  # left aligned option labels
+
+
+_TEXT_ALIGN = {Layer.COUNTS: "center", Layer.KEYS: "right", Layer.ENDS: "left"}
+
+
+def _layer_frame(plot, kind: Layer) -> pd.DataFrame:
+    after_line = False
+    for layer in plot.layers:
+        frame = layer.geom.data
+        name = type(layer.geom).__name__
+        if kind is Layer.MEDIANS and after_line:
+            return frame
+        after_line = name == "geom_line"
+        if frame is None or frame.empty:
+            continue
+        if kind is Layer.LINES and name == "geom_line":
+            return frame
+        ha = layer.geom.aes_params.get("ha", "center")
+        if name == "geom_text" and ha == _TEXT_ALIGN.get(kind):
+            return frame
+    raise AssertionError(f"no {kind} layer")
 
 
 @pytest.mark.parametrize("stem", STEMS)
@@ -294,12 +333,10 @@ def test_display_failure_and_leakage_keep_the_itt_arm(walked) -> None:
     bundle, summaries = walked
     plot = build_figure("figure_05_intervention", bundle, summaries)
 
-    leak = _segments(plot, "no AI leakage (No AI arm)", "v2")
+    leak = _segments(plot, "AI leakage (No AI arm)", "v2")
     assert leak["yes"] == 3  # the leaking no AI case, all three timepoints
-    assert _segments(plot, "no AI leakage (AI arm)", "v2")["not_applicable"] == 3
     delivered = _segments(plot, "AI delivered (AI arm)", "v2")
     assert delivered["yes"] == 0 and delivered["no"] + delivered["unknown"] == 3
-    assert _segments(plot, "AI viewed (No AI arm)", "v2")["not_applicable"] == 3
 
     # Each observation stays under its realised arm: exposure never moves it.
     reached = bundle.timepoints[bundle.timepoints["timepoint_reached"]]
@@ -440,11 +477,239 @@ def test_text_is_legible_in_print(walked, stem: str) -> None:
     assert plot.theme.getp(("plot_caption", "size")) >= MIN_TEXT_POINTS
 
 
-@pytest.mark.parametrize(
-    "stem", ["figure_02_case_flow", "figure_04_attention", "figure_05_intervention"]
-)
+@pytest.mark.parametrize("stem", STEMS)
 def test_figures_fit_a_page(walked, stem: str) -> None:
-    """Panels shrink to fit a page, never below legibility (figures 1, 3 may not fit)."""
+    """Every figure of the walked bundle fits one page at one column width."""
     bundle, summaries = walked
-    _width, height = build_figure(stem, bundle, summaries).theme.getp("figure_size")
+    width, height = build_figure(stem, bundle, summaries).theme.getp("figure_size")
+    assert width == ONE_COLUMN_INCHES
     assert height <= MAX_PAGE_INCHES
+
+
+@pytest.mark.parametrize("stem", STEMS)
+def test_captions_start_at_the_figure_edge(walked, stem: str) -> None:
+    """Anchored at the plot, not the panels: a caption is never clipped right."""
+    bundle, summaries = walked
+    plot = build_figure(stem, bundle, summaries)
+    assert plot.theme.getp("plot_caption_position") == "plot"
+    assert plot.theme.getp(("plot_caption", "linespacing")) >= MIN_CAPTION_LINESPACING
+
+
+# ---------------------------------------------------------------------------
+# Owner relayout decisions (S12c review)
+# ---------------------------------------------------------------------------
+
+MIN_CAPTION_LINESPACING = 1.2
+BINARY_PANEL = "death_3mo: Yes"
+MIN_LIGHTNESS_GAP = 15
+#: WCAG AA for normal text.
+MIN_TEXT_CONTRAST = 4.5
+WHITE, BLACK = "#FFFFFF", "#000000"
+
+
+def _caption(plot) -> str:
+    return plot.labels.caption.replace("\n", " ")
+
+
+def test_divergence_has_one_panel_per_question(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_01_divergence", bundle, summaries)
+
+    counts = _layer_frame(plot, Layer.COUNTS)
+    v2 = bundle.versions["v2"]
+    mine = counts[counts["version"] == "v2"]
+    assert mine["panel"].nunique() == len(v2.questions.questions)
+    # The count strip appears once per panel: one count per timepoint and arm.
+    per_panel = mine.groupby("panel", observed=True).size()
+    assert (per_panel == len(v2.timepoints_minutes) * len(Arm)).all()
+
+
+def test_binary_question_plots_only_its_first_option(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_01_divergence", bundle, summaries)
+
+    lines = _layer_frame(plot, Layer.MEDIANS)
+    shares = summaries.option_proportions
+    expected = shares[
+        (shares["config_version"] == "v2")
+        & (shares["question_id"] == "death_3mo")
+        & (shares["option_order"] == 0)
+        & shares["proportion"].notna()
+    ]
+    death = lines[(lines["version"] == "v2") & (lines["panel"] == BINARY_PANEL)]
+    assert sorted(death["y"]) == sorted(float(v) for v in expected["proportion"])
+    assert not lines["panel"].astype(str).str.endswith(": No").any()
+    ends = _layer_frame(plot, Layer.ENDS)
+    assert not ends["panel"].astype(str).str.startswith("death_3mo").any()
+
+
+def test_multi_option_lines_are_labelled_at_their_end(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_01_divergence", bundle, summaries)
+
+    ends = _layer_frame(plot, Layer.ENDS)
+    findings = ends[(ends["version"] == "v2") & (ends["panel"] == "supporting_findings")]
+    question = next(
+        q
+        for q in bundle.versions["v2"].questions.questions
+        if q.question_id == "supporting_findings"
+    )
+    assert sorted(findings["label"].str.replace("\n", " ")) == sorted(question.options)
+    assert findings["y"].round(6).is_unique  # spread apart, never stacked
+    assert (findings["x"] > max(bundle.versions["v2"].timepoints_minutes)).all()
+
+
+def test_lines_break_where_a_series_has_no_value(walked) -> None:
+    """v2 death_3mo AI: rule answers at t0 and t2, a clinician answer at t1."""
+    bundle, summaries = walked
+    plot = build_figure("figure_01_divergence", bundle, summaries)
+
+    def rule(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame[
+            (frame["version"] == "v2")
+            & (frame["panel"] == BINARY_PANEL)
+            & (frame["style"] == f"{Arm.AI.value}:{AnswerSource.RULE.value}")
+        ]
+
+    markers = rule(_layer_frame(plot, Layer.MEDIANS))
+    assert len(markers) == 2 and markers["series"].nunique() == 2  # two runs
+    lines = _layer_frame(plot, Layer.LINES)
+    assert rule(lines).empty  # one point runs: markers only, never joined across t1
+
+    # Every drawn series covers consecutive timepoints only.
+    minutes = list(bundle.versions["v2"].timepoints_minutes)
+    for _key, group in lines.groupby(["version", "panel", "series"], observed=True):
+        t = sorted(min(range(len(minutes)), key=lambda i: abs(minutes[i] - x)) for x in group["x"])
+        assert t == list(range(t[0], t[0] + len(t)))
+
+
+def test_arm_and_source_lines_differ_without_colour() -> None:
+    from ehr_simulator.analysis.figures import ANSWER_LINETYPES, ARM_DODGE
+
+    assert len(set(ANSWER_LINETYPES.values())) == len(ANSWER_LINETYPES) == 4
+    assert ARM_DODGE[Arm.NO_AI.value] - ARM_DODGE[Arm.AI.value] >= 0.08
+
+
+def test_likert_axis_has_integer_ticks_inside_its_scale(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_01_divergence", bundle, summaries)
+    breaks = next(sc for sc in plot.scales if "y" in sc.aesthetics).breaks
+
+    assert breaks((-0.8, 5.2)) == [1.0, 2.0, 3.0, 4.0, 5.0]  # confidence 1-5: no 0 tick
+    assert (min(breaks((-0.45, 1.05))), max(breaks((-0.45, 1.05)))) == (0, 1)
+    assert max(breaks((-45.0, 105.0))) == 100
+
+
+def test_intervention_drops_structurally_not_applicable_rows(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_05_intervention", bundle, summaries)
+
+    strips = [f.removeprefix("v1 · ") for f in _facets(plot) if f.startswith("v1 · ")]
+    assert strips == [
+        "AI delivered (AI arm)",
+        "AI viewed (AI arm)",
+        "intervention failure (AI arm)",
+        "intervention failure (No AI arm)",
+        "AI leakage (No AI arm)",
+        "per protocol (AI arm)",
+        "per protocol (No AI arm)",
+    ]
+    caption = _caption(plot)
+    assert "leakage occurred" in caption and "never false" in caption
+
+
+def test_unknown_delivery_plots_failure_unknown(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_05_intervention", bundle, summaries)
+
+    failure = _segments(plot, "intervention failure (AI arm)", "v2")
+    assert (failure["yes"], failure["no"], failure["unknown"]) == (2, 0, 1)
+
+
+def _lightness(color: str) -> float:
+    """CIE L* of ``#RRGGBB``, its greyscale value (independent of the module)."""
+    linear = []
+    for i in (1, 3, 5):
+        c = int(color[i : i + 2], 16) / 255
+        linear.append(c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4)
+    y = 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+    return 116 * y ** (1 / 3) - 16 if y > 0.008856 else 903.3 * y
+
+
+def _contrast(a: str, b: str) -> float:
+    """WCAG contrast ratio, from the relative luminance behind L*."""
+    luminance = sorted(((_lightness(c) + 16) / 116) ** 3 for c in (a, b))
+    return (luminance[1] + 0.05) / (luminance[0] + 0.05)
+
+
+@pytest.mark.parametrize("palette", ["OUTCOME_COLORS", "TILE_COLORS"])
+def test_category_fills_are_greyscale_distinct(palette: str) -> None:
+    from ehr_simulator.analysis import figures
+
+    lightness = sorted(_lightness(c) for c in getattr(figures, palette).values())
+    assert min(b - a for a, b in itertools.pairwise(lightness)) >= MIN_LIGHTNESS_GAP
+
+
+def test_in_bar_codes_read_on_their_fill(walked) -> None:
+    from ehr_simulator.analysis.figures import OUTCOME_COLORS, TILE_COLORS
+
+    bundle, summaries = walked
+    plot = build_figure("figure_05_intervention", bundle, summaries)
+    hexes = {"white": WHITE, "black": BLACK}
+    layers = [
+        layer for layer in plot.layers if layer.mapping.get("label") in ("on_dark", "on_light")
+    ]
+    assert len(layers) == 2
+    for layer in layers:
+        column, color = layer.mapping["label"], hexes[layer.geom.aes_params["color"]]
+        labelled = plot.data[plot.data[column] != ""]
+        for category in labelled["category"].astype(str).unique():
+            assert _contrast(OUTCOME_COLORS[category], color) >= MIN_TEXT_CONTRAST, category
+
+    # Figure 3 tiles carry black codes on every fill.
+    assert min(_contrast(fill, BLACK) for fill in TILE_COLORS.values()) >= MIN_TEXT_CONTRAST
+
+
+def test_provenance_is_one_tile_grid_per_version(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_03_response_provenance", bundle, summaries)
+
+    tiles = plot.data
+    for version in bundle.versions.values():
+        mine = tiles[tiles["version"] == version.version]
+        questions = [str(r).split("\x1f")[1] for r in mine["row"].unique()]
+        assert sorted(questions) == sorted(q.question_id for q in version.questions.questions)
+        assert mine["column"].nunique() == len(Arm) * len(version.timepoints_minutes)
+
+    # Codes carry the meaning: every non-zero category of a cell is named.
+    r = summaries.response_provenance
+    cell = r[
+        (r["config_version"] == "v1")
+        & (r["question_id"] == "primary_cause")
+        & (r["arm"] == Arm.AI)
+        & (r["t_index"] == 0)
+    ].iloc[0]
+    tile = tiles[
+        (tiles["version"] == "v1")
+        & tiles["row"].astype(str).str.endswith("primary_cause")
+        & (tiles["column"] == "AI\n0")
+    ]
+    expected = f"NA{cell['not_applicable']}\nMU{cell['missing_reached_unanswered']}"
+    assert tile["label"].item() == expected
+    assert "n=3" in set(_labelled(plot, "n=3")["label"])
+
+
+def test_provenance_caption_states_the_hidden_first_precedence(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_03_response_provenance", bundle, summaries)
+    assert "evaluated first" in _caption(plot)
+
+
+def test_attention_exclusion_labels_of_adjacent_timepoints_never_share_a_row(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_04_attention", bundle, summaries)
+
+    v1 = _labelled(plot, "● excl 1")
+    v1 = v1[(v1["version"] == "v1") & (v1["measure"] == "wall clock elapsed (s)")]
+    assert len(v1) == 2 and v1["y"].nunique() == 2
+    assert "horizontal ticks: median" in _caption(plot)

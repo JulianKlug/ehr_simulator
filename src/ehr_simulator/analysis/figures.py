@@ -10,8 +10,8 @@ The stems are provisional (not a public contract). Every figure:
 
 * splits by ``config_version`` (never pooled) and ITT ``arm``;
 * states population, denominator and its descriptive nature in the caption;
-* encodes the arm by colour **and** shape, the answer source by line type
-  and marker fill (rule answers: dotted line, hollow marker);
+* encodes the arm by colour **and** shape (greyscale safe: lines also
+  differ by type per arm × answer source; rule answers have hollow markers);
 * writes only constants, config versions, question ids, option labels and
   counts. Never a clinician / patient id, free text or event payload.
 
@@ -20,6 +20,7 @@ An empty cohort renders a labelled ``No activated cases`` placeholder.
 
 from __future__ import annotations
 
+import math
 import textwrap
 from collections.abc import Callable, Mapping
 from copy import deepcopy
@@ -38,6 +39,7 @@ from plotnine import (
     coord_flip,
     element_blank,
     element_text,
+    facet_grid,
     facet_wrap,
     geom_blank,
     geom_col,
@@ -45,7 +47,9 @@ from plotnine import (
     geom_line,
     geom_point,
     geom_text,
+    geom_tile,
     ggplot,
+    guide_legend,
     labs,
     position_stack,
     scale_color_manual,
@@ -54,6 +58,7 @@ from plotnine import (
     scale_shape_manual,
     scale_x_continuous,
     scale_y_continuous,
+    scale_y_discrete,
     theme,
     theme_bw,
     theme_void,
@@ -72,12 +77,12 @@ from ehr_simulator.analysis.schema import (
 from ehr_simulator.analysis.summary import (
     ARMS,
     ATTENTION_MEASURES,
+    MISSING_COLUMNS,
     NUMERIC_TYPES,
     OPTION_TYPES,
     POPULATION_APPLICABLE,
     POPULATION_CASES,
     POPULATION_REACHED,
-    SOURCES,
     VALID_TELEMETRY,
     AnalysisSummaries,
     Cohort,
@@ -114,17 +119,29 @@ STRIP_WRAP = 44
 FACET_WRAP = 34
 NOTE_WRAP = 22
 CAPTION_WRAP = 62
+#: Caption line spacing: wrapped lines never touch.
+CAPTION_LINESPACING = 1.25
 
 ARM_LABELS = {Arm.AI.value: "AI", Arm.NO_AI.value: "No AI"}
 ARM_COLORS = {Arm.AI.value: "#0072B2", Arm.NO_AI.value: "#D55E00"}
 ARM_SHAPES = {Arm.AI.value: "o", Arm.NO_AI.value: "^"}
 #: The arm's marker as text: compact, colour independent count labels, e.g. "▲ n=2".
 ARM_GLYPHS = {Arm.AI.value: "●", Arm.NO_AI.value: "▲"}
-#: Arm offset along x, as a share of the timepoint span, so arms never overlap.
-ARM_DODGE = {Arm.AI.value: -0.02, Arm.NO_AI.value: 0.02}
+#: Arm offset along x, as a share of the timepoint span: equal values never hide a marker.
+ARM_DODGE = {Arm.AI.value: -0.04, Arm.NO_AI.value: 0.04}
 
 SOURCE_LABELS = {AnswerSource.CLINICIAN.value: "clinician", AnswerSource.RULE.value: "rule"}
-SOURCE_LINETYPES = {AnswerSource.CLINICIAN.value: "solid", AnswerSource.RULE.value: "dotted"}
+#: Line type per arm × answer source: all four differ without colour.
+ANSWER_LINETYPES = {
+    f"{Arm.AI.value}:{AnswerSource.CLINICIAN.value}": "solid",
+    f"{Arm.NO_AI.value}:{AnswerSource.CLINICIAN.value}": "dashed",
+    f"{Arm.AI.value}:{AnswerSource.RULE.value}": "dotted",
+    f"{Arm.NO_AI.value}:{AnswerSource.RULE.value}": "dashdot",
+}
+ANSWER_LINE_LABELS = {
+    key: f"{ARM_LABELS[key.split(':')[0]]} {SOURCE_LABELS[key.split(':')[1]]}"
+    for key in ANSWER_LINETYPES
+}
 #: Point ``fill`` key: the arm colour for clinician answers, white for rule answers.
 HOLLOW = "hollow"
 FILL_VALUES = {**ARM_COLORS, HOLLOW: "white"}
@@ -134,7 +151,10 @@ NOTE_COLOR = "#4d4d4d"
 OUTLINE_COLOR = "#4d4d4d"
 OUTLINE_WIDTH = 0.2
 DESCRIPTIVE_NOTE = "Descriptive only; no inferential comparison."
-SOURCE_NOTE = "Rule answers (auto_value): dotted lines, hollow markers."
+SOURCE_NOTE = (
+    "Lines: AI solid, No AI dashed; rule answers (auto_value): AI dotted, No AI"
+    " dash-dot, hollow markers."
+)
 NO_CASES = "No activated cases"
 NO_RESPONSES = "no responses"
 SINGLE_ARM = "no between arm comparison available"
@@ -149,6 +169,8 @@ FLOW_EXPAND = (0, 0, 0.6, 0)
 CASE_X_EXPAND = (0.05, 0, 0.3, 0)
 #: Room left / right of the first / last timepoint for its count labels.
 LABEL_X_EXPAND = (0.18, 0)
+#: Figure 1: room left for the count row keys, right for the option end labels.
+DIVERGENCE_X_EXPAND = (0.35, 0, 1.3, 0)
 CASE_LABEL_SHIFT = 0.18
 
 FIGURE_FORMATS = ("svg", "pdf")
@@ -224,6 +246,13 @@ def _ordered(frame: pd.DataFrame, column: str, order: list[str]) -> pd.DataFrame
     return out
 
 
+#: Caption anchored at the figure's left edge (not the panels'), so it never clips.
+_CAPTION_THEME = {
+    "plot_caption": element_text(size=TEXT_SIZE, ha="left", linespacing=CAPTION_LINESPACING),
+    "plot_caption_position": "plot",
+}
+
+
 def _theme(
     panels: float,
     panel_inches: float = PANEL_INCHES,
@@ -240,7 +269,7 @@ def _theme(
         axis_text=element_text(size=6),
         strip_text=element_text(size=6),
         plot_title=element_text(size=9),
-        plot_caption=element_text(size=TEXT_SIZE, ha="left"),
+        **_CAPTION_THEME,
     )
 
 
@@ -254,11 +283,6 @@ def _arm_scales() -> list:
     ]
 
 
-def _value_breaks(limits: tuple[float, float]) -> list[float]:
-    """Answer axis ticks; the band below 0 holds the ``n=`` labels, not values."""
-    return [b for b in breaks_extended(n=4)(limits) if b >= 0]
-
-
 def _placeholder(title: str, caption: str, text: str = NO_CASES) -> ggplot:
     note = pd.DataFrame({"x": [0.0], "y": [0.0], "label": [text]})
     return (
@@ -266,7 +290,7 @@ def _placeholder(title: str, caption: str, text: str = NO_CASES) -> ggplot:
         + geom_text(size=BASE_FONT_SIZE, color=NOTE_COLOR)
         + labs(title=title, caption=caption)
         + theme_void(base_size=BASE_FONT_SIZE)
-        + theme(figure_size=(ONE_COLUMN_INCHES, 2.0), plot_caption=element_text(size=TEXT_SIZE))
+        + theme(figure_size=(ONE_COLUMN_INCHES, 2.0), **_CAPTION_THEME)
     )
 
 
@@ -274,12 +298,34 @@ def _placeholder(title: str, caption: str, text: str = NO_CASES) -> ggplot:
 # Answer panels (figure 1 and the case-level figure)
 # ---------------------------------------------------------------------------
 
-#: ``points`` / ``lines``: version, panel, x, y, arm, source, fill, series.
-#: ``texts``: version, panel, x, y, arm, label (arm coloured). ``notes``: no arm.
-_POINT_COLUMNS = ["version", "panel", "x", "y", "arm", "source", "fill", "series"]
+#: ``points`` / ``lines``: version, panel, x, y, arm, source, fill, series, style.
+#: ``texts``: version, panel, x, y, arm, label. ``notes`` / ``ends``: no arm.
+_POINT_COLUMNS = ["version", "panel", "x", "y", "arm", "source", "fill", "series", "style"]
 _TEXT_COLUMNS = ["version", "panel", "x", "y", "arm", "label"]
 _NOTE_COLUMNS = ["version", "panel", "x", "y", "label"]
 NOT_IN_VERSION = "not in this version"
+#: A two option question plots only its first option's share, named in the strip.
+BINARY_OPTIONS = 2
+SHARE_PANEL = "{question}: {option}"
+#: Option end labels: wrap width, x offset (share of the timepoint span),
+#: height of one line as a share of the value range.
+END_LABEL_WRAP = 13
+END_LABEL_SHIFT = 0.12
+END_LABEL_LINE = 0.21
+#: Labels may reach this share of the value range beyond the band they use.
+END_LABEL_MARGIN = 0.05
+#: Count rows: one per arm, this share of the value range apart, below it;
+#: the ``●`` / ``▲`` key sits this share of the timepoint span left of t0.
+COUNT_ROW_SHARE = 0.2
+COUNT_KEY_SHIFT = 0.2
+#: Arm × source line legend: two rows fit one column width.
+LINE_LEGEND_ROWS = 2
+#: Multi-line labels inside a panel (option ends, provenance tiles): compact.
+TEXT_LINESPACING = 1.0
+#: Float tolerance when matching a panel's limits to its value range.
+RANGE_EPSILON = 1e-9
+#: Likert scales with more points get every k-th integer tick.
+MAX_INTEGER_TICKS = 6
 
 
 @dataclass
@@ -295,12 +341,35 @@ class _AnswerLayers:
     lines: list[dict] = field(default_factory=list)
     texts: list[dict] = field(default_factory=list)
     notes: list[dict] = field(default_factory=list)
+    #: Option labels at the right end of their lines (multi option panels).
+    ends: list[dict] = field(default_factory=list)
+    #: ``●`` / ``▲`` count row keys, right aligned left of the first timepoint.
+    keys: list[dict] = field(default_factory=list)
+    #: Likert value ranges: integer ticks only.
+    integer_ranges: set[tuple[float, float]] = field(default_factory=set)
 
     def add_panel(self, version: ConfigVersion, panel: str, question) -> None:
         if panel not in self.panels:
             self.panels.append(panel)
         self.y_range.setdefault(panel, _y_range(question))
         self.present.add((version.version, panel))
+        if question.response_type == ResponseType.LIKERT:
+            self.integer_ranges.add(_y_range(question))
+
+    def breaks(self, limits: tuple[float, float]) -> list[float]:
+        """Ticks of the panel's value range only (the band below holds ``n=``).
+
+        ``free_y`` hands each panel only its limits: the value range is the
+        widest-reaching one inside them, e.g. limits (-1.8, 5.2) → likert (1, 5).
+        """
+        fitting = [r for r in set(self.y_range.values()) if r[1] <= limits[1] + RANGE_EPSILON]
+        if not fitting:
+            return []
+        low, high = max(fitting, key=lambda r: (r[1], r[0]))
+        if (low, high) in self.integer_ranges:
+            step = max(1, math.ceil((high - low) / MAX_INTEGER_TICKS))
+            return [float(v) for v in range(int(low), int(high) + 1, step)]
+        return [b for b in breaks_extended(n=4)((low, high)) if low <= b <= high]
 
     def y_mid(self, panel: str) -> float:
         low, high = self.y_range[panel]
@@ -323,7 +392,9 @@ class _AnswerLayers:
             "points": (self.points, _POINT_COLUMNS),
             "lines": (self.lines, _POINT_COLUMNS),
             "texts": (self.texts, _TEXT_COLUMNS),
+            "keys": (self.keys, _TEXT_COLUMNS),
             "notes": (self.notes + absent, _NOTE_COLUMNS),
+            "ends": (self.ends, _NOTE_COLUMNS),
             "blank": (blank, ["version", "panel", "x", "y"]),
         }
         return {
@@ -358,7 +429,20 @@ def _point(version: ConfigVersion, panel, x, y, arm, source, series) -> dict:
         "source": source,
         "fill": fill,
         "series": series,
+        "style": f"{arm}:{source}",
     }
+
+
+def _runs(t_indices) -> list[int]:
+    """Run id per timepoint: a series line never crosses a timepoint without
+    a value, e.g. t 0, 1, 3 → runs 0, 0, 1."""
+    runs, run, previous = [], 0, None
+    for t in t_indices:
+        if previous is not None and t != previous + 1:
+            run += 1
+        runs.append(run)
+        previous = t
+    return runs
 
 
 def _arm_note(layers: _AnswerLayers, panel: str, version: ConfigVersion, arms: set) -> None:
@@ -377,21 +461,20 @@ def _arm_note(layers: _AnswerLayers, panel: str, version: ConfigVersion, arms: s
 
 
 def _count_texts(layers, panel, version, question, counts: Mapping[tuple[int, str], int]):
-    """``n=`` per timepoint and arm, in two rows below the value range."""
+    """One count row per arm below the value range: the arm glyph left of the
+    first timepoint, then the count under each timepoint, e.g.
+    ``● n=2   1   1``. Short numbers never collide at one column width."""
     low, high = _y_range(question)
-    dodge = _dodge(version)
+    first = min(version.timepoints_minutes)
     for row, arm in enumerate(ARMS, start=1):
+        base = {"version": version.version, "panel": panel, "arm": arm}
+        y = low - COUNT_ROW_SHARE * row * (high - low)
+        key_x = first - COUNT_KEY_SHIFT * _span(version)
+        layers.keys.append({**base, "x": key_x, "y": y, "label": ARM_GLYPHS[arm]})
         for t_index in range(len(version.timepoints_minutes)):
-            layers.texts.append(
-                {
-                    "version": version.version,
-                    "panel": panel,
-                    "x": _minutes(version, t_index) + dodge[arm],
-                    "y": low - 0.2 * row * (high - low),
-                    "arm": arm,
-                    "label": f"{ARM_GLYPHS[arm]} n={counts.get((t_index, arm), 0)}",
-                }
-            )
+            n = counts.get((t_index, arm), 0)
+            label = f"n={n}" if t_index == 0 else str(n)
+            layers.texts.append({**base, "x": _minutes(version, t_index), "y": y, "label": label})
 
 
 def _divergence_layers(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> _AnswerLayers:
@@ -428,11 +511,12 @@ def _numeric_divergence(layers, version, question, numeric, observations) -> Non
         layers.points.append(_point(version, panel, x, value, r.arm, r.answer_source, series))
 
     summary = _rows(numeric, version, question)
-    for r in summary[summary["n"] > 0].itertuples(index=False):
-        x = _minutes(version, r.t_index) + dodge[r.arm]
-        series = f"{r.arm}:{r.answer_source}"
-        median = float(r.median)
-        layers.lines.append(_point(version, panel, x, median, r.arm, r.answer_source, series))
+    valued = summary[summary["n"] > 0].sort_values("t_index")
+    for (arm, source), g in valued.groupby(["arm", "answer_source"], sort=False):
+        for r, run in zip(g.itertuples(index=False), _runs(g["t_index"]), strict=True):
+            x = _minutes(version, r.t_index) + dodge[arm]
+            point = _point(version, panel, x, float(r.median), arm, source, f"{arm}:{source}:{run}")
+            layers.lines.append(point)
 
     counts = summary.groupby(["t_index", "arm"])["n"].sum()
     _count_texts(layers, panel, version, question, {k: int(v) for k, v in counts.items()})
@@ -440,24 +524,75 @@ def _numeric_divergence(layers, version, question, numeric, observations) -> Non
 
 
 def _option_divergence(layers, version, question, options) -> None:
-    """One row per option, historical order: share of answers naming it."""
+    """One panel per question: share of answers naming each option.
+
+    Two options: only the first option's share (the second is its
+    complement). More: one line per option, labelled right of the last
+    timepoint at the mean of its series' last values.
+    """
     rows = _rows(options, version, question)
     answers = rows[rows["option_order"] == 0].groupby(["t_index", "arm"])["answers"].sum()
     counts = {k: int(v) for k, v in answers.items()}
     arms = {arm for (_t, arm), n in counts.items() if n}
     dodge = _dodge(version)
 
-    for order, option in enumerate(question.options):
-        panel = _panel(question.question_id, option)
-        layers.add_panel(version, panel, question)
+    binary = len(question.options) == BINARY_OPTIONS
+    shown = question.options[:1] if binary else question.options
+    panel = _panel(question.question_id)
+    if binary:
+        panel = SHARE_PANEL.format(question=question.question_id, option=shown[0])
+    layers.add_panel(version, panel, question)
+
+    ends = []
+    for order, option in enumerate(shown):
         shares = rows[(rows["option_order"] == order) & rows["proportion"].notna()]
-        for r in shares.itertuples(index=False):
-            x = _minutes(version, r.t_index) + dodge[r.arm]
-            series = f"{r.arm}:{r.answer_source}"
-            share = float(r.proportion)
-            layers.lines.append(_point(version, panel, x, share, r.arm, r.answer_source, series))
-        _count_texts(layers, panel, version, question, counts)
-        _arm_note(layers, panel, version, arms)
+        last_values = []
+        for (arm, source), g in shares.sort_values("t_index").groupby(
+            ["arm", "answer_source"], sort=False
+        ):
+            for r, run in zip(g.itertuples(index=False), _runs(g["t_index"]), strict=True):
+                x = _minutes(version, r.t_index) + dodge[arm]
+                series = f"{arm}:{source}:{order}:{run}"
+                layers.lines.append(
+                    _point(version, panel, x, float(r.proportion), arm, source, series)
+                )
+            last_values.append(float(g["proportion"].iloc[-1]))
+        if not binary and last_values:
+            mean = sum(last_values) / len(last_values)
+            ends.append({"label": _wrap(option, END_LABEL_WRAP), "y": mean})
+    _end_labels(layers, panel, version, question, ends)
+    _count_texts(layers, panel, version, question, counts)
+    _arm_note(layers, panel, version, arms)
+
+
+def _end_labels(layers, panel, version, question, ends: list[dict]) -> None:
+    """Option labels right of the last timepoint, spread so none overlap.
+
+    Two passes over the labels sorted by value: push up off the one below,
+    then push down off the one above (the panel top), so labels stay inside
+    the panel, the count band included (nothing else sits right of the last
+    timepoint).
+    """
+    low, high = _y_range(question)
+    scale = high - low
+    x = max(version.timepoints_minutes) + END_LABEL_SHIFT * _span(version)
+    placed = sorted(ends, key=lambda e: e["y"])
+    halves = [END_LABEL_LINE * scale * (e["label"].count("\n") + 1) / 2 for e in placed]
+    ys = [e["y"] for e in placed]
+
+    floor = low - (len(ARMS) * COUNT_ROW_SHARE + END_LABEL_MARGIN) * scale
+    for i, half in enumerate(halves):
+        ys[i] = max(ys[i], floor + half)
+        floor = ys[i] + half
+    ceiling = high + END_LABEL_MARGIN * scale
+    for i in reversed(range(len(halves))):
+        ys[i] = min(ys[i], ceiling - halves[i])
+        ceiling = ys[i] - halves[i]
+
+    for end, y in zip(placed, ys, strict=True):
+        layers.ends.append(
+            {"version": version.version, "panel": panel, "x": x, "y": y, "label": end["label"]}
+        )
 
 
 def _answer_plot(
@@ -471,10 +606,14 @@ def _answer_plot(
         + geom_blank(data=f["blank"], mapping=aes("x", "y"))
         + _arm_scales()
         + scale_linetype_manual(
-            values=SOURCE_LINETYPES, labels=SOURCE_LABELS, name="Answer", limits=list(SOURCES)
+            values=ANSWER_LINETYPES,
+            labels=ANSWER_LINE_LABELS,
+            name="Line",
+            limits=list(ANSWER_LINETYPES),
+            guide=guide_legend(nrow=LINE_LEGEND_ROWS),
         )
         + labs(title=title, caption=caption, x=TIME_LABEL, y=ANSWER_LABEL)
-        + scale_y_continuous(breaks=_value_breaks)
+        + scale_y_continuous(breaks=layers.breaks)
         # Answer panels carry two count rows: they never shrink (may exceed a page).
         + _theme(len(layers.panels), ANSWER_PANEL_INCHES, ANSWER_PANEL_INCHES)
     )
@@ -487,9 +626,12 @@ def _answer_plot(
             stroke=0.5,
         )
     if not f["lines"].empty:
+        # A one point run (a series value between two gaps) is a marker, no line.
+        lines = f["lines"]
+        run_size = lines.groupby(["version", "panel", "series"], observed=True)["x"]
         p += geom_line(
-            data=f["lines"],
-            mapping=aes("x", "y", color="arm", linetype="source", group="series"),
+            data=lines[run_size.transform("size") > 1],
+            mapping=aes("x", "y", color="arm", linetype="style", group="series"),
             size=0.6,
         )
         p += geom_point(
@@ -504,6 +646,23 @@ def _answer_plot(
             mapping=aes("x", "y", label="label"),
             size=TEXT_SIZE,
             color=NOTE_COLOR,
+        )
+    if not f["keys"].empty:
+        p += geom_text(
+            data=f["keys"],
+            mapping=aes("x", "y", label="label"),
+            ha="right",
+            size=TEXT_SIZE,
+            color=NOTE_COLOR,
+        )
+    if not f["ends"].empty:
+        p += geom_text(
+            data=f["ends"],
+            mapping=aes("x", "y", label="label"),
+            ha="left",
+            size=TEXT_SIZE,
+            color=NOTE_COLOR,
+            lineheight=TEXT_LINESPACING,
         )
     if not f["notes"].empty:
         # Translucent white box: readable over the answers, which stay visible.
@@ -529,18 +688,21 @@ ANSWER_LABEL = "Answer (scale value or share of answers)"
 
 def divergence_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggplot:
     caption = _caption(
-        f"Population: {POPULATION_APPLICABLE}; columns: config version, colour /",
-        "shape: ITT arm. Likert / probability: individual answers (small) and median",
-        "(large, joined). Categorical / multi-select: share of answers naming each",
-        "option; multi-select shares are independent. ● / ▲ n = AI / No AI answers",
-        "with an exported value. Free text is not shown.",
+        f"Population: {POPULATION_APPLICABLE}; columns: config version; colour /",
+        "shape: ITT arm. Likert / probability: answers (small), median (large).",
+        "Options: share of answers naming the option after the colon in the strip",
+        "(two option questions) or at the line's right end (independent for",
+        "multi-select). Lines break where a series has no value. ● / ▲ n = AI / No",
+        "AI answers. No free text.",
         SOURCE_NOTE,
         DESCRIPTIVE_NOTE,
     )
     if s.cohort is Cohort.NO_ACTIVATED_CASES:
         return _placeholder(DIVERGENCE_TITLE, caption)
     plot = _answer_plot(_divergence_layers(bundle, s), bundle, DIVERGENCE_TITLE, caption)
-    return plot + scale_x_continuous(expand=LABEL_X_EXPAND)
+    # Ticks at the timepoints only: the right margin holds labels, not time.
+    minutes = sorted({m for v in bundle.versions.values() for m in v.timepoints_minutes})
+    return plot + scale_x_continuous(breaks=minutes, expand=DIVERGENCE_X_EXPAND)
 
 
 # ---------------------------------------------------------------------------
@@ -589,8 +751,8 @@ def case_divergence_figure(bundle: ValidatedStudyBundle, patient_id: str) -> ggp
     caption = _caption(
         f"{len(cases)} {POPULATION_CASES} of one selected patient; individual answers,",
         "not aggregated. Option rows: 1 = option selected, 0 = not selected. Lines join",
-        "one case's answers; marker fill shows each answer's source.",
-        SOURCE_NOTE,
+        "one case's answers (AI solid, No AI dashed); hollow markers: rule answers",
+        "(auto_value).",
         DESCRIPTIVE_NOTE,
     )
     plot = _answer_plot(layers, bundle, CASE_DIVERGENCE_TITLE, caption)
@@ -780,19 +942,27 @@ def _stacked_plot(
     data = _ordered(_with_facet(data, "row", rows, "col", cols), "t", t_labels)
     data = _ordered(data, "category", list(categories))
     totals = _ordered(_with_facet(totals, "row", rows, "col", cols), "t", t_labels)
-    return (
-        ggplot(data, aes("t", "count", fill="category"))
-        + geom_col(
-            position=position_stack(reverse=True),
-            width=0.7,
-            color=OUTLINE_COLOR,
-            size=OUTLINE_WIDTH,
-        )
-        + geom_text(
-            aes(label="label", group="category"),
+    # Two text layers over every segment (stacking stays aligned), each
+    # labelling only the segments its colour reads on.
+    dark = data["category"].astype(str).map(lambda c: _is_dark(colors[c]))
+    data = data.assign(
+        on_dark=data["label"].where(dark, ""), on_light=data["label"].where(~dark, "")
+    )
+    p = ggplot(data, aes("t", "count", fill="category")) + geom_col(
+        position=position_stack(reverse=True),
+        width=0.7,
+        color=OUTLINE_COLOR,
+        size=OUTLINE_WIDTH,
+    )
+    for column, color in (("on_dark", "white"), ("on_light", "black")):
+        p += geom_text(
+            aes(label=column, group="category"),
             position=position_stack(vjust=0.5, reverse=True),
             size=TEXT_SIZE,
+            color=color,
         )
+    return (
+        p
         + geom_text(
             data=totals,
             mapping=aes("t", "count", label="label"),
@@ -817,6 +987,22 @@ def _stacked_plot(
             panel_grid_major_x=element_blank(),
         )
     )
+
+
+#: Fills darker than this CIE L* carry white text, lighter ones black.
+DARK_FILL_LIGHTNESS = 55.0
+
+
+def _lightness(color: str) -> float:
+    """CIE L* (0 black … 100 white) of a ``#RRGGBB`` colour: its greyscale value."""
+    channels = [int(color[i : i + 2], 16) / 255 for i in (1, 3, 5)]
+    r, g, b = [c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    y = 0.2126 * r + 0.7152 * g + 0.0722 * b
+    return 116 * y ** (1 / 3) - 16 if y > (6 / 29) ** 3 else y * (29 / 3) ** 3
+
+
+def _is_dark(color: str) -> bool:
+    return _lightness(color) < DARK_FILL_LIGHTNESS
 
 
 def _segment(row: str, col: str, t: str, category: str, count: int, code: str) -> dict:
@@ -857,64 +1043,131 @@ PROVENANCE_CATEGORIES = {
         for reason, code in MISSING_CODES.items()
     },
 }
-MISSING_COLORS = {
-    MissingReason.TECHNICAL_FAILURE: "#CC79A7",
-    MissingReason.CASE_ABANDONED: "#D55E00",
-    MissingReason.REACHED_UNANSWERED: "#E69F00",
-    MissingReason.PENDING: "#F0E442",
-    MissingReason.TIMEPOINT_NEVER_REACHED: "#999999",
-    MissingReason.UNKNOWN: "#009E73",  # light enough for the black "M?" label
+
+
+class TileState(StrEnum):
+    """Missing share of a provenance tile: its fill, readable without colour."""
+
+    NO_MISSING = "no_missing"
+    SOME_MISSING = "some_missing"
+    ALL_MISSING = "all_missing"
+
+
+TILE_STATES = {
+    TileState.NO_MISSING.value: "no missing",
+    TileState.SOME_MISSING.value: "some missing",
+    TileState.ALL_MISSING.value: "all missing",
 }
-PROVENANCE_COLORS = {
-    "answered_clinician": "#0072B2",
-    "answered_rule": "#56B4E9",
-    "not_applicable": "#FFFFFF",  # outlined
-    **{f"missing_{reason.value}": MISSING_COLORS[reason] for reason in MissingReason},
+#: Greys ≥ 15 L* apart (100, 82, 63): distinct in greyscale, black text readable.
+TILE_COLORS = {
+    TileState.NO_MISSING.value: "#FFFFFF",
+    TileState.SOME_MISSING.value: "#CCCCCC",
+    TileState.ALL_MISSING.value: "#999999",
 }
+#: Row key separator: a question id is a row of its version only (never pooled).
+ROW_SEPARATOR = "\x1f"
+OBSERVATIONS_ROW = "n (case timepoints)"
+#: Tile row height: one 6 pt line per category code plus padding.
+TILE_LINE_INCHES = 0.085
+TILE_PAD_INCHES = 0.03
+TILE_HEADER_INCHES = 1.8
+TILE_STRIP_INCHES = 0.2
 
 
 def response_provenance_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggplot:
+    data = s.response_provenance
+    present = [category for category in PROVENANCE_CATEGORIES if int(data[category].sum())]
+    key = "; ".join(PROVENANCE_CATEGORIES[c][1] for c in present)
     caption = _caption(
-        "Population: every configured timepoint of the activated measured cases.",
-        "Bars: answered (clinician / rule), not applicable (hidden branch; never missing)",
-        "and missing by reason; unreached timepoints are missing as pending, abandoned",
-        "or never reached. n above each bar = case timepoints.",
+        "Population: every configured timepoint of the activated measured cases;",
+        "n = case timepoints per column (ITT arm × minutes from first contact).",
+        f"Tiles list non-zero categories as code + count{': ' + key if key else ''}.",
+        "Hidden (NA) is evaluated first and is never missing: an unreached",
+        "conditional question can be NA rather than pending, abandoned or never",
+        "reached. Fill: share missing.",
         DESCRIPTIVE_NOTE,
     )
     if s.cohort is Cohort.NO_ACTIVATED_CASES:
         return _placeholder(PROVENANCE_TITLE, caption)
 
-    data, totals, rows = [], [], []
-    for r in s.response_provenance.to_dict("records"):
-        version = bundle.versions[r["config_version"]]
-        row = f"{r['config_version']} · {r['question_id']}"
-        if row not in rows:
-            rows.append(row)
-        col, t = ARM_LABELS[r["arm"]], _t_label(_minutes(version, r["t_index"]))
-        for category, (code, _label) in PROVENANCE_CATEGORIES.items():
-            data.append(_segment(row, col, t, category, int(r[category]), code))
-        totals.append(
+    columns = [f"{ARM_LABELS[arm]}\n{t}" for arm in ARMS for t in _all_t_labels(bundle)]
+    tiles, counts, rows = [], [], []
+    for r in data.to_dict("records"):
+        version = r["config_version"]
+        t = _t_label(_minutes(bundle.versions[version], r["t_index"]))
+        column = f"{ARM_LABELS[r['arm']]}\n{t}"
+        row = f"{version}{ROW_SEPARATOR}{r['question_id']}"
+        header = f"{version}{ROW_SEPARATOR}{OBSERVATIONS_ROW}"
+        for key_row in (header, row):
+            if key_row not in rows:
+                rows.append(key_row)
+
+        codes = [
+            f"{code}{int(r[category])}"
+            for category, (code, _label) in PROVENANCE_CATEGORIES.items()
+            if int(r[category])
+        ]
+        tiles.append(
             {
+                "version": version,
                 "row": row,
-                "col": col,
-                "t": t,
-                "count": int(r["observations"]),
-                "label": f"n={r['observations']}",
+                "column": column,
+                "state": _tile_state(sum(int(r[c]) for c in MISSING_COLUMNS), r["observations"]),
+                "label": "\n".join(codes),
             }
         )
+        counts.append(
+            {"version": version, "row": header, "column": column, "label": f"n={r['observations']}"}
+        )
 
-    return _stacked_plot(
-        pd.DataFrame(data),
-        pd.DataFrame(totals),
-        categories=PROVENANCE_CATEGORIES,
-        colors=PROVENANCE_COLORS,
-        rows=rows,
-        cols=[ARM_LABELS[a] for a in ARMS],
-        t_labels=_all_t_labels(bundle),
-        legend="Response",
-        title=PROVENANCE_TITLE,
-        caption=caption,
+    order = list(reversed(rows))  # discrete y draws the first category lowest
+    versions = list(bundle.versions)
+    tile_frame = _ordered(_ordered(pd.DataFrame(tiles), "row", order), "version", versions)
+    tile_frame = _ordered(tile_frame, "column", columns)
+    count_frame = _ordered(_ordered(pd.DataFrame(counts), "row", order), "version", versions)
+    count_frame = _ordered(count_frame.drop_duplicates(), "column", columns)
+
+    lines = max(1, int(tile_frame["label"].str.count("\n").max()) + 1)
+    row_inches = TILE_LINE_INCHES * lines + TILE_PAD_INCHES
+    height = TILE_HEADER_INCHES + row_inches * len(rows) + TILE_STRIP_INCHES * len(versions)
+
+    return (
+        ggplot(tile_frame, aes("column", "row"))
+        + geom_tile(aes(fill="state"), color=OUTLINE_COLOR, size=OUTLINE_WIDTH)
+        + geom_text(aes(label="label"), size=TEXT_SIZE, lineheight=TEXT_LINESPACING)
+        + geom_text(
+            data=count_frame,
+            mapping=aes("column", "row", label="label"),
+            size=TEXT_SIZE,
+            color=NOTE_COLOR,
+        )
+        + facet_grid("version ~ .", scales="free_y", space="free_y")
+        + scale_y_discrete(labels=_row_labels)
+        + scale_fill_manual(
+            values=TILE_COLORS, labels=TILE_STATES, limits=list(TILE_STATES), name="Tile"
+        )
+        + labs(
+            title=PROVENANCE_TITLE,
+            caption=caption,
+            x="ITT arm · minutes from first contact",
+            y="",
+        )
+        + _theme(1)
+        + theme(figure_size=(ONE_COLUMN_INCHES, height), panel_grid=element_blank())
     )
+
+
+def _tile_state(missing: int, observations: int) -> str:
+    if not missing:
+        return TileState.NO_MISSING.value
+    if missing < observations:
+        return TileState.SOME_MISSING.value
+    return TileState.ALL_MISSING.value
+
+
+def _row_labels(keys) -> list[str]:
+    """``"v1\\x1fconfidence"`` → ``"confidence"`` (the strip names the version)."""
+    return [k.split(ROW_SEPARATOR, 1)[1] for k in keys]
 
 
 # ---------------------------------------------------------------------------
@@ -922,8 +1175,10 @@ def response_provenance_figure(bundle: ValidatedStudyBundle, s: AnalysisSummarie
 # ---------------------------------------------------------------------------
 
 ATTENTION_TITLE = "Time per timepoint"
-#: ``excl k`` labels above the points, one row per arm (share of the tallest point).
-EXCLUDED_LABEL_HEIGHT = {Arm.AI.value: 1.15, Arm.NO_AI.value: 1.3}
+#: ``excl k`` labels above the points, one row per arm (share of the tallest point);
+#: odd timepoints one step higher, so labels of adjacent timepoints never overlap.
+EXCLUDED_LABEL_HEIGHT = {Arm.AI.value: 1.1, Arm.NO_AI.value: 1.2}
+EXCLUDED_LABEL_STAGGER = 0.2
 MEASURE_LABELS = {
     "elapsed": "wall clock elapsed (s)",
     "foreground": "foreground (s)",
@@ -934,7 +1189,8 @@ MEASURE_LABELS = {
 def attention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggplot:
     excluded = _excluded_by_status(s.attention)
     caption = _caption(
-        f"Population: {POPULATION_REACHED}. Points: individual durations; bars: median.",
+        f"Population: {POPULATION_REACHED}. Points: individual durations; horizontal",
+        "ticks: median.",
         "Elapsed = S10 wall clock; foreground / active = S11j browser telemetry, only",
         f"where telemetry_status is {VALID_TELEMETRY.value}. An absent duration is never 0:",
         "'● / ▲ excl k' = AI / No AI reached observations without a valid duration.",
@@ -976,7 +1232,8 @@ def attention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
                 medians.append({**base, "y": float(r[f"{measure}_median_seconds"])})
             missing = r["reached"] - r[f"{measure}_n"]
             if missing:
-                y = top[measure] * EXCLUDED_LABEL_HEIGHT[r["arm"]]
+                stagger = EXCLUDED_LABEL_STAGGER * (r["t_index"] % 2)
+                y = top[measure] * (EXCLUDED_LABEL_HEIGHT[r["arm"]] + stagger)
                 label = f"{ARM_GLYPHS[r['arm']]} excl {missing}"
                 texts.append({**base, "y": y, "label": label})
 
@@ -1084,18 +1341,28 @@ OUTCOMES = {
     Outcome.UNKNOWN.value: ("?", "? unknown / indeterminate"),
     Outcome.NOT_APPLICABLE.value: ("NA", "NA not applicable to this arm"),
 }
+#: L* 46 / 71 / 21 / 100: every pair ≥ 25 apart, distinct in greyscale.
 OUTCOME_COLORS = {
     Outcome.YES.value: "#0072B2",
     Outcome.NO.value: "#E69F00",
-    Outcome.UNKNOWN.value: "#999999",
+    Outcome.UNKNOWN.value: "#333333",
     Outcome.NOT_APPLICABLE.value: "#FFFFFF",  # outlined
 }
 INTERVENTION_MEASURES = {
     InterventionMeasure.DELIVERED: "AI delivered",
     InterventionMeasure.VIEWED: "AI viewed",
     InterventionMeasure.FAILURE: "intervention failure",
-    InterventionMeasure.LEAKAGE: "no AI leakage",
+    InterventionMeasure.LEAKAGE: "AI leakage",
     InterventionMeasure.PER_PROTOCOL: "per protocol",
+}
+#: The arms a measure is plotted for: rows that would be all ``not applicable``
+#: (delivered / viewed on the no AI arm, leakage on the AI arm) are dropped.
+MEASURE_ARMS = {
+    InterventionMeasure.DELIVERED: (Arm.AI.value,),
+    InterventionMeasure.VIEWED: (Arm.AI.value,),
+    InterventionMeasure.FAILURE: ARMS,
+    InterventionMeasure.LEAKAGE: (Arm.NO_AI.value,),
+    InterventionMeasure.PER_PROTOCOL: ARMS,
 }
 
 
@@ -1116,8 +1383,12 @@ def _outcomes(measure: InterventionMeasure, r: Mapping) -> dict[Outcome, int]:
             Outcome.UNKNOWN: int(r[f"{measure}_unknown"]),
         }
     if measure == InterventionMeasure.FAILURE:
-        failed = int(r["intervention_failure"])
-        return {Outcome.YES: failed, Outcome.NO: reached - failed}
+        failed, unknown = int(r["intervention_failure"]), int(r["intervention_failure_unknown"])
+        return {
+            Outcome.YES: failed,
+            Outcome.NO: reached - failed - unknown,
+            Outcome.UNKNOWN: unknown,
+        }
     if measure == InterventionMeasure.LEAKAGE:
         if is_ai:
             return {Outcome.NOT_APPLICABLE: reached}
@@ -1136,9 +1407,10 @@ def intervention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> g
     )
     caption = _caption(
         f"Population: {POPULATION_REACHED}, grouped by ITT arm (never by exposure).",
-        "Delivered / viewed apply to the AI arm; leakage to the no AI arm. Unknown and",
-        "indeterminate are counted, never read as no. n above each bar = reached",
-        "observations.",
+        "Delivered / viewed apply to the AI arm, leakage to the no AI arm (yes =",
+        "leakage occurred); not applicable is never false. Unknown delivery makes failure",
+        "unknown. Unknown and indeterminate are counted, never read as no. n above",
+        "each bar = reached observations.",
         f"Failure reasons: {failures}." if failures else "No intervention failure.",
         DESCRIPTIVE_NOTE,
     )
@@ -1147,14 +1419,16 @@ def intervention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> g
 
     rows = [
         f"{label} ({ARM_LABELS[arm]} arm)"
-        for label in INTERVENTION_MEASURES.values()
-        for arm in ARMS
+        for measure, label in INTERVENTION_MEASURES.items()
+        for arm in MEASURE_ARMS[measure]
     ]
     data, totals = [], []
     for r in s.intervention.to_dict("records"):
         version = bundle.versions[r["config_version"]]
         t = _t_label(_minutes(version, r["t_index"]))
         for measure, label in INTERVENTION_MEASURES.items():
+            if r["arm"] not in MEASURE_ARMS[measure]:
+                continue
             row = f"{label} ({ARM_LABELS[r['arm']]} arm)"
             counts = _outcomes(measure, r)
             for outcome, (code, _legend) in OUTCOMES.items():
