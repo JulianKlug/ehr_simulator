@@ -242,8 +242,8 @@ def _aggregate_inconsistent(rows: pd.DataFrame) -> bool:
     return False
 
 
-#: Inverse normalisation leaves float noise: Geneva NIHSS min 1.0000000000000009
-#: with median 1.0 is one value, not an inconsistency.
+#: Inverse normalisation leaves float noise: a min of 1.0000000000000009 with
+#: median 1.0 (illustrative) is one value, not an inconsistency.
 _BOUND_ORDER_REL_TOL = 1e-9
 
 

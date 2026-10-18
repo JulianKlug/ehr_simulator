@@ -46,7 +46,7 @@ PICKLE_PROTOCOL = 4  # observed in the production artifact
 TEST_IDS = ("900001_0001", "900002_0001", "900003_0002")
 NON_TEST_ID = "900009_0001"
 FEATURE_NAMES = ("ALAT", "avg_heart_rate", "lag2_glucose", "timestep_idx")
-BIAS = -0.640625  # exact in float32
+BIAS = -1.25  # exact in float32; unrelated to any real model
 MODEL_ID = "fixture_xgb"
 MODEL_BYTES = b"fabricated xgboost model bytes - hashed, never loaded\n"
 

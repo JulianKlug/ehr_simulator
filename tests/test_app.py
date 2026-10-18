@@ -135,7 +135,7 @@ def test_app_from_study_config_index_lists_only_study_patients(
     study config declares only one of them, the index page must render
     only that one — not the full dataset list. Closes the post-S5 user
     report: "all patients are loaded instead of loading only patients in
-    patient_ids" against the Geneva real-data CSV (~3K patients).
+    patient_ids" against the full Geneva CSV.
     """
     custom_dir = tmp_log_dir.parent / "study_subset"
     custom_dir.mkdir(parents=True, exist_ok=True)

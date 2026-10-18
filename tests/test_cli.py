@@ -201,6 +201,37 @@ def test_cli_serve_demo_refuses_a_study_database(
     assert not (tmp_path / "b").exists()
 
 
+def test_cli_serve_demo_never_migrates_a_study_database(
+    captured_calls: list[dict[str, Any]], tmp_path: Path
+) -> None:
+    """The refusal comes before migrations: an older study schema stays as is."""
+    from fastapi.testclient import TestClient
+
+    from ehr_simulator.db import apply_migrations, study_identity
+
+    db_path = tmp_path / "study_pilot.db"
+    conn = connect(db_path)
+    apply_migrations(conn)
+    study_identity.bind(conn, "pilot")
+    # An older schema: the latest migration not yet recorded.
+    conn.execute(
+        "DELETE FROM schema_migrations WHERE version = (SELECT MAX(version) FROM schema_migrations)"
+    )
+    conn.commit()
+    before = tuple(conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone())
+    conn.close()
+
+    cli.main(["serve", "--demo", "--db-path", str(db_path), "--backup-dir", str(tmp_path / "b")])
+    try:
+        with TestClient(captured_calls[0]["app"]):
+            pass
+    except BaseException:  # noqa: BLE001 — lifespan SystemExit(1), see above
+        pass
+
+    with sqlite3.connect(db_path) as check:
+        assert check.execute("SELECT COUNT(*) FROM schema_migrations").fetchone() == before
+
+
 def test_plain_server_has_no_demo_banner(client: Any) -> None:
     assert DEMO_BANNER not in client.get("/").text
 

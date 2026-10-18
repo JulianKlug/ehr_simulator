@@ -30,6 +30,7 @@ Middleware stack (outermost first) unchanged.
 from __future__ import annotations
 
 import contextlib
+import sqlite3
 import sys
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
@@ -82,6 +83,14 @@ class DemoMode(StrEnum):
     SYNTHETIC = "synthetic"
 
 
+def _bound_study(conn: sqlite3.Connection) -> str | None:
+    """The database's study id; a database older than the identity table has none."""
+    try:
+        return fetch_study_identity(conn)
+    except StudyIdentityError:
+        return None
+
+
 def create_app(
     *,
     log_dir: Path = Path("logs"),
@@ -129,11 +138,10 @@ def create_app(
             backup_dir if backup_dir is not None else db_path_resolved.parent / "backups"
         )
         app.state.db = connect(db_path_resolved)
-        versions = apply_migrations(app.state.db)
 
-        # S12c: a demo login must never land in a study's append-only events.
-        bound_study = fetch_study_identity(app.state.db)
-        if demo is DemoMode.SYNTHETIC and bound_study is not None:
+        # S12c: a demo never writes to a study's database, not even a migration.
+        bound_study = _bound_study(app.state.db) if demo is DemoMode.SYNTHETIC else None
+        if bound_study is not None:
             log.error("demo refused on a study database", event_kind="app.boot.failed")
             print(
                 f"Refusing to boot: --demo on the database of study {bound_study!r}; "
@@ -144,6 +152,7 @@ def create_app(
                 app.state.db.close()
             raise SystemExit(1)
 
+        versions = apply_migrations(app.state.db)
         # S11a: study mode binds the database to exactly one study. A
         # mismatching or nonempty unbound legacy database fails startup
         # here — before the clinician cache, ingestion issues, or any

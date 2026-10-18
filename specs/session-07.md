@@ -73,7 +73,7 @@ Summary: **neither artifact carries patient ids, timestep indexes or model ident
 
 | Item | Observed |
 |---|---|
-| Format | standard pickle, protocol 4, 460 751 bytes |
+| Format | standard pickle, protocol 4 (size withheld) |
 | Globals | `numpy.dtype`, `numpy.ndarray`, `numpy.core.multiarray._reconstruct` only |
 | Top level | `tuple` of length 2 |
 | `[0]` | `ndarray (72·N,) float64`, values `{0.0, 1.0}`: **ground truth `y_true`** |
@@ -86,7 +86,7 @@ Summary: **neither artifact carries patient ids, timestep indexes or model ident
 | Timesteps | 0..71, hourly |
 | `model_id` / version | not present |
 
-Layout evidence: `sigmoid(sum(SHAP row))` equals `y_prob` within 3.6e-7 under patient major order and differs by up to 0.84 under timestep major order.
+Layout evidence: `sigmoid(sum(SHAP row))` matches `y_prob` within the 1e-5 tolerance under patient major order and fails it under timestep major order.
 
 Label semantics (observation only, not used by S7): `y_true[t] = 1` when an early neurological deterioration event falls in hours `(t, t+6]`, so `y_prob` at `t` is a 6 hour risk.
 
@@ -94,7 +94,7 @@ Label semantics (observation only, not used by S7): `y_true[t] = 1` when an earl
 
 | Item | Observed |
 |---|---|
-| Layout | flat directory, exactly 2 regular files, no symlinks, 167 MB |
+| Layout | flat directory, exactly 2 regular files, no symlinks (size withheld) |
 | `shap_feature_names.pkl` | `list[str]`, 1134 unique names, no globals |
 | `tree_explainer_shap_values_over_ts.pkl` | `list` of 72 `ndarray (N, 1135) float32`; same three numpy globals |
 | List index | timestep (0..71) |
@@ -199,7 +199,7 @@ Correspondence is positional; there are no keys to match. When explanations are 
 - `len(feature_names) == 1134`, names unique strings
 - `len(y_prob) == len(y_true) == 72 * N`
 - the directory holds exactly `shap_feature_names.pkl` and `tree_explainer_shap_values_over_ts.pkl`; any other entry is drift
-- **alignment check:** for every retained row, `|sigmoid(sum(shap[t][i, :])) - y_prob[72 i + t]| <= SHAP_PROBABILITY_TOLERANCE` (`1e-5`; observed max 3.6e-7)
+- **alignment check:** for every retained row, `|sigmoid(sum(shap[t][i, :])) - y_prob[72 i + t]| <= SHAP_PROBABILITY_TOLERANCE` (`1e-5`)
 
 Any failure is an `AdapterError`. The alignment check is what catches a reordered or swapped file: a positional mismatch would otherwise pass silently.
 
@@ -596,7 +596,7 @@ S7 is complete when all of the following hold:
 13. Prediction timesteps follow §7.1 (`i → 60i`).
 14. `validate-adapter` reports the loaded provenance; README documents the sidecar export and provenance steps.
 15. All default tests pass and the real data smoke passes locally.
-16. Measured AI load and hash time on the real artifacts: 42.3 s for all test patients (with SHAP; dominated by JSON encoding and strict validation), 4.6 s for 50 patients (Explore B: 0.46 s for the SHAP file alone).
+16. Measured AI load and hash time on the real artifacts: load times recorded locally (withheld); dominated by JSON encoding and strict validation.
 
 ## 15. S8 handoff
 

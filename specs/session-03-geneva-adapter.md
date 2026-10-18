@@ -6,6 +6,8 @@
 
 ---
 
+> **Superseded (S12c, 2026-10-14):** the committed fixtures never contain real rows. Patient rows are hand-made constants, normalisation parameters are fabricated (row i: 10·(i+1), i+1) and categories are alphabetical (`tests/test_shared.py`). Plans below to slice or copy the real CSV and upstream tables were not carried out.
+
 ## Deliverables
 
 | #  | Path | Purpose |
@@ -227,7 +229,7 @@ def load_geneva(
 class CategoricalGroup:
     group_name: str           # e.g. "Sex", "categorical_IAT"
     baseline: str             # e.g. "Female", "271-540min"
-    other_labels: tuple[str, ...]  # e.g. ("Male",), ("no_IAT", ">540min", "<270min")
+    other_labels: tuple[str, ...]  # e.g. ("Male",), ("<270min", ">540min", "no_IAT")
     one_hot_columns: tuple[str, ...]  # the sample_label values in the CSV that
                                        # correspond to other_labels, in the same order
                                        # (e.g. ("sex_male",), ("categorical_iat_no_iat", ...))

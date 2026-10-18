@@ -331,7 +331,7 @@ def _read_features_csv(
 
     When ``patient_ids`` is set, each chunk is additionally filtered to keep
     only rows whose ``case_admission_id`` is in the provided set. For pilot
-    use cases (a 3-50 patient subset of a 3K-patient dataset) this collapses
+    use cases (a small patient subset of a large dataset) this collapses
     peak memory + load time by 50-1000× since most chunks drop to empty
     after imputed + patient_id filtering.
 

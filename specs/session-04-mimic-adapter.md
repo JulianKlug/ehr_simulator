@@ -6,6 +6,8 @@
 
 ---
 
+> **Superseded (S12c, 2026-10-14):** the committed fixtures never contain real rows. Patient rows are hand-made constants, normalisation parameters are fabricated (row i: 10·(i+1), i+1) and categories are alphabetical (`tests/test_shared.py`). Plans below to slice or copy the real CSV and upstream tables were not carried out.
+
 ## Deliverables
 
 | #  | Path | Purpose |
@@ -459,7 +461,7 @@ Numbered to match commits in §12 below.
 ### `tests/test_mimic_real.py` (1, opt-in)
 
 16. **`test_load_mimic_real_csv_smoke`** — marked `@pytest.mark.real_data`; **skipped by default** in CI and `pytest -n auto`; runnable via `uv run pytest -m real_data`. Loads `/mnt/data1/klug/datasets/opsum/.../preprocessed_features_16022026_095909.csv` + `.../logs_16022026_095909/` via `load_mimic(strict=False)`. Asserts:
-    - load completes within **90 s** wall time (post-eng-review T3; MIMIC is 10× smaller than Geneva but chunked-read fixed cost + pandera validation dominate at low row counts. 90 s gives headroom for slower CI runners and cold filesystem reads on `/mnt`).
+    - load completes within **90 s** wall time (post-eng-review T3; MIMIC is smaller than Geneva but chunked-read fixed cost + pandera validation dominate at low row counts. 90 s gives headroom for slower CI runners and cold filesystem reads on `/mnt`).
     - `dataset.scalar_ts` has rows for "most patients" — concrete count locked when the implementer measures whether every patient has both EHR and notes rows; if some patients lack EHR rows, the assertion is `len(set(scalar_ts.patient_id.unique())) >= N` where N is the measured count, never a hardcoded count.
     - `dataset.admission` has every patient (notes rows are guaranteed per Explore A; verified at fixture-build time).
     - `dataset.issues` is reportable on test failure for debugging.
@@ -604,7 +606,7 @@ If any of these three facts changes upstream, the parity regression in `tests/te
 | 3.T1 | §3 + §8 | `_load_normalisation_params` and `_load_categorical_encoding` wrap `FileNotFoundError` as `AdapterError` with `IngestionIssue` carrying `dataset` + missing-path. Two new tests in `test_shared.py` (#5, #6) lock the wrapping. |
 | 3.T2 | §8 test #4 | Parity regression #4 becomes layered: function identity (`f1 is f2` for every helper in `_shared.__all__`) + behavioral parity sub-test on synthetic cross-vocabulary inputs (rows from BOTH Geneva and MIMIC source vocabs flow through same helpers, assert same output). |
 | 3.C1 | §7 step 9 + §8 test #9 | Test #9 grows 3-5 hand-curated anchor assertions read from raw upstream MIMIC CSV (independent of `load_mimic()`). Anchors catch high-value semantic regressions even if sidecar gets re-baselined. |
-| 4.T3 | §8 test #16 | Wall-time budget bumped from 60s → 90s. MIMIC is 10× smaller than Geneva but chunked-read fixed cost + pandera validation dominate; 30s buffer over expected ~30-45s avoids CI flake on cold `/mnt` reads. |
+| 4.T3 | §8 test #16 | Wall-time budget bumped from 60s → 90s. MIMIC is smaller than Geneva but chunked-read fixed cost + pandera validation dominate; 30s buffer over expected ~30-45s avoids CI flake on cold `/mnt` reads. |
 | OV.1 | §7 step 10 + §9 + §12 | `build_mimic_fixture.py --check` mode added (mirror of `gen_data_contract.py --check`). CI step added after pytest. Closes the bootstrap-loop gap that anchor assertions alone don't fully fix. |
 | OV.2 | scope | Hold the line on S4 scope. Outside voice argued ~580 spec lines + 22 tests is over-engineered for ~80 LOC of MIMIC delta. Roadmap-pinned scope + boil-the-lake project pattern + parity-test value for S7 Geneva AI inheritance justify the depth. |
 

@@ -88,7 +88,7 @@ def test_shared_drop_imputed_handles_geneva_and_mimic_source_vocabularies(
 
 
 # ---------------------------------------------------------------------------
-# #2 — inverse_normalize round-trip on real (mean, std) pairs from both datasets
+# #2 — inverse_normalize round-trip on the fixture (mean, std) pairs
 # ---------------------------------------------------------------------------
 
 

@@ -86,7 +86,7 @@ def geneva_payload(t_minutes: float) -> str:
     return json.dumps(
         {
             "probability": probability,
-            "explanation": {"base_value": -0.64, "contributions": contributions(t_minutes)},
+            "explanation": {"base_value": -1.25, "contributions": contributions(t_minutes)},
         },
         sort_keys=True,
     )

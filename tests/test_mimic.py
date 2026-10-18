@@ -1,13 +1,12 @@
 """Unit + integration + E2E + regression tests for the MIMIC adapter.
 
 Inline DataFrames cover the helper-level contracts; ``mimic_fixture_dir``
-supplies a 2-patient slice of the real CSV for the integration / E2E
-tests. The real-CSV smoke test lives in ``test_mimic_real.py``
+supplies 2 fabricated patients in the real CSV shape for the integration /
+E2E tests. The real-CSV smoke test lives in ``test_mimic_real.py``
 behind the ``real_data`` marker.
 
-Anchor assertions in test #9 sub-(b) were locked at S4 implementation
-time by reading raw upstream rows for the two anonymised fixture patients
-(see :func:`tests/fixtures/mimic/build_mimic_fixture.py`). They are
+Anchor assertions in test #9 sub-(b) are locked from the fabricated rows
+of :func:`tests/fixtures/mimic/build_mimic_fixture.py`. They are
 independent of ``load_mimic`` so a regression in the adapter that also
 drifts the sidecar still gets caught.
 """

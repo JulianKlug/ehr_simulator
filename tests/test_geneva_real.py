@@ -37,12 +37,10 @@ def test_load_geneva_real_csv_smoke() -> None:
 
     n_scalar_patients = dataset.scalar_ts["patient_id"].nunique()
     n_admission_patients = dataset.admission["patient_id"].nunique()
-    assert n_scalar_patients > 1000, n_scalar_patients
-    assert n_admission_patients > 1000, n_admission_patients
-    print(
-        f"real-data load: {elapsed:.1f}s, scalar patients={n_scalar_patients}, "
-        f"admission patients={n_admission_patients}, issues={len(dataset.issues)}"
-    )
+    # No cohort size is pinned or printed: it is not published.
+    assert n_scalar_patients > 0
+    assert n_admission_patients > 0
+    print(f"real-data load: {elapsed:.1f}s, issues={len(dataset.issues)}")
 
 
 # ---------------------------------------------------------------------------

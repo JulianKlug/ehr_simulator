@@ -215,7 +215,7 @@ Amended contract:
 4. Imaging panel state counts them as imaging data present from `t=0` (§10.1).
 5. Divergence is unchanged for them: admission is already counted once at the first timepoint.
 
-Also observed: `weight` has `stroke_registry` rows in buckets 0–7; `ADMISSION` keeps the `t=0` row only, so a patient whose weight was first recorded later has none. Accepted, out of scope.
+Also observed: `weight` also has `stroke_registry` rows after `t=0`; `ADMISSION` keeps the `t=0` row only, so a patient whose weight was first recorded later has none. Accepted, out of scope.
 
 ---
 

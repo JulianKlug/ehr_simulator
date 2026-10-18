@@ -77,7 +77,7 @@ Helpers declared at module scope inside `geneva.py` (will be lifted to `_shared.
 
 **Test inventory:** ≥11 tests. 5+ unit (`_drop_imputed`, `_inverse_normalize`, `_decode_categorical` including the 0.5-edge case, hour-bucket → minutes, `_path_traversal_guard`). 3+ integration (source-routing branches, strict vs lenient on real-shaped data, empty IMAGING/AI_OUTPUT frame assertions). 2+ E2E (full Geneva fixture round-trip; `docs/data-contract.md` drift CI check). 1+ regression (`AdapterError` on missing required cols).
 
-**Fixture strategy:** `tests/fixtures/geneva/build_geneva_fixture.py` reads the real CSV, samples N rows per source category, replaces `value`/identifiers with random-but-realistic fakes, writes `tests/fixtures/geneva/geneva_sample.csv`. Both committed. Re-run when source schema changes. (Session 4 mirrored the layout under `tests/fixtures/mimic/`.)
+**Fixture strategy:** `tests/fixtures/geneva/build_geneva_fixture.py` generates fabricated rows in the real CSV shape (no real data), writes `tests/fixtures/geneva/geneva_sample.csv`. Both committed. Re-run when source schema changes. (Session 4 mirrored the layout under `tests/fixtures/mimic/`.)
 
 ### Session 4 — MIMIC-III adapter [SHIPPED]
 

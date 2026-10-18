@@ -79,8 +79,8 @@ def build_dataset_loader(
     params_dir = Path(study.params_dir)
 
     # Filter at ingestion time so a pilot config (3-50 patients) doesn't
-    # pay the full-dataset memory + load-time cost (~600 MB / 51 s on
-    # Geneva real data). Skipped (None) only when no study config is in
+    # pay the full-dataset memory + load-time cost (large on the real
+    # data). Skipped (None) only when no study config is in
     # scope — `validate-adapter` and friends always pass a study, so the
     # filter is always active when the CLI builds the loader.
     def _pids() -> tuple[str, ...]:

@@ -37,8 +37,9 @@ and it refuses to boot on a study's database (`--db-path`, `EHR_SIM_DB_PATH`).
 
 The demo writes `./data/ehr_simulator.db`, its backups
 `./data/backups/ehr_simulator_*.db` and `./logs/` under the directory you
-started it from. To reset it, stop the server and delete the demo files only
-(study databases and their backups under `data/backups/<study_id>/` stay):
+started it from. To reset it, stop the server and delete the demo files only.
+Study databases, their backups under `data/backups/<study_id>/` and the shared
+`logs/` stay:
 
 ```bash
 rm -f data/ehr_simulator.db data/ehr_simulator.db-wal data/ehr_simulator.db-shm data/backups/ehr_simulator_*.db

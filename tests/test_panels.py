@@ -144,7 +144,7 @@ def test_partial_rules_read_rows_at_or_before_t(rows, panel: str, expected: str)
 
 
 def test_bound_order_tolerates_inverse_normalisation_noise() -> None:
-    """Real Geneva NIHSS bucket: min 1.0000000000000009 > median 1.0 by float noise."""
+    """Inverse normalisation ulp noise: min 1.0000000000000009 > median 1.0."""
     rows = [(0.0, "nihss_min", 1.0000000000000009), (0.0, "nihss", 1.0)]
     rows.append((0.0, "nihss_max", 0.9999999999999996))
     sliced = slice_to_timepoint(_scalar_dataset(rows), "p", 0.0, 0)
