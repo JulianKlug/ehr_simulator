@@ -256,6 +256,37 @@ def test_denominators_are_consistent(walked: AnalysisSummaries) -> None:
     assert set(d["config_version"]) == {"v1", "v2"}
 
 
+def test_unreached_conditional_question_takes_the_reach_status(
+    walked: AnalysisSummaries,
+) -> None:
+    """Owner decision (option B): unknown because unreached is never 'does not apply'.
+
+    v1 AI t2: Z's abandoned case and its open replacement never reached t2,
+    so primary_cause (shown only after deterioration_6h = Yes) is missing as
+    case_abandoned / pending, like every other question there.
+    """
+    row = _one(
+        walked.response_provenance,
+        config_version="v1",
+        question_id="primary_cause",
+        arm="ai",
+        t_index=2,
+    )
+
+    assert row["missing_case_abandoned"] == 1
+    assert row["missing_pending"] == 1
+    assert row["not_applicable"] <= row["reached"]
+
+
+def test_reached_hidden_question_stays_not_applicable(walked: AnalysisSummaries) -> None:
+    """A reached timepoint keeps the branch evaluation: hidden is never missing."""
+    rows = walked.response_provenance
+    hidden = rows[(rows["question_id"] == "primary_cause") & (rows["not_applicable"] > 0)]
+
+    assert not hidden.empty
+    assert (hidden["not_applicable"] <= hidden["reached"]).all()
+
+
 def test_withheld_free_text_is_never_missing(walked: AnalysisSummaries) -> None:
     """Free text not routinely exported is answered, not missing / unknown."""
     provenance = walked.response_provenance.copy()

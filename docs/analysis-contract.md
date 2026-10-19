@@ -79,6 +79,8 @@ export-phase2 bundle ─► load_phase2_bundle ─► ValidatedStudyBundle ─�
 | `intervention` | version × t × arm | Over reached observations: AI delivered / viewed true / false / unknown (AI arm only), no AI viewing `not_applicable`, `intervention_failure` (true) and `intervention_failure_unknown`, failures by reason, leakage, PP compliant / noncompliant / indeterminate. |
 | `denominators` | one per measure | `summary`, `measure`, version, arm, t, question, `population`, `n`, `denominator`, `missing_unknown` |
 
+An unreached timepoint never makes a question `not_applicable`: a question the export marks hidden there (its deciding answer was never given) is counted missing by reach status, `case_abandoned` (case incomplete), `pending` (case open) or `timepoint_never_reached` (owner decision, S12c review; the export itself is unchanged).
+
 Unknown values are never treated as zero:
 - A blank duration, delivery, viewing or PP value is counted as unknown.
 - **Intervention failure is unknown when delivery is unknown** (owner decision, S12c review; changes the frozen S12a contract). An AI arm observation with a blank `ai_delivered` and no recorded failure counts in `intervention_failure_unknown`, never as "no failure". A recorded failure stays true. The exporter is unchanged: it writes `intervention_failure = false` for such rows; only the analysis reads them as unknown. The `intervention_failure` denominators row (both arms) carries them as `missing_unknown`.

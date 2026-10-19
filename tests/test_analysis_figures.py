@@ -267,12 +267,12 @@ def test_n_labels_count_answers_per_arm(walked) -> None:
         & (numeric["t_index"] == 0)
     ]["n"].sum()
     labels = confidence[confidence["arm"] == Arm.AI]["label"].tolist()
-    assert labels[0] == f"n={n}"
+    assert labels[0] == str(n)
     assert len(labels) == len(bundle.versions["v1"].timepoints_minutes)
 
     keys = _layer_frame(plot, Layer.KEYS)
     mine = keys[(keys["panel"] == "confidence") & (keys["version"] == "v1")]
-    assert sorted(mine["label"]) == ["▲", "●"]  # one count row per arm, keyed once
+    assert sorted(mine["label"]) == ["▲ n", "● n"]  # one count row per arm, keyed once
 
 
 class Layer(StrEnum):
@@ -283,6 +283,7 @@ class Layer(StrEnum):
     COUNTS = "counts"  # centred n per timepoint
     KEYS = "keys"  # right aligned arm glyphs
     ENDS = "ends"  # left aligned option labels
+    LEADERS = "leaders"  # segments from line ends to their option labels
 
 
 _TEXT_ALIGN = {Layer.COUNTS: "center", Layer.KEYS: "right", Layer.ENDS: "left"}
@@ -299,6 +300,8 @@ def _layer_frame(plot, kind: Layer) -> pd.DataFrame:
         if frame is None or frame.empty:
             continue
         if kind is Layer.LINES and name == "geom_line":
+            return frame
+        if kind is Layer.LEADERS and name == "geom_segment":
             return frame
         ha = layer.geom.aes_params.get("ha", "center")
         if name == "geom_text" and ha == _TEXT_ALIGN.get(kind):
@@ -364,10 +367,9 @@ def test_unknown_telemetry_is_excluded_never_zero(walked) -> None:
     ]
     assert not ((foreground["x"] - x).abs() < 10).any()  # no point for the gap
 
-    excluded = _labelled(plot, "● excl 1")
-    keys = set(zip(excluded["version"], excluded["measure"], excluded["arm"], strict=True))
-    assert ("v2", "foreground (s)", Arm.AI.value) in keys
-    assert ("v2", "active (s)", Arm.AI.value) in keys
+    strips = _facets(plot)
+    assert "v2 · foreground (s) excl: AI t60 1" in strips
+    assert "v2 · active (s) excl: AI t60 1" in strips
     assert "missing 1" in plot.labels.caption
 
 
@@ -470,11 +472,11 @@ def test_text_is_legible_in_print(walked, stem: str) -> None:
     plot = build_figure(stem, bundle, summaries)
 
     texts = [layer for layer in plot.layers if "label" in layer.mapping]
-    assert texts
     for layer in texts:
         assert layer.geom.aes_params["size"] >= MIN_TEXT_POINTS
         assert "color" not in layer.mapping
     assert plot.theme.getp(("plot_caption", "size")) >= MIN_TEXT_POINTS
+    assert plot.theme.getp(("strip_text", "size")) >= MIN_TEXT_POINTS  # e.g. "excl: AI t60 1"
 
 
 @pytest.mark.parametrize("stem", STEMS)
@@ -699,17 +701,204 @@ def test_provenance_is_one_tile_grid_per_version(walked) -> None:
     assert "n=3" in set(_labelled(plot, "n=3")["label"])
 
 
-def test_provenance_caption_states_the_hidden_first_precedence(walked) -> None:
+def test_provenance_caption_limits_hidden_to_reached_timepoints(walked) -> None:
     bundle, summaries = walked
     plot = build_figure("figure_03_response_provenance", bundle, summaries)
-    assert "evaluated first" in _caption(plot)
+    assert "reached timepoints only" in " ".join(_caption(plot).split())
 
 
-def test_attention_exclusion_labels_of_adjacent_timepoints_never_share_a_row(walked) -> None:
+def test_attention_exclusions_of_every_timepoint_share_one_strip(walked) -> None:
     bundle, summaries = walked
     plot = build_figure("figure_04_attention", bundle, summaries)
 
-    v1 = _labelled(plot, "● excl 1")
-    v1 = v1[(v1["version"] == "v1") & (v1["measure"] == "wall clock elapsed (s)")]
-    assert len(v1) == 2 and v1["y"].nunique() == 2
+    assert "v1 · wall clock elapsed (s) excl: AI t0 1, t60 1" in _facets(plot)
     assert "horizontal ticks: median" in _caption(plot)
+
+
+# ---------------------------------------------------------------------------
+# Print review fixes (greyscale renders of the walked bundle)
+# ---------------------------------------------------------------------------
+
+#: Horizontal clearance (pt) between texts sharing a row, e.g. "2" and "1".
+MIN_ROW_GAP_POINTS = 4
+#: Clearance (pt) of panel texts from the panel border.
+MIN_BORDER_POINTS = 1
+POINTS_PER_INCH = 72
+GLYPHS = ("●", "▲")
+
+
+@dataclasses.dataclass(frozen=True)
+class DrawnText:
+    text: str
+    #: Extent in points: x0, y0, x1, y1 (y up).
+    box: tuple[float, float, float, float]
+
+
+def _drawn_panels(plot) -> list[tuple[tuple[float, float, float, float], list[DrawnText]]]:
+    """Each panel's extent and its in-panel texts as drawn (points)."""
+    import matplotlib.pyplot as plt
+
+    figure = plot.draw()
+    figure.canvas.draw()
+    renderer = figure.canvas.get_renderer()
+    scale = POINTS_PER_INCH / figure.dpi
+
+    def points(extent) -> tuple[float, float, float, float]:
+        return tuple(v * scale for v in extent.extents)
+
+    panels = [
+        (
+            points(ax.get_window_extent(renderer)),
+            [DrawnText(t.get_text(), points(t.get_window_extent(renderer))) for t in ax.texts],
+        )
+        for ax in figure.axes
+    ]
+    plt.close(figure)
+    return panels
+
+
+def _same_row(a: DrawnText, b: DrawnText) -> bool:
+    """Vertical overlap over half the shorter text: one text row."""
+    overlap = min(a.box[3], b.box[3]) - max(a.box[1], b.box[1])
+    return overlap > min(a.box[3] - a.box[1], b.box[3] - b.box[1]) / 2
+
+
+def _x_gap(a: DrawnText, b: DrawnText) -> float:
+    return max(a.box[0], b.box[0]) - min(a.box[2], b.box[2])
+
+
+def test_divergence_texts_never_touch_and_stay_inside_their_panel(walked) -> None:
+    """Count rows: glyph key clear of the counts, counts ≥ 4 pt apart (no
+    "n=3 2" read as "n=32"), end labels clear of the t180 count, nothing on
+    the panel border."""
+    bundle, summaries = walked
+    plot = build_figure("figure_01_divergence", bundle, summaries)
+
+    problems = []
+    for panel, texts in _drawn_panels(plot):
+        texts = [t for t in texts if t.text != NOT_IN_VERSION]
+        for t in texts:
+            inside = (
+                t.box[0] >= panel[0] + MIN_BORDER_POINTS
+                and t.box[1] >= panel[1] + MIN_BORDER_POINTS
+                and t.box[2] <= panel[2] - MIN_BORDER_POINTS
+                and t.box[3] <= panel[3] - MIN_BORDER_POINTS
+            )
+            if not inside:
+                problems.append(f"{t.text!r} on the border")
+        for a, b in itertools.combinations(texts, 2):
+            if _same_row(a, b) and _x_gap(a, b) < MIN_ROW_GAP_POINTS:
+                problems.append(f"{a.text!r} {b.text!r} {_x_gap(a, b):.1f} pt apart")
+    assert not problems
+
+
+def test_divergence_count_rows_key_n_once_with_bare_counts(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_01_divergence", bundle, summaries)
+
+    counts = _layer_frame(plot, Layer.COUNTS)
+    assert counts["label"].str.fullmatch(r"\d+").all()
+    keys = _layer_frame(plot, Layer.KEYS)
+    assert set(keys["label"]) == {f"{glyph} n" for glyph in GLYPHS}
+
+
+def test_multi_option_end_labels_have_leaders_to_their_lines(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_01_divergence", bundle, summaries)
+
+    def mine(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame[(frame["version"] == "v2") & (frame["panel"] == "supporting_findings")]
+
+    ends = mine(_layer_frame(plot, Layer.ENDS))
+    leaders = mine(_layer_frame(plot, Layer.LEADERS))
+    lines = mine(_layer_frame(plot, Layer.MEDIANS))
+
+    # One leader per option series end, from its last point to its label.
+    series_ends = lines.groupby(lines["series"].str.rsplit(":", n=1).str[0])[["x", "y"]].last()
+    assert len(leaders) == len(series_ends)
+    starts = set(zip(leaders["x"].round(6), leaders["y"].round(6), strict=True))
+    assert starts == set(zip(series_ends["x"].round(6), series_ends["y"].round(6), strict=True))
+    label_ys = set(ends["y"].round(6))
+    assert set(leaders["yend"].round(6)) == label_ys
+    assert (leaders["xend"] < ends["x"].min()).all()
+
+
+def test_attention_exclusions_are_words_outside_the_data(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_04_attention", bundle, summaries)
+
+    for text in _plot_text(plot):
+        assert not any(glyph in text for glyph in GLYPHS), text
+    strips = _facets(plot)
+    assert "v2 · foreground (s) excl: AI t60 1" in strips
+    assert not any("excl" in s for s in strips if s.startswith("v2 · wall clock"))
+
+
+def test_attention_median_ticks_differ_by_arm_without_colour(walked) -> None:
+    from ehr_simulator.analysis.figures import MEDIAN_LINETYPES
+
+    bundle, summaries = walked
+    plot = build_figure("figure_04_attention", bundle, summaries)
+
+    ticks = next(layer for layer in plot.layers if type(layer.geom).__name__ == "geom_segment")
+    assert ticks.mapping["linetype"] == "arm"
+    assert any("linetype" in sc.aesthetics for sc in plot.scales)
+    assert len({str(style) for style in MEDIAN_LINETYPES.values()}) == len(Arm)
+    # Each tick spans its arm's dodged position only: the two never meet.
+    frame = ticks.geom.data
+    for _key, group in frame.groupby(["version", "measure", "x_mid"], observed=True):
+        ai, no_ai = (group[group["arm"] == arm] for arm in (Arm.AI.value, Arm.NO_AI.value))
+        if len(ai) and len(no_ai):
+            assert ai["xend"].max() < no_ai["x"].min()
+
+
+def test_intervention_legend_lists_only_drawn_outcomes(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_05_intervention", bundle, summaries)
+
+    scale = next(sc for sc in plot.scales if "fill" in sc.aesthetics)
+    drawn = set(plot.data.loc[plot.data["count"] > 0, "category"].astype(str))
+    assert set(scale.limits) == drawn
+    assert "not_applicable" not in scale.limits
+
+
+@pytest.mark.parametrize("palette", ["OUTCOME_COLORS", "FLOW_COLORS"])
+def test_category_fills_keep_one_dark_fill_apart(palette: str) -> None:
+    """Two dark fills read alike in greyscale (yes vs unknown, completed vs
+    unknown): every drawn category pair is ≥ 15 L* apart, at most one dark
+    fill among outcomes."""
+    from ehr_simulator.analysis import figures
+
+    colors = getattr(figures, palette)
+    lightness = sorted(_lightness(c) for c in colors.values())
+    assert min(b - a for a, b in itertools.pairwise(lightness)) >= MIN_LIGHTNESS_GAP
+    if palette == "OUTCOME_COLORS":
+        drawn = [c for k, c in colors.items() if k != "not_applicable"]
+        assert sum(_lightness(c) < figures.DARK_FILL_LIGHTNESS for c in drawn) <= 1
+
+
+def test_case_flow_codes_read_on_their_fill(walked) -> None:
+    from ehr_simulator.analysis.figures import FLOW_COLORS
+
+    bundle, summaries = walked
+    plot = build_figure("figure_02_case_flow", bundle, summaries)
+    hexes = {"white": WHITE, "black": BLACK}
+    layers = [
+        layer for layer in plot.layers if layer.mapping.get("label") in ("on_dark", "on_light")
+    ]
+    assert len(layers) == 2
+    for layer in layers:
+        column, color = layer.mapping["label"], hexes[layer.geom.aes_params["color"]]
+        labelled = plot.data[plot.data[column] != ""]
+        for segment in labelled["segment"].astype(str).unique():
+            assert _contrast(FLOW_COLORS[segment], color) >= MIN_TEXT_CONTRAST, segment
+
+
+def test_case_flow_replacement_note_clears_the_panel_border(walked) -> None:
+    bundle, summaries = walked
+    plot = build_figure("figure_02_case_flow", bundle, summaries)
+
+    for panel, texts in _drawn_panels(plot):
+        for t in texts:
+            if t.text.startswith("replacements:"):
+                assert t.box[0] >= panel[0] + 2 * MIN_BORDER_POINTS, t.text

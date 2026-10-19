@@ -128,12 +128,35 @@ def _frame(rows: list[dict], columns: list[str], ints: list[str]) -> pd.DataFram
     return frame.astype({c: "Int64" for c in ints})
 
 
+#: Why a timepoint was never reached, by its case's lifecycle state.
+UNREACHED_REASON = {
+    LifecycleState.INCOMPLETE: MissingReason.CASE_ABANDONED,
+    LifecycleState.ACTIVE: MissingReason.PENDING,
+    LifecycleState.PAUSED: MissingReason.PENDING,
+}
+
+
 def _observations(bundle: ValidatedStudyBundle) -> pd.DataFrame:
-    """Answers with their timepoint's ``timepoint_reached``."""
+    """Answers with their timepoint's ``timepoint_reached``.
+
+    Owner decision (S12c, option B): a question hidden at a timepoint never
+    reached is missing by reach status, not ``not_applicable``. Its deciding
+    answer was never given, so "does not apply" is unknown, e.g. the cause
+    question after an abandoned case is ``case_abandoned``. Reached
+    timepoints keep the exported branch evaluation.
+    """
     reached = bundle.timepoints[
-        ["clinician_id", "patient_id", "t_index", "timepoint_reached", "arm"]
+        ["clinician_id", "patient_id", "t_index", "timepoint_reached", "arm", "lifecycle_state"]
     ]
-    return bundle.answers.merge(reached, on=["clinician_id", "patient_id", "t_index"])
+    obs = bundle.answers.merge(reached, on=["clinician_id", "patient_id", "t_index"])
+
+    unknown = ~obs["timepoint_reached"] & (obs["response_status"] == ResponseStatus.NOT_APPLICABLE)
+    reasons = obs.loc[unknown, "lifecycle_state"].map(
+        lambda state: UNREACHED_REASON.get(state, MissingReason.TIMEPOINT_NEVER_REACHED).value
+    )
+    obs.loc[unknown, "response_status"] = ResponseStatus.MISSING.value
+    obs.loc[unknown, "missing_reason"] = reasons
+    return obs.drop(columns="lifecycle_state")
 
 
 # ---------------------------------------------------------------------------
