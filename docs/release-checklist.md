@@ -44,19 +44,20 @@ Work through this list before every tagged release. Steps marked **owner** are m
 - [ ] No cohort aggregate is published (owner decision 2026-10-13): fixture normalisation parameters stay fabricated (`tests/test_shared.py` pins them), and no table, figure or note carries real cohort statistics.
 - [x] Git history: commits before the S12c fixture change carry real Geneva cohort means/stds in `tests/fixtures/{geneva,mimic}/*normalisation_parameters.csv`, public on GitHub since session 3. **Accepted (owner, 2026-10-13):** these summary statistics already appear in previous publications; no history rewrite.
 - [x] Git history also carries other real-data facts later redacted from the working tree (S12c): four real Geneva case ids, cohort and test-split sizes, the outcome event count, the prediction range, the SHAP base value, imaging-data patient counts. **Accepted exposure (owner, 2026-10-13):** no history rewrite.
-- [ ] Working tree: no real-data value (ids, counts, prevalences, statistics, model outputs) in code, tests, docs or specs. Local paths and extraction timestamps are allowed.
+- [x] Working tree: no real-data value (ids, counts, prevalences, statistics, model outputs) in code, tests, docs or specs. Local paths and extraction timestamps are allowed. **Swept 2026-10-14 (current tree, sdist, wheel) and redacted; governance kept as is (owner, 2026-10-19).**
 - [ ] No Geneva sample is published. Only change this with explicit written sharing permission (decision 2026-10-13: none exists).
 - [ ] Demo screenshots and published figures come from synthetic data. Any figure from a real cohort has passed manual disclosure review (small cells).
-- [ ] The example Phase 2 questions and profile lists are labelled placeholders.
+- [ ] The example Phase 2 questions and profile lists are labelled placeholders. Replacing them with the real study instrument is the owner's next step (2026-10-19).
 
 ## 6. Scientific acceptance (owner, spec §11)
 
-- [ ] The figures are printed at one column width and in greyscale. Check categories, medians, units, n/denominators, missingness, one-arm strips and captions against the synthetic reference bundle.
-- [ ] A synthetic study is exported with `export-phase2`, and the notebook runs on the bundle alone, without the database.
-- [ ] A colleague with a fresh checkout reaches `synth_001` from the README quickstart.
+- [x] Analysis meanings confirmed (owner, 2026-10-19): activated measured cases as the cohort; reached timepoints as the answer/exposure denominator; unknown never zero or false; hidden never missing, and only at reached timepoints (an unreached conditional question is missing by reach status); rule answers kept distinct; withheld free text is answered (free text is not used currently); unknown AI delivery makes failure unknown; ITT arms; configuration versions never pooled.
+- [x] The figures are printed at one column width and in greyscale. Check categories, medians, units, n/denominators, missingness, one-arm strips and captions against the synthetic reference bundle. **Greyscale accepted (owner, 2026-10-19); v1 and v2 must not share a figure: one file per configuration version.**
+- [x] A synthetic study is exported with `export-phase2`, and the notebook runs on the bundle alone, without the database. **Verified 2026-10-14: tables byte-identical to the library, database, secret and keyfile unreadable.**
+- [ ] A colleague with a fresh checkout reaches `synth_001` from the README quickstart. Owner's next step (2026-10-19).
 - [ ] Descriptive-only claims are reviewed. No inferential statistic or estimand appears without an approved analysis plan.
-- [ ] Decide whether the release ships the provisional figure set or waits for the analysis plan's figures.
-- [ ] Figure height: at one column, panels shrink to fit 9.5 in but never below 0.75 in (figure 1 never shrinks). With the reference bundle, figure 1 (16.6 in) and figure 3 (10.6 in) exceed a page; decide on a per-version split or a two-column layout for the real study's question count.
+- [ ] Decide whether the release ships the provisional figure set or waits for the analysis plan's figures. **Owner (2026-10-19):** the five figures are confirmatory / supplementary, not the main message; main-message figures come from the approved analysis plan in a follow-on session.
+- [x] Figure height: resolved by the S12c re-layout and one file per configuration version; all figures fit 9.5 in with the reference bundle. Figure 1 crowds beyond about 4 options and figure 3 grows with the question count: re-check with the real instrument.
 
 ## 7. Version and tag (owner, after all of the above and the preprint submission)
 

@@ -37,14 +37,18 @@ from tests.support.analysis_bundle import (
 
 pytestmark = pytest.mark.xdist_group("analysis_report")
 
-FAST_STEM = "figure_02_case_flow"
+FAST_STEM = "supplementary_02_case_flow"
+WALKED_VERSIONS = ("v1", "v2")
 
 
 @pytest.fixture(scope="module")
-def published(tmp_path_factory) -> Path:
-    out = tmp_path_factory.mktemp("report") / "phase2"
-    publish_report(FIXTURES / WALKED, out)
-    return out
+def publication(tmp_path_factory) -> report.ReportInventory:
+    return publish_report(FIXTURES / WALKED, tmp_path_factory.mktemp("report") / "phase2")
+
+
+@pytest.fixture(scope="module")
+def published(publication: report.ReportInventory) -> Path:
+    return publication.out_dir
 
 
 @pytest.fixture
@@ -70,12 +74,31 @@ def _leftovers(parent: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 
 
-def test_publish_writes_the_full_inventory(published: Path) -> None:
+def _figure_files(versions: tuple[str, ...]) -> list[str]:
+    """``<stem>_<version>``: registry order, then version order."""
+    return [f"{stem}_{version}" for stem in FIGURES for version in versions]
+
+
+def test_publish_writes_the_full_inventory(publication: report.ReportInventory) -> None:
+    published = publication.out_dir
     files = set(_tree(published))
-    figures = {f"figures/{stem}.{fmt}" for stem in FIGURES for fmt in ("svg", "pdf")}
+    names = _figure_files(WALKED_VERSIONS)
+    figures = {f"figures/{name}.{fmt}" for name in names for fmt in ("svg", "pdf")}
     tables = {f"tables/{name}.csv" for name in TABLES}
     assert files == figures | tables | {"denominators.csv", MANIFEST_NAME}
+    assert list(publication.figures) == names
     assert _leftovers(published.parent) == []
+
+
+def test_every_figure_file_shows_one_version(published: Path) -> None:
+    """v1 and v2 never share a figure: each SVG names its own version only."""
+    for entry in _manifest(published)["figures"]:
+        version = entry["config_version"]
+        svg = (published / f"figures/{entry['stem']}_{version}.svg").read_text()
+        assert f"Config version {version}" in svg
+        for other in WALKED_VERSIONS:
+            if other != version:
+                assert f"Config version {other}" not in svg
 
 
 def test_manifest_records_inputs_versions_and_settings(published: Path) -> None:
@@ -98,7 +121,14 @@ def test_manifest_records_inputs_versions_and_settings(published: Path) -> None:
     assert manifest["settings"]["descriptive_only"] is True
     assert manifest["settings"]["valid_telemetry_status"] == "complete"
     assert manifest["settings"]["rule_answers"] == "plotted_distinguished"
-    assert [f["stem"] for f in manifest["figures"]] == list(FIGURES)
+    assert manifest["figure_role"] == "supplementary"
+    assert [(f["stem"], f["config_version"]) for f in manifest["figures"]] == [
+        (stem, version) for stem in FIGURES for version in WALKED_VERSIONS
+    ]
+    for entry in manifest["figures"]:
+        name = f"{entry['stem']}_{entry['config_version']}"
+        assert entry["files"] == [f"figures/{name}.svg", f"figures/{name}.pdf"]
+        assert entry["title"] == FIGURES[entry["stem"]].title
     assert "generated_at" not in json.dumps(manifest)  # equal inputs, equal manifest
 
 
@@ -153,7 +183,12 @@ def test_empty_bundle_publishes_a_no_data_report(tmp_path: Path) -> None:
 
     manifest = _manifest(out)
     assert manifest["cohort"] == "no_activated_cases"
-    assert [f["stem"] for f in manifest["figures"]] == list(FIGURES)
+    # One placeholder file per registered version (the empty bundle has v1 only).
+    assert [(f["stem"], f["config_version"]) for f in manifest["figures"]] == [
+        (stem, "v1") for stem in FIGURES
+    ]
+    for name in _figure_files(("v1",)):
+        assert "No activated cases" in (out / "figures" / f"{name}.svg").read_text()
     options = pd.read_csv(out / "tables" / "option_proportions.csv", keep_default_na=False)
     assert set(options["proportion"]) <= {""}  # no fabricated rate
     flow = pd.read_csv(out / "tables" / "case_flow.csv")
@@ -241,6 +276,35 @@ def test_replace_fills_an_empty_directory(tmp_path: Path, fast_registry: None) -
     assert _leftovers(tmp_path) == []
 
 
+@pytest.mark.parametrize("schema", ["phase2_analysis_v1", ANALYSIS_SCHEMA_VERSION])
+def test_replace_accepts_a_previous_report_of_a_known_schema(
+    tmp_path: Path, fast_registry: None, schema: str
+) -> None:
+    """A v1 report (one figure file for every version) is replaced by a v2 one."""
+    out = tmp_path / "report"
+    out.mkdir()
+    (out / MANIFEST_NAME).write_text(json.dumps({"analysis_schema_version": schema}))
+    (out / "figures").mkdir()
+    (out / "figures" / "figure_02_case_flow.svg").write_text("<svg/>")
+
+    publish_report(FIXTURES / WALKED, out, overwrite=Overwrite.REPLACE)
+
+    assert _manifest(out)["analysis_schema_version"] == "phase2_analysis_v2"
+    assert not (out / "figures" / "figure_02_case_flow.svg").exists()
+    assert _leftovers(tmp_path) == []
+
+
+def test_replace_refuses_a_report_of_an_unknown_schema(tmp_path: Path, fast_registry: None) -> None:
+    out = tmp_path / "report"
+    out.mkdir()
+    (out / MANIFEST_NAME).write_text(json.dumps({"analysis_schema_version": "phase2_analysis_v9"}))
+
+    with pytest.raises(AnalysisError, match="not an analysis report"):
+        publish_report(FIXTURES / WALKED, out, overwrite=Overwrite.REPLACE)
+
+    assert set(_tree(out)) == {MANIFEST_NAME}
+
+
 def test_replace_refuses_a_directory_that_is_not_a_report(
     tmp_path: Path, fast_registry: None
 ) -> None:
@@ -278,7 +342,7 @@ def test_refuse_never_replaces_an_output_created_while_rendering(
     save = report.save_figure
 
     def concurrent_publish(*args, **kwargs):
-        out.mkdir()
+        out.mkdir(exist_ok=True)  # called once per config version
         (out / "keep.txt").write_text("other run")
         return save(*args, **kwargs)
 

@@ -23,7 +23,7 @@ Every number is a count, proportion, median, minimum or maximum. **There is no h
 
 A difference between arms in a figure is a description of this sample. It is not an estimate of the effect of AI assistance. Inferential analyses need a separately approved statistical analysis plan. A plan figure is added as one more builder in `figures.FIGURES` over the existing summaries.
 
-The five figures are a **provisional** reference set. The stable contract is the bundle reader, the summary tables and `denominators.csv`.
+The five figures (`supplementary_01_divergence` … `supplementary_05_intervention`) are **supplementary**, confirmatory descriptive figures. The main-message figures will come from the approved analysis plan in a follow-on session (owner decision 2026-10-19). `analysis_manifest.json` records this as `"figure_role": "supplementary"`. Stems and layouts stay provisional. The stable contract is the bundle reader, the summary tables and `denominators.csv`.
 
 ## Populations and denominators
 
@@ -40,7 +40,7 @@ The five figures are a **provisional** reference set. The stable contract is the
 
 ## No pooling across versions
 
-Every table and figure strip is keyed by `config_version` (with its `config_hash` in `analysis_manifest.json`). The same `question_id` in two versions is not assumed to be the same question, so a question absent from a version shows `not in this version`. Pooling versions needs a semantic mapping that this release does not provide.
+Every table is keyed by `config_version` (with its `config_hash` in `analysis_manifest.json`). Versions never share a figure: each figure is drawn once per version, as `figures/<stem>_<config_version>.svg|.pdf`, and its subtitle names the version (`Config version v1`). The same `question_id` in two versions is not assumed to be the same question; a question absent from a version is absent from that version's figure. Pooling versions needs a semantic mapping that this release does not provide.
 
 ## Measures and their source columns
 
@@ -60,13 +60,13 @@ Every table and figure strip is keyed by `config_version` (with its `config_hash
 
 | Figure | How to read it |
 | --- | --- |
-| 1 Divergence | One panel per question and version. A two option question plots the share answering the option named in the strip (the other is its complement). A question with more options draws one line per option, labelled right of its end; a thin grey leader joins each series end to its label, which may sit spread from the end value. Lines: AI solid, No AI dashed; rule answers dotted (AI) or dash-dot (No AI), with hollow markers. A line never crosses a timepoint where its series has no value. Below the values, one row per arm (`● n` AI, `▲ n` No AI) gives the answers under each timepoint. |
+| 1 Divergence | One panel per question of the version. A two option question plots the share answering the option named in the strip (the other is its complement). A question with more options draws one line per option, labelled right of its end; a thin grey leader joins each series end to its label, which may sit spread from the end value. Lines: AI solid, No AI dashed; rule answers dotted (AI) or dash-dot (No AI), with hollow markers. A line never crosses a timepoint where its series has no value. Below the values, one row per arm (`● n` AI, `▲ n` No AI) gives the answers under each timepoint. |
 | 2 Case flow | Planned schedule items beside activated cases by lifecycle state. Codes (`P C I O ?`) name the segments. |
 | 3 Response provenance | One tile per question × arm × timepoint. The codes carry the meaning, e.g. `AC2 MU1` = two clinician answers, one reached but unanswered. The fill only shows the share missing (none / some / all). Hidden (`NA`) applies to reached timepoints only; at an unreached timepoint every question, conditional ones included, is missing as pending, abandoned or never reached. |
 | 4 Attention | Points are durations, horizontal ticks medians (AI solid left of the timepoint, No AI dashed right). A strip line such as `excl: AI t60 1` counts reached observations without a valid duration, per arm and timepoint. |
 | 5 Intervention | Delivered and viewed for the AI arm, AI leakage for the no AI arm (yes = leakage occurred), failure and PP for both. Yes / no / unknown (`?`) per timepoint. |
 
-All five fit one column (3.5 in) and one page on the reference bundle. Arms differ by colour and shape, lines by type, and category fills by lightness, so a greyscale print stays readable.
+Every figure file fits one column (3.5 in) and one page on the reference bundle. A version without activated cases gets a `No activated cases` placeholder for each figure; a bundle without any case therefore gives one placeholder file per figure and registered version. Arms differ by colour and shape, lines by type, and category fills by lightness, so a greyscale print stays readable.
 
 ## What the figures do not show
 
@@ -78,7 +78,7 @@ All five fit one column (3.5 in) and one page on the reference bundle. Arms diff
 
 - **No identifiers in figures or files.** Figures, file names and plotted text never carry clinician or patient ids, names, free text or event payloads. Plotted text comes only from constants, config versions, question ids, option labels and counts.
 - **Pseudonymised ids.** The bundle's `clinician_id` values are keyed pseudonyms. The bundle still keeps randomisation seeds, so treat a real bundle as re-identifiable (README, *Known residual risk*).
-- **Single-patient figure.** `figures.case_divergence_figure(bundle, patient_id)` is called only on explicit selection and labels cases `case 1…`. It is never written by `publish_report`.
+- **Single-patient figure.** `figures.case_divergence_figure(bundle, patient_id, version)` is called only on explicit selection, shows that version's cases only and labels them `case 1…`. It is never written by `publish_report`.
 - **Disclosure review.** Small cells can identify. Review any figure or table from a real cohort before you share or publish it. The synthetic reference bundle (`tests/fixtures/analysis_bundle/`) needs no review.
 
 ## Reproducing a report

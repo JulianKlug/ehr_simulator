@@ -7,14 +7,14 @@ which this package may not import)::
     refusals (output exists / overlaps the bundle) ─► nothing read or written
     load_phase2_bundle + build_summaries            ─► AnalysisError: nothing written
     <parent>/.<name>.staging-<id>/
-        figures/<stem>.svg|.pdf      every FIGURES entry
+        figures/<stem>_<version>.svg|.pdf   every FIGURES entry × config version
         tables/<table>.csv           the six S12a summary tables
         denominators.csv
         analysis_manifest.json       last: inputs, versions, settings, inventory
     rename to <parent>/<name>/        (REPLACE: the old one aside first)
 
 REPLACE only ever removes an empty directory or a previous report (its
-manifest names this schema), never a symbolic link; both modes re-check the
+manifest names a known analysis schema), never a symbolic link; both modes re-check the
 output right before the rename, so a report published meanwhile by another
 run is never replaced. Any failure (interrupts included) removes the staging
 directory and puts a replaced report back. The input bundle is only read.
@@ -51,7 +51,15 @@ from ehr_simulator.analysis.summary import (
 
 __all__ = ["ANALYSIS_SCHEMA_VERSION", "Overwrite", "ReportInventory", "publish_report"]
 
-ANALYSIS_SCHEMA_VERSION = "phase2_analysis_v1"
+#: v2: one figure file per config version, ``figure_role``, per figure ``config_version``.
+ANALYSIS_SCHEMA_VERSION = "phase2_analysis_v2"
+#: A previous report of either schema may be replaced.
+KNOWN_ANALYSIS_SCHEMA_VERSIONS = frozenset({"phase2_analysis_v1", ANALYSIS_SCHEMA_VERSION})
+#: The registry figures are supplementary descriptive figures; the main
+#: message figures follow the approved analysis plan (owner, 2026-10-19).
+FIGURE_ROLE = "supplementary"
+#: One figure file per registry stem × config version, e.g. ``supplementary_02_case_flow_v1``.
+FIGURE_FILE = "{stem}_{version}"
 MANIFEST_NAME = "analysis_manifest.json"
 DENOMINATORS_NAME = "denominators.csv"
 FIGURES_DIR = "figures"
@@ -79,7 +87,7 @@ class Overwrite(StrEnum):
 @dataclass(frozen=True)
 class ReportInventory:
     out_dir: Path
-    figures: tuple[str, ...]  # stems, registry order
+    figures: tuple[str, ...]  # file stems ``<stem>_<version>``, registry × version order
     tables: tuple[str, ...]  # file names relative to out_dir
 
 
@@ -156,7 +164,7 @@ def _is_report(directory: Path) -> bool:
         return False
     return (
         isinstance(manifest, dict)
-        and manifest.get("analysis_schema_version") == ANALYSIS_SCHEMA_VERSION
+        and manifest.get("analysis_schema_version") in KNOWN_ANALYSIS_SCHEMA_VERSIONS
     )
 
 
@@ -172,16 +180,21 @@ def _write_staging(
     figures_dir.mkdir()
     figure_entries = []
     for stem, spec in FIGURES.items():
-        written = save_figure(build_figure(stem, bundle, summaries), figures_dir / stem)
-        for path in written:
-            _fsync_file(path)
-        figure_entries.append(
-            {
-                "stem": stem,
-                "title": spec.title,
-                "files": [f"{FIGURES_DIR}/{p.name}" for p in written],
-            }
-        )
+        # One file per version: versions never share a figure.
+        for version in bundle.versions:
+            name = FIGURE_FILE.format(stem=stem, version=version)
+            plot = build_figure(stem, bundle, summaries, version)
+            written = save_figure(plot, figures_dir / name)
+            for path in written:
+                _fsync_file(path)
+            figure_entries.append(
+                {
+                    "stem": stem,
+                    "title": spec.title,
+                    "config_version": version,
+                    "files": [f"{FIGURES_DIR}/{p.name}" for p in written],
+                }
+            )
     _fsync_dir(figures_dir)
 
     (staging / TABLES_DIR).mkdir()
@@ -199,7 +212,10 @@ def _write_staging(
     manifest = _manifest(bundle, summaries, figure_entries, table_entries)
     _write_synced(staging / MANIFEST_NAME, manifest)
     _fsync_dir(staging)
-    return tuple(FIGURES), tuple(named)
+    files = tuple(
+        FIGURE_FILE.format(stem=f["stem"], version=f["config_version"]) for f in figure_entries
+    )
+    return files, tuple(named)
 
 
 def render_csv(frame: pd.DataFrame) -> bytes:
@@ -237,9 +253,10 @@ def _manifest(
             for v in bundle.versions.values()
         ],
         "cohort": summaries.cohort.value,
+        "figure_role": FIGURE_ROLE,
         "settings": {
             "descriptive_only": True,
-            "pooling": "none; every table and figure is split by config_version",
+            "pooling": "none; tables are keyed by config_version, one figure file per version",
             "grouping": "ITT arm of the realised activation",
             "valid_telemetry_status": VALID_TELEMETRY.value,
             "populations": {

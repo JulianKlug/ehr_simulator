@@ -24,7 +24,7 @@ The first public release. Version and tag are set by the owner after release acc
 - `export-phase2`: linked, pseudonymised research bundle with a manifest of digests and row counts. `export-answers`: single-configuration CSV.
 
 ### Analysis
-- `ehr_simulator.analysis`: read-only bundle validator, descriptive per-version summary tables, five provisional reference figures (SVG and PDF), atomic report publication.
+- `ehr_simulator.analysis`: read-only bundle validator, descriptive per-version summary tables, five supplementary descriptive figures (SVG and PDF, one file per config version), atomic report publication.
 - `notebooks/phase2_analysis.ipynb`: reproduces every figure and table from the bundle alone (opt-in `analysis` dependency group).
 
 ### Release hygiene

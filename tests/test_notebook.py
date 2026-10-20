@@ -69,10 +69,12 @@ def test_notebook_regenerates_the_report_from_the_bundle_alone(
     notebook = _execute(first, monkeypatch)
     _execute(second, monkeypatch)
 
-    # 19: every expected figure file.
+    # 19: every expected figure file, one per config version.
+    bundle = load_phase2_bundle(FIXTURES / WALKED)
     for stem in FIGURES:
-        for fmt in FIGURE_FORMATS:
-            assert (first / "figures" / f"{stem}.{fmt}").stat().st_size > 0
+        for version in bundle.versions:
+            for fmt in FIGURE_FORMATS:
+                assert (first / "figures" / f"{stem}_{version}.{fmt}").stat().st_size > 0
 
     # 20: the notebook's tables are the library's, independently recomputed.
     summaries = build_summaries(load_phase2_bundle(FIXTURES / WALKED))
@@ -86,7 +88,6 @@ def test_notebook_regenerates_the_report_from_the_bundle_alone(
     assert manifests[0] == manifests[1]
 
     # Privacy: no clinician / patient id in any printed or displayed output.
-    bundle = load_phase2_bundle(FIXTURES / WALKED)
     text = _output_text(notebook)
     for identifier in set(bundle.cases["clinician_id"]) | set(bundle.cases["patient_id"]):
         assert identifier not in text

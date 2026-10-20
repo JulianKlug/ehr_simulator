@@ -1,32 +1,37 @@
-"""S12b provisional descriptive figures over a validated bundle (pure).
+"""S12b supplementary descriptive figures over a validated bundle (pure).
 
 Spec: ``specs/session-12-phase25-release.md`` §5. Builders read only the
 S12a summaries and the bundle's pinned snapshots; they return an unsaved
 ``ggplot``. :func:`save_figure` is the only writer::
 
-    FIGURES[stem].build(bundle, summaries) ─► ggplot ─► save_figure ─► .svg + .pdf
+    build_figure(stem, bundle, summaries, version)
+        └─ one version's slice ─► FIGURES[stem].build ─► ggplot ─► save_figure ─► .svg + .pdf
 
-The stems are provisional (not a public contract). Every figure:
+Supplementary (owner decision 2026-10-19): the main-message figures come
+from the approved analysis plan. The stems are provisional (not a public
+contract). Every figure:
 
-* splits by ``config_version`` (never pooled) and ITT ``arm``;
+* shows one ``config_version`` only (versions never share a figure) and
+  splits by ITT ``arm``;
 * states population, denominator and its descriptive nature in the caption;
 * encodes the arm by colour **and** shape (greyscale safe: lines also
   differ by type per arm × answer source; rule answers have hollow markers);
 * writes only constants, config versions, question ids, option labels and
   counts. Never a clinician / patient id, free text or event payload.
 
-An empty cohort renders a labelled ``No activated cases`` placeholder.
+A version without activated cases renders a labelled ``No activated
+cases`` placeholder.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import textwrap
 from collections.abc import Callable, Mapping
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import StrEnum
-from itertools import product
 from pathlib import Path
 from types import MappingProxyType
 
@@ -39,7 +44,6 @@ from plotnine import (
     coord_flip,
     element_blank,
     element_text,
-    facet_grid,
     facet_wrap,
     geom_blank,
     geom_col,
@@ -59,7 +63,6 @@ from plotnine import (
     scale_shape_manual,
     scale_x_continuous,
     scale_y_continuous,
-    scale_y_discrete,
     theme,
     theme_bw,
     theme_void,
@@ -88,6 +91,7 @@ from ehr_simulator.analysis.summary import (
     AnalysisSummaries,
     Cohort,
     attention_observations,
+    cohort_status,
     numeric_observations,
 )
 from ehr_simulator.answer_codec import PROBABILITY_MAX, PROBABILITY_MIN
@@ -114,7 +118,7 @@ HEADER_INCHES = 1.6
 #: A figure fits one page: panels shrink, but never below the minimum.
 MAX_FIGURE_INCHES = 9.5
 MIN_PANEL_INCHES = 0.75
-#: Figure 1 / case figure rows: many short panels, versions side by side.
+#: Figure 1 / case figure rows: many short panels, one column.
 ANSWER_PANEL_INCHES = 1.0
 STRIP_WRAP = 44
 FACET_WRAP = 34
@@ -182,6 +186,8 @@ _METADATA = {"svg": {"Date": None}, "pdf": {"CreationDate": None}}
 
 @dataclass(frozen=True)
 class FigureSpec:
+    """``build`` takes one config version's slice (see :func:`build_figure`)."""
+
     stem: str
     title: str
     build: Callable[[ValidatedStudyBundle, AnalysisSummaries], ggplot]
@@ -209,22 +215,68 @@ def _with_facet(
     frame: pd.DataFrame,
     row: str,
     rows: list[str],
-    col: str,
-    cols: list[str],
-    notes: Mapping[tuple[str, str], str] = MappingProxyType({}),
+    notes: Mapping[str, str] = MappingProxyType({}),
 ) -> pd.DataFrame:
-    """One single strip per ``col · row`` (e.g. ``v1 · confidence``), row-major
-    so each column holds one ``col`` value (a config version or arm). A
-    ``(row, col)`` note adds a strip line, e.g. ``excl: AI t60 1``."""
-    labels = {(r, c): _wrap(f"{c} · {r}", FACET_WRAP) for r in rows for c in cols}
+    """One strip per ``row`` (e.g. ``confidence``), in *rows* order. A row
+    note adds a strip line, e.g. ``excl: AI t60 1``."""
+    labels = {r: _wrap(r, FACET_WRAP) for r in rows}
     for key, note in notes.items():
         labels[key] += "\n" + _wrap(note, FACET_WRAP)
     out = frame.copy()
-    keys = zip(out[row], out[col], strict=True)
     out["facet"] = pd.Categorical(
-        [labels[k] for k in keys], categories=list(labels.values()), ordered=True
+        [labels[k] for k in out[row]], categories=list(labels.values()), ordered=True
     )
     return out
+
+
+#: Subtitle naming the figure's one config version.
+VERSION_SUBTITLE = "Config version {version}"
+
+
+def _labs(title: str, caption: str, version: str, **axes: str) -> labs:
+    """Title, caption and the version subtitle: every figure names its version."""
+    subtitle = _wrap(VERSION_SUBTITLE.format(version=version), CAPTION_WRAP)
+    return labs(title=title, subtitle=subtitle, caption=caption, **axes)
+
+
+def _only_version(bundle: ValidatedStudyBundle) -> ConfigVersion:
+    """The one version of a :func:`build_figure` slice."""
+    if len(bundle.versions) != 1:
+        raise AnalysisError("a figure shows exactly one config version")
+    return next(iter(bundle.versions.values()))
+
+
+#: Summary tables sliced to the figure's version (all keyed by ``config_version``).
+VERSION_TABLES = (
+    "case_flow",
+    "response_provenance",
+    "option_proportions",
+    "numeric_responses",
+    "attention",
+    "intervention",
+)
+
+
+def _version_slice(
+    bundle: ValidatedStudyBundle, summaries: AnalysisSummaries, version: str
+) -> tuple[ValidatedStudyBundle, AnalysisSummaries]:
+    """The bundle and summaries of *version* only; its cohort is its own
+    (a version without activated cases renders the placeholder)."""
+    if version not in bundle.versions:
+        raise AnalysisError(f"config version {version!r} is not in this bundle")
+
+    def mine(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame[frame["config_version"] == version]
+
+    view = dataclasses.replace(
+        bundle,
+        versions=MappingProxyType({version: bundle.versions[version]}),
+        cases=mine(bundle.cases),
+        timepoints=mine(bundle.timepoints),
+        answers=mine(bundle.answers),
+    )
+    tables = {name: mine(getattr(summaries, name)) for name in VERSION_TABLES}
+    return view, dataclasses.replace(summaries, cohort=cohort_status(view), **tables)
 
 
 def _minutes(version: ConfigVersion, t_index: int) -> float:
@@ -255,10 +307,12 @@ def _ordered(frame: pd.DataFrame, column: str, order: list[str]) -> pd.DataFrame
     return out
 
 
-#: Caption anchored at the figure's left edge (not the panels'), so it never clips.
+#: Caption anchored at the figure's left edge (not the panels'), so it never
+#: clips; the version subtitle sits between title and caption sizes.
 _CAPTION_THEME = {
     "plot_caption": element_text(size=TEXT_SIZE, ha="left", linespacing=CAPTION_LINESPACING),
     "plot_caption_position": "plot",
+    "plot_subtitle": element_text(size=7),
 }
 
 
@@ -292,12 +346,12 @@ def _arm_scales() -> list:
     ]
 
 
-def _placeholder(title: str, caption: str, text: str = NO_CASES) -> ggplot:
+def _placeholder(title: str, caption: str, version: str, text: str = NO_CASES) -> ggplot:
     note = pd.DataFrame({"x": [0.0], "y": [0.0], "label": [text]})
     return (
         ggplot(note, aes("x", "y", label="label"))
         + geom_text(size=BASE_FONT_SIZE, color=NOTE_COLOR)
-        + labs(title=title, caption=caption)
+        + _labs(title, caption, version)
         + theme_void(base_size=BASE_FONT_SIZE)
         + theme(figure_size=(ONE_COLUMN_INCHES, 2.0), **_CAPTION_THEME)
     )
@@ -313,7 +367,6 @@ _POINT_COLUMNS = ["version", "panel", "x", "y", "arm", "source", "fill", "series
 _TEXT_COLUMNS = ["version", "panel", "x", "y", "arm", "label"]
 _NOTE_COLUMNS = ["version", "panel", "x", "y", "label"]
 _LEADER_COLUMNS = ["version", "panel", "x", "y", "xend", "yend"]
-NOT_IN_VERSION = "not in this version"
 #: A two option question plots only its first option's share, named in the strip.
 BINARY_OPTIONS = 2
 SHARE_PANEL = "{question}: {option}"
@@ -348,12 +401,10 @@ MAX_INTEGER_TICKS = 6
 
 @dataclass
 class _AnswerLayers:
-    """Rows of a ``panel ~ version`` grid; a question is never pooled across
-    versions, it only shares a facet row with the same question id."""
+    """Rows of one config version's panels, one column."""
 
-    versions: list[str]
+    version: str
     panels: list[str] = field(default_factory=list)
-    present: set[tuple[str, str]] = field(default_factory=set)
     y_range: dict[str, tuple[float, float]] = field(default_factory=dict)
     points: list[dict] = field(default_factory=list)
     lines: list[dict] = field(default_factory=list)
@@ -370,11 +421,10 @@ class _AnswerLayers:
     #: Likert value ranges: integer ticks only.
     integer_ranges: set[tuple[float, float]] = field(default_factory=set)
 
-    def add_panel(self, version: ConfigVersion, panel: str, question) -> None:
+    def add_panel(self, panel: str, question) -> None:
         if panel not in self.panels:
             self.panels.append(panel)
         self.y_range.setdefault(panel, _y_range(question))
-        self.present.add((version.version, panel))
         if question.response_type == ResponseType.LIKERT:
             self.integer_ranges.add(_y_range(question))
 
@@ -397,17 +447,11 @@ class _AnswerLayers:
         low, high = self.y_range[panel]
         return (low + high) / 2
 
-    def frames(self, x_mid: Mapping[str, float]) -> dict[str, pd.DataFrame]:
-        cells = [(v, p) for p in self.panels for v in self.versions]
-        absent = [
-            {"version": v, "panel": p, "x": x_mid[v], "y": self.y_mid(p), "label": NOT_IN_VERSION}
-            for v, p in cells
-            if (v, p) not in self.present
-        ]
-        # Every cell spans its question's full scale, answered or not.
+    def frames(self, x_mid: float) -> dict[str, pd.DataFrame]:
+        # Every panel spans its question's full scale, answered or not.
         blank = [
-            {"version": v, "panel": p, "x": x_mid[v], "y": y}
-            for v, p in cells
+            {"version": self.version, "panel": p, "x": x_mid, "y": y}
+            for p in self.panels
             for y in self.y_range[p]
         ]
         tables = {
@@ -416,14 +460,12 @@ class _AnswerLayers:
             "lines": (self.lines, _POINT_COLUMNS),
             "texts": (self.texts, _TEXT_COLUMNS),
             "keys": (self.keys, _TEXT_COLUMNS),
-            "notes": (self.notes + absent, _NOTE_COLUMNS),
+            "notes": (self.notes, _NOTE_COLUMNS),
             "ends": (self.ends, _NOTE_COLUMNS),
             "blank": (blank + self.floors, ["version", "panel", "x", "y"]),
         }
         return {
-            name: _with_facet(
-                pd.DataFrame(rows, columns=columns), "panel", self.panels, "version", self.versions
-            )
+            name: _with_facet(pd.DataFrame(rows, columns=columns), "panel", self.panels)
             for name, (rows, columns) in tables.items()
         }
 
@@ -504,16 +546,16 @@ def _count_texts(layers, panel, version, question, counts: Mapping[tuple[int, st
 
 
 def _divergence_layers(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> _AnswerLayers:
-    layers = _AnswerLayers(versions=list(bundle.versions))
+    version = _only_version(bundle)
+    layers = _AnswerLayers(version=version.version)
     observations = numeric_observations(bundle)
     numeric, options = s.numeric_responses, s.option_proportions
 
-    for version in bundle.versions.values():
-        for question in version.questions.questions:
-            if question.response_type in NUMERIC_TYPES:
-                _numeric_divergence(layers, version, question, numeric, observations)
-            elif question.response_type in OPTION_TYPES:
-                _option_divergence(layers, version, question, options)
+    for question in version.questions.questions:
+        if question.response_type in NUMERIC_TYPES:
+            _numeric_divergence(layers, version, question, numeric, observations)
+        elif question.response_type in OPTION_TYPES:
+            _option_divergence(layers, version, question, options)
     return layers
 
 
@@ -527,7 +569,7 @@ def _rows(frame: pd.DataFrame, version: ConfigVersion, question) -> pd.DataFrame
 def _numeric_divergence(layers, version, question, numeric, observations) -> None:
     """Individual values (small) and the median per arm × source (joined)."""
     panel = _panel(question.question_id)
-    layers.add_panel(version, panel, question)
+    layers.add_panel(panel, question)
     dodge = _dodge(version)
 
     for r in _rows(observations, version, question).itertuples(index=False):
@@ -568,7 +610,7 @@ def _option_divergence(layers, version, question, options) -> None:
     panel = _panel(question.question_id)
     if binary:
         panel = SHARE_PANEL.format(question=question.question_id, option=shown[0])
-    layers.add_panel(version, panel, question)
+    layers.add_panel(panel, question)
 
     ends = []
     for order, option in enumerate(shown):
@@ -630,11 +672,10 @@ def _end_labels(layers, panel, version, question, ends: list[dict]) -> None:
 def _answer_plot(
     layers: _AnswerLayers, bundle: ValidatedStudyBundle, title: str, caption: str
 ) -> ggplot:
-    x_mid = {v: _x_mid(bundle.versions[v]) for v in layers.versions}
-    f = layers.frames(x_mid)
+    f = layers.frames(_x_mid(bundle.versions[layers.version]))
     p = (
         ggplot()
-        + facet_wrap("facet", ncol=len(layers.versions), scales="free_y", drop=False)
+        + facet_wrap("facet", ncol=1, scales="free_y", drop=False)
         + geom_blank(data=f["blank"], mapping=aes("x", "y"))
         + _arm_scales()
         + scale_linetype_manual(
@@ -644,7 +685,7 @@ def _answer_plot(
             limits=list(ANSWER_LINETYPES),
             guide=guide_legend(nrow=LINE_LEGEND_ROWS),
         )
-        + labs(title=title, caption=caption, x=TIME_LABEL, y=ANSWER_LABEL)
+        + _labs(title, caption, layers.version, x=TIME_LABEL, y=ANSWER_LABEL)
         + scale_y_continuous(breaks=layers.breaks)
         # Answer panels carry two count rows: they never shrink (may exceed a page).
         + _theme(len(layers.panels), ANSWER_PANEL_INCHES, ANSWER_PANEL_INCHES)
@@ -726,9 +767,11 @@ ANSWER_LABEL = "Answer (scale value or share of answers)"
 
 
 def divergence_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggplot:
+    version = _only_version(bundle).version
     caption = _caption(
-        f"Population: {POPULATION_APPLICABLE}; columns: config version; colour /",
-        "shape: ITT arm. Likert / probability: answers (small), median (large).",
+        f"Population: {POPULATION_APPLICABLE}; colour / shape: ITT arm.",
+        "One panel per question of this config version. Likert / probability:",
+        "answers (small), median (large).",
         "Options: share of answers naming the option after the colon in the strip",
         "(two option questions) or at the line's right end (independent for",
         "multi-select), joined to it by thin grey leaders. Lines break where a series",
@@ -737,11 +780,10 @@ def divergence_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggp
         DESCRIPTIVE_NOTE,
     )
     if s.cohort is Cohort.NO_ACTIVATED_CASES:
-        return _placeholder(DIVERGENCE_TITLE, caption)
+        return _placeholder(DIVERGENCE_TITLE, caption, version)
     plot = _answer_plot(_divergence_layers(bundle, s), bundle, DIVERGENCE_TITLE, caption)
     # Ticks at the timepoints only: the right margin holds labels, not time.
-    minutes = sorted({m for v in bundle.versions.values() for m in v.timepoints_minutes})
-    return plot + scale_x_continuous(breaks=minutes, expand=DIVERGENCE_X_EXPAND)
+    return plot + scale_x_continuous(breaks=_all_minutes(bundle), expand=DIVERGENCE_X_EXPAND)
 
 
 # ---------------------------------------------------------------------------
@@ -751,41 +793,41 @@ def divergence_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggp
 CASE_DIVERGENCE_TITLE = "Case-level answers"
 
 
-def case_divergence_figure(bundle: ValidatedStudyBundle, patient_id: str) -> ggplot:
-    """Every activated case of *patient_id*, one line per case (``case 1…``).
+def case_divergence_figure(bundle: ValidatedStudyBundle, patient_id: str, version: str) -> ggplot:
+    """Every activated case of *patient_id* pinned to *version*, one line per
+    case (``case 1…``). Versions never share a figure: a patient seen under
+    two versions gets one figure per version.
 
     Research inspection only: never batch generated, never named after the
     patient or a clinician. Option questions plot a 0 / 1 selection
     indicator per option (no invented ordinal scale).
 
     Raises:
-        AnalysisError: the patient has no activated case in the bundle.
+        AnalysisError: the patient has no activated case of *version*.
     """
-    cases = bundle.cases[bundle.cases["patient_id"] == patient_id]
+    cases = bundle.cases[
+        (bundle.cases["patient_id"] == patient_id) & (bundle.cases["config_version"] == version)
+    ]
     if cases.empty:
-        raise AnalysisError("the selected patient has no activated case in this bundle")
+        raise AnalysisError("the selected patient has no activated case in this config version")
 
-    version_order = list(bundle.versions)
-    cases = cases.assign(_v=cases["config_version"].map(version_order.index)).sort_values(
-        ["_v", "arm", "clinician_id"]
-    )
+    cases = cases.sort_values(["arm", "clinician_id"])
     ordinal = {cid: f"case {i}" for i, cid in enumerate(cases["clinician_id"], start=1)}
     arm_of = dict(zip(cases["clinician_id"], cases["arm"], strict=True))
     answers = bundle.answers[
-        (bundle.answers["patient_id"] == patient_id) & bundle.answers["value_exported"]
+        (bundle.answers["patient_id"] == patient_id)
+        & (bundle.answers["config_version"] == version)
+        & bundle.answers["value_exported"]
     ]
 
-    case_versions = list(dict.fromkeys(cases["config_version"]))
-    layers = _AnswerLayers(versions=case_versions)
-    for version_id in case_versions:
-        version = bundle.versions[version_id]
-        mine = answers[answers["config_version"] == version_id]
-        for question in version.questions.questions:
-            if question.response_type in NUMERIC_TYPES:
-                _case_panel(layers, version, question, None, mine, ordinal, arm_of)
-            elif question.response_type in OPTION_TYPES:
-                for option in question.options:
-                    _case_panel(layers, version, question, option, mine, ordinal, arm_of)
+    pinned = bundle.versions[version]
+    layers = _AnswerLayers(version=version)
+    for question in pinned.questions.questions:
+        if question.response_type in NUMERIC_TYPES:
+            _case_panel(layers, pinned, question, None, answers, ordinal, arm_of)
+        elif question.response_type in OPTION_TYPES:
+            for option in question.options:
+                _case_panel(layers, pinned, question, option, answers, ordinal, arm_of)
 
     caption = _caption(
         f"{len(cases)} {POPULATION_CASES} of one selected patient; individual answers,",
@@ -800,7 +842,7 @@ def case_divergence_figure(bundle: ValidatedStudyBundle, patient_id: str) -> ggp
 
 def _case_panel(layers, version, question, option, answers, ordinal, arm_of) -> None:
     panel = _panel(question.question_id, option)
-    layers.add_panel(version, panel, question)
+    layers.add_panel(panel, question)
     rows = answers[answers["question_id"] == question.question_id].sort_values("t_index")
 
     answered_arms: set[str] = set()
@@ -839,7 +881,7 @@ FLOW_BARS = {
     "planned": ["planned_items"],
     "activated": ["completed", "incomplete", "open", "state_unknown"],
 }
-#: Six bars per version panel: taller than the default panel.
+#: Six bars in the one panel: taller than the default panel.
 FLOW_PANEL_SCALE = 1.4
 #: L* 88 / 30 / 71 / 46 / 9: every pair ≥ 15 apart, distinct in greyscale.
 FLOW_COLORS = {
@@ -854,6 +896,7 @@ FLOW_NOTE_OFFSET = 0.03
 
 
 def case_flow_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggplot:
+    version = _only_version(bundle).version
     caption = _caption(
         f"Population: {POPULATION_CASES} (realised ITT arm, activation version) beside",
         "planned schedule items (planned arm, generation version). Planned items are",
@@ -862,7 +905,7 @@ def case_flow_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
         DESCRIPTIVE_NOTE,
     )
     if s.cohort is Cohort.NO_ACTIVATED_CASES:
-        return _placeholder(CASE_FLOW_TITLE, caption)
+        return _placeholder(CASE_FLOW_TITLE, caption, version)
 
     bars: list[str] = []
     segments, totals, notes = [], [], []
@@ -877,11 +920,9 @@ def case_flow_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
         bars += [f"{ARM_LABELS[arm]} · {bar}" for bar in (*FLOW_BARS, "replacements")]
 
     order = list(reversed(bars))  # coord_flip draws the first category lowest
-    versions = list(bundle.versions)
-    seg = _ordered(_ordered(pd.DataFrame(segments), "bar", order), "version", versions)
-    seg = _ordered(seg, "segment", list(FLOW_SEGMENTS))
-    tot = _ordered(_ordered(pd.DataFrame(totals), "bar", order), "version", versions)
-    note = _ordered(_ordered(pd.DataFrame(notes), "bar", order), "version", versions)
+    seg = _ordered(_ordered(pd.DataFrame(segments), "bar", order), "segment", list(FLOW_SEGMENTS))
+    tot = _ordered(pd.DataFrame(totals), "bar", order)
+    note = _ordered(pd.DataFrame(notes), "bar", order)
     note = note.assign(count=FLOW_NOTE_OFFSET * max(tot["count"].max(), 1))
     # Code text by fill lightness: white on dark, black on light (no colour-mapped text).
     dark = seg["segment"].astype(str).map(lambda name: _is_dark(FLOW_COLORS[name]))
@@ -918,16 +959,16 @@ def case_flow_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
             inherit_aes=False,
         )
         + coord_flip()
-        + facet_wrap("version", ncol=1, drop=False)
         + scale_fill_manual(
             values=FLOW_COLORS,
             labels={k: v[1] for k, v in FLOW_SEGMENTS.items()},
-            limits=list(FLOW_SEGMENTS),
+            # The legend lists only the segments this version draws.
+            limits=[k for k in FLOW_SEGMENTS if (seg.loc[seg["segment"] == k, "count"] > 0).any()],
             name="Cases",
         )
         + scale_y_continuous(expand=FLOW_EXPAND)
-        + labs(title=CASE_FLOW_TITLE, caption=caption, x="", y=COUNT_LABEL)
-        + _theme(len(versions) * FLOW_PANEL_SCALE)
+        + _labs(CASE_FLOW_TITLE, caption, version, x="", y=COUNT_LABEL)
+        + _theme(FLOW_PANEL_SCALE)
         + theme(legend_position="bottom", legend_direction="vertical")
     )
 
@@ -980,19 +1021,19 @@ def _stacked_plot(
     categories: Mapping[str, tuple[str, str]],
     colors: Mapping[str, str],
     rows: list[str],
-    cols: list[str],
     t_labels: list[str],
     legend: str,
     title: str,
     caption: str,
+    version: str,
 ) -> ggplot:
-    """Bars per timepoint, stacked by category, one strip per ``row · col``."""
+    """Bars per timepoint, stacked by category, one strip per ``row``."""
     # Only drawn categories: the legend never lists one that is absent.
     present = [c for c in categories if (data.loc[data["category"] == c, "count"] > 0).any()]
     data = data[data["category"].isin(present)]
-    data = _ordered(_with_facet(data, "row", rows, "col", cols), "t", t_labels)
+    data = _ordered(_with_facet(data, "row", rows), "t", t_labels)
     data = _ordered(data, "category", present)
-    totals = _ordered(_with_facet(totals, "row", rows, "col", cols), "t", t_labels)
+    totals = _ordered(_with_facet(totals, "row", rows), "t", t_labels)
     # Two text layers over every segment (stacking stays aligned), each
     # labelling only the segments its colour reads on.
     dark = data["category"].astype(str).map(lambda c: _is_dark(colors[c]))
@@ -1022,7 +1063,7 @@ def _stacked_plot(
             color=NOTE_COLOR,
             inherit_aes=False,
         )
-        + facet_wrap("facet", ncol=len(cols), drop=False)
+        + facet_wrap("facet", ncol=1, drop=False)
         + scale_y_continuous(expand=COUNT_EXPAND)
         + scale_fill_manual(
             values=dict(colors),
@@ -1030,7 +1071,7 @@ def _stacked_plot(
             limits=present,
             name=legend,
         )
-        + labs(title=title, caption=caption, x=TIME_LABEL, y=COUNT_LABEL)
+        + _labs(title, caption, version, x=TIME_LABEL, y=COUNT_LABEL)
         + _theme(len(rows))
         + theme(
             legend_position="bottom",
@@ -1056,10 +1097,9 @@ def _is_dark(color: str) -> bool:
     return _lightness(color) < DARK_FILL_LIGHTNESS
 
 
-def _segment(row: str, col: str, t: str, category: str, count: int, code: str) -> dict:
+def _segment(row: str, t: str, category: str, count: int, code: str) -> dict:
     return {
         "row": row,
-        "col": col,
         "t": t,
         "category": category,
         "count": count,
@@ -1118,17 +1158,15 @@ TILE_COLORS = {
     TileState.SOME_MISSING.value: "#CCCCCC",
     TileState.ALL_MISSING.value: "#999999",
 }
-#: Row key separator: a question id is a row of its version only (never pooled).
-ROW_SEPARATOR = "\x1f"
 OBSERVATIONS_ROW = "n (case timepoints)"
 #: Tile row height: one 6 pt line per category code plus padding.
 TILE_LINE_INCHES = 0.085
 TILE_PAD_INCHES = 0.03
 TILE_HEADER_INCHES = 1.8
-TILE_STRIP_INCHES = 0.2
 
 
 def response_provenance_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggplot:
+    version = _only_version(bundle)
     data = s.response_provenance
     present = [category for category in PROVENANCE_CATEGORIES if int(data[category].sum())]
     key = "; ".join(PROVENANCE_CATEGORIES[c][1] for c in present)
@@ -1141,19 +1179,16 @@ def response_provenance_figure(bundle: ValidatedStudyBundle, s: AnalysisSummarie
         DESCRIPTIVE_NOTE,
     )
     if s.cohort is Cohort.NO_ACTIVATED_CASES:
-        return _placeholder(PROVENANCE_TITLE, caption)
+        return _placeholder(PROVENANCE_TITLE, caption, version.version)
 
     columns = [f"{ARM_LABELS[arm]}\n{t}" for arm in ARMS for t in _all_t_labels(bundle)]
-    tiles, counts, rows = [], [], []
+    tiles, counts, rows = [], [], [OBSERVATIONS_ROW]
     for r in data.to_dict("records"):
-        version = r["config_version"]
-        t = _t_label(_minutes(bundle.versions[version], r["t_index"]))
+        t = _t_label(_minutes(version, r["t_index"]))
         column = f"{ARM_LABELS[r['arm']]}\n{t}"
-        row = f"{version}{ROW_SEPARATOR}{r['question_id']}"
-        header = f"{version}{ROW_SEPARATOR}{OBSERVATIONS_ROW}"
-        for key_row in (header, row):
-            if key_row not in rows:
-                rows.append(key_row)
+        row = r["question_id"]
+        if row not in rows:
+            rows.append(row)
 
         codes = [
             f"{code}{int(r[category])}"
@@ -1162,7 +1197,6 @@ def response_provenance_figure(bundle: ValidatedStudyBundle, s: AnalysisSummarie
         ]
         tiles.append(
             {
-                "version": version,
                 "row": row,
                 "column": column,
                 "state": _tile_state(sum(int(r[c]) for c in MISSING_COLUMNS), r["observations"]),
@@ -1170,19 +1204,17 @@ def response_provenance_figure(bundle: ValidatedStudyBundle, s: AnalysisSummarie
             }
         )
         counts.append(
-            {"version": version, "row": header, "column": column, "label": f"n={r['observations']}"}
+            {"row": OBSERVATIONS_ROW, "column": column, "label": f"n={r['observations']}"}
         )
 
     order = list(reversed(rows))  # discrete y draws the first category lowest
-    versions = list(bundle.versions)
-    tile_frame = _ordered(_ordered(pd.DataFrame(tiles), "row", order), "version", versions)
-    tile_frame = _ordered(tile_frame, "column", columns)
-    count_frame = _ordered(_ordered(pd.DataFrame(counts), "row", order), "version", versions)
+    tile_frame = _ordered(_ordered(pd.DataFrame(tiles), "row", order), "column", columns)
+    count_frame = _ordered(pd.DataFrame(counts), "row", order)
     count_frame = _ordered(count_frame.drop_duplicates(), "column", columns)
 
     lines = max(1, int(tile_frame["label"].str.count("\n").max()) + 1)
     row_inches = TILE_LINE_INCHES * lines + TILE_PAD_INCHES
-    height = TILE_HEADER_INCHES + row_inches * len(rows) + TILE_STRIP_INCHES * len(versions)
+    height = TILE_HEADER_INCHES + row_inches * len(rows)
 
     return (
         ggplot(tile_frame, aes("column", "row"))
@@ -1194,14 +1226,13 @@ def response_provenance_figure(bundle: ValidatedStudyBundle, s: AnalysisSummarie
             size=TEXT_SIZE,
             color=NOTE_COLOR,
         )
-        + facet_grid("version ~ .", scales="free_y", space="free_y")
-        + scale_y_discrete(labels=_row_labels)
         + scale_fill_manual(
             values=TILE_COLORS, labels=TILE_STATES, limits=list(TILE_STATES), name="Tile"
         )
-        + labs(
-            title=PROVENANCE_TITLE,
-            caption=caption,
+        + _labs(
+            PROVENANCE_TITLE,
+            caption,
+            version.version,
             x="ITT arm · minutes from first contact",
             y="",
         )
@@ -1216,11 +1247,6 @@ def _tile_state(missing: int, observations: int) -> str:
     if missing < observations:
         return TileState.SOME_MISSING.value
     return TileState.ALL_MISSING.value
-
-
-def _row_labels(keys) -> list[str]:
-    """``"v1\\x1fconfidence"`` → ``"confidence"`` (the strip names the version)."""
-    return [k.split(ROW_SEPARATOR, 1)[1] for k in keys]
 
 
 # ---------------------------------------------------------------------------
@@ -1249,6 +1275,7 @@ MEASURE_LABELS = {
 
 
 def attention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggplot:
+    version = _only_version(bundle)
     excluded = _excluded_by_status(s.attention)
     caption = _caption(
         f"Population: {POPULATION_REACHED}. Points: individual durations; horizontal",
@@ -1261,17 +1288,15 @@ def attention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
         DESCRIPTIVE_NOTE,
     )
     if s.cohort is Cohort.NO_ACTIVATED_CASES:
-        return _placeholder(ATTENTION_TITLE, caption)
+        return _placeholder(ATTENTION_TITLE, caption, version.version)
 
     obs = attention_observations(bundle)
     measures = [MEASURE_LABELS[m] for m in ATTENTION_MEASURES]
-    versions = list(bundle.versions)
     top = {m: _top_seconds(obs[obs["measure"] == m]["seconds"]) for m in ATTENTION_MEASURES}
 
     points, medians, notes = [], [], []
-    excluded_by_panel: dict[tuple[str, str], dict[str, list[str]]] = {}
+    excluded_by_panel: dict[str, dict[str, list[str]]] = {}
     for r in obs.itertuples(index=False):
-        version = bundle.versions[r.config_version]
         x = _minutes(version, r.t_index) + _dodge(version)[r.arm]
         points.append(
             {
@@ -1283,7 +1308,6 @@ def attention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
             }
         )
     for r in s.attention.to_dict("records"):
-        version = bundle.versions[r["config_version"]]
         t = _minutes(version, r["t_index"])
         side = math.copysign(_span(version), ARM_DODGE[r["arm"]])
         tick = sorted((t + MEDIAN_INNER * side, t + MEDIAN_OUTER * side))
@@ -1298,17 +1322,17 @@ def attention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
                 medians.append({**base, "x": tick[0], "xend": tick[1], "y": y, "x_mid": t})
             missing = r["reached"] - r[f"{measure}_n"]
             if missing:
-                panel = excluded_by_panel.setdefault((MEASURE_LABELS[measure], base["version"]), {})
+                panel = excluded_by_panel.setdefault(MEASURE_LABELS[measure], {})
                 panel.setdefault(r["arm"], []).append(f"t{_t_label(t)} {missing}")
 
-    for version, measure in product(versions, ATTENTION_MEASURES):
-        if ((obs["config_version"] == version) & (obs["measure"] == measure)).any():
+    for measure in ATTENTION_MEASURES:
+        if (obs["measure"] == measure).any():
             continue
         notes.append(
             {
-                "version": version,
+                "version": version.version,
                 "measure": MEASURE_LABELS[measure],
-                "x": _x_mid(bundle.versions[version]),
+                "x": _x_mid(version),
                 "y": top[measure] / 2,
                 "label": NO_DURATIONS,
             }
@@ -1325,21 +1349,14 @@ def attention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggpl
     }
 
     def frame(rows: list[dict], columns: list[str]) -> pd.DataFrame:
-        return _with_facet(
-            pd.DataFrame(rows, columns=columns),
-            "measure",
-            measures,
-            "version",
-            versions,
-            strip_notes,
-        )
+        return _with_facet(pd.DataFrame(rows, columns=columns), "measure", measures, strip_notes)
 
     base_cols = ["version", "measure", "x", "y", "arm"]
     p = (
         ggplot()
-        + facet_wrap("facet", ncol=len(versions), scales="free_y", drop=False)
+        + facet_wrap("facet", ncol=1, scales="free_y", drop=False)
         + _arm_scales()
-        + labs(title=ATTENTION_TITLE, caption=caption, x=TIME_LABEL, y="Seconds")
+        + _labs(ATTENTION_TITLE, caption, version.version, x=TIME_LABEL, y="Seconds")
         + scale_x_continuous(breaks=_all_minutes(bundle), expand=LABEL_X_EXPAND)
         + scale_y_continuous(expand=ATTENTION_Y_EXPAND)
         + _theme(len(measures))
@@ -1476,6 +1493,7 @@ def _outcomes(measure: InterventionMeasure, r: Mapping) -> dict[Outcome, int]:
 
 
 def intervention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> ggplot:
+    version = _only_version(bundle)
     by_reason = {r: int(s.intervention[f"failure_{r.value}"].sum()) for r in FailureReason}
     failures = ", ".join(
         f"{reason.value.replace('_', ' ')} {count}" for reason, count in by_reason.items() if count
@@ -1490,7 +1508,7 @@ def intervention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> g
         DESCRIPTIVE_NOTE,
     )
     if s.cohort is Cohort.NO_ACTIVATED_CASES:
-        return _placeholder(INTERVENTION_TITLE, caption)
+        return _placeholder(INTERVENTION_TITLE, caption, version.version)
 
     rows = [
         f"{label} ({ARM_LABELS[arm]} arm)"
@@ -1499,7 +1517,6 @@ def intervention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> g
     ]
     data, totals = [], []
     for r in s.intervention.to_dict("records"):
-        version = bundle.versions[r["config_version"]]
         t = _t_label(_minutes(version, r["t_index"]))
         for measure, label in INTERVENTION_MEASURES.items():
             if r["arm"] not in MEASURE_ARMS[measure]:
@@ -1507,13 +1524,10 @@ def intervention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> g
             row = f"{label} ({ARM_LABELS[r['arm']]} arm)"
             counts = _outcomes(measure, r)
             for outcome, (code, _legend) in OUTCOMES.items():
-                data.append(
-                    _segment(row, r["config_version"], t, outcome, counts.get(outcome, 0), code)
-                )
+                data.append(_segment(row, t, outcome, counts.get(outcome, 0), code))
             totals.append(
                 {
                     "row": row,
-                    "col": r["config_version"],
                     "t": t,
                     "count": int(r["reached"]),
                     "label": f"n={r['reached']}",
@@ -1526,11 +1540,11 @@ def intervention_figure(bundle: ValidatedStudyBundle, s: AnalysisSummaries) -> g
         categories=OUTCOMES,
         colors=OUTCOME_COLORS,
         rows=rows,
-        cols=list(bundle.versions),
         t_labels=_all_t_labels(bundle),
         legend="Outcome",
         title=INTERVENTION_TITLE,
         caption=caption,
+        version=version.version,
     )
 
 
@@ -1542,20 +1556,29 @@ FIGURES: Mapping[str, FigureSpec] = MappingProxyType(
     {
         spec.stem: spec
         for spec in (
-            FigureSpec("figure_01_divergence", DIVERGENCE_TITLE, divergence_figure),
-            FigureSpec("figure_02_case_flow", CASE_FLOW_TITLE, case_flow_figure),
+            FigureSpec("supplementary_01_divergence", DIVERGENCE_TITLE, divergence_figure),
+            FigureSpec("supplementary_02_case_flow", CASE_FLOW_TITLE, case_flow_figure),
             FigureSpec(
-                "figure_03_response_provenance", PROVENANCE_TITLE, response_provenance_figure
+                "supplementary_03_response_provenance",
+                PROVENANCE_TITLE,
+                response_provenance_figure,
             ),
-            FigureSpec("figure_04_attention", ATTENTION_TITLE, attention_figure),
-            FigureSpec("figure_05_intervention", INTERVENTION_TITLE, intervention_figure),
+            FigureSpec("supplementary_04_attention", ATTENTION_TITLE, attention_figure),
+            FigureSpec("supplementary_05_intervention", INTERVENTION_TITLE, intervention_figure),
         )
     }
 )
 
 
-def build_figure(stem: str, bundle: ValidatedStudyBundle, summaries: AnalysisSummaries) -> ggplot:
-    return FIGURES[stem].build(bundle, summaries)
+def build_figure(
+    stem: str, bundle: ValidatedStudyBundle, summaries: AnalysisSummaries, version: str
+) -> ggplot:
+    """Figure *stem* of config *version* alone: versions never share a figure.
+
+    Raises:
+        AnalysisError: *version* is not in the bundle.
+    """
+    return FIGURES[stem].build(*_version_slice(bundle, summaries, version))
 
 
 def save_figure(plot: ggplot, stem_path: Path) -> tuple[Path, ...]:
@@ -1568,7 +1591,8 @@ def save_figure(plot: ggplot, stem_path: Path) -> tuple[Path, ...]:
         figure = deepcopy(plot).draw()  # draw() mutates the plot; keep the caller's
         try:
             for fmt in FIGURE_FORMATS:
-                path = stem_path.with_suffix(f".{fmt}")
+                # Appended, not with_suffix: a dotted version ("_v1.2") is no suffix.
+                path = stem_path.with_name(f"{stem_path.name}.{fmt}")
                 figure.savefig(path, format=fmt, metadata=_METADATA[fmt])
                 written.append(path)
         finally:

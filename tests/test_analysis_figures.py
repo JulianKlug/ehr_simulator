@@ -1,10 +1,11 @@
-"""S12b provisional figures over the committed S11n bundles.
+"""S12b supplementary figures over the committed S11n bundles.
 
 Spec ``specs/session-12-phase25-release.md`` §5, §10 tests 9–13, 16, 17.
 Walked bundle (``tests/fixtures/analysis_bundle/build_analysis_bundle.py``):
 v1 X two completed cases, Z one incomplete AI case + its open AI
 replacement; v2 Y an AI case without AI display (t1 without telemetry) and
 a leaking no AI case. v2 adds a multi-select and a probability question.
+Every figure shows one config version (owner decision 2026-10-19).
 """
 
 from __future__ import annotations
@@ -24,7 +25,6 @@ from ehr_simulator.analysis.figures import (
     HOLLOW,
     NO_CASES,
     NO_DURATIONS,
-    NOT_IN_VERSION,
     ONE_COLUMN_INCHES,
     SINGLE_ARM,
     build_figure,
@@ -38,12 +38,15 @@ from tests.support.analysis_bundle import EMPTY, FIXTURES, WALKED
 pytestmark = pytest.mark.xdist_group("analysis_figures")
 
 STEMS = [
-    "figure_01_divergence",
-    "figure_02_case_flow",
-    "figure_03_response_provenance",
-    "figure_04_attention",
-    "figure_05_intervention",
+    "supplementary_01_divergence",
+    "supplementary_02_case_flow",
+    "supplementary_03_response_provenance",
+    "supplementary_04_attention",
+    "supplementary_05_intervention",
 ]
+DIVERGENCE, CASE_FLOW, PROVENANCE, ATTENTION, INTERVENTION = STEMS
+VERSIONS = ["v1", "v2"]
+FIGURES_BY_VERSION = list(itertools.product(STEMS, VERSIONS))
 CASE_STEM = "case_inspection"
 SELECTED_PATIENT = "synth_003"
 FREE_TEXT_SENTINEL = "FREE-TEXT-SENTINEL never plotted"
@@ -63,15 +66,26 @@ def empty() -> tuple[ValidatedStudyBundle, AnalysisSummaries]:
     return bundle, build_summaries(bundle)
 
 
+def _name(stem: str, version: str) -> str:
+    return f"{stem}_{version}"
+
+
 @pytest.fixture(scope="module")
 def rendered(walked, tmp_path_factory) -> Path:
-    """Every registry figure + the case figure, saved once."""
+    """Every registry figure + the case figure, once per version."""
     bundle, summaries = walked
     out = tmp_path_factory.mktemp("figures")
-    for stem in FIGURES:
-        save_figure(build_figure(stem, bundle, summaries), out / stem)
-    save_figure(case_divergence_figure(bundle, SELECTED_PATIENT), out / CASE_STEM)
+    for stem, version in FIGURES_BY_VERSION:
+        save_figure(build_figure(stem, bundle, summaries, version), out / _name(stem, version))
+    for version in VERSIONS:
+        plot = case_divergence_figure(bundle, SELECTED_PATIENT, version)
+        save_figure(plot, out / _name(CASE_STEM, version))
     return out
+
+
+def _build(walked, stem: str, version: str):
+    bundle, summaries = walked
+    return build_figure(stem, bundle, summaries, version)
 
 
 def _frames(plot) -> list[pd.DataFrame]:
@@ -109,49 +123,103 @@ def _svg_text(path: Path) -> str:
 # ---------------------------------------------------------------------------
 
 
-def test_registry_is_the_provisional_set_in_order() -> None:
+def test_registry_is_the_supplementary_set_in_order() -> None:
     assert list(FIGURES) == STEMS
 
 
 def test_every_figure_writes_svg_and_pdf_with_marks(rendered: Path) -> None:
-    for stem in [*STEMS, CASE_STEM]:
-        svg, pdf = rendered / f"{stem}.svg", rendered / f"{stem}.pdf"
+    names = [_name(stem, v) for stem, v in FIGURES_BY_VERSION]
+    for name in [*names, *(_name(CASE_STEM, v) for v in VERSIONS)]:
+        svg, pdf = rendered / f"{name}.svg", rendered / f"{name}.pdf"
         assert pdf.read_bytes().startswith(b"%PDF")
         content = svg.read_text()
         assert content.lstrip().startswith("<?xml")
-        assert content.count("<path") > 20, stem  # bars, lines, markers beyond the frame
+        assert content.count("<path") > 20, name  # bars, lines, markers beyond the frame
 
 
 @pytest.mark.parametrize(
-    ("stem", "legend"),
+    ("stem", "version", "legend"),
     [
-        ("figure_01_divergence", ["AI", "No AI", "clinician", "rule"]),
-        ("figure_02_case_flow", ["C completed", "I incomplete", "P planned schedule items"]),
-        ("figure_03_response_provenance", ["AC answered (clinician)", "AR answered (rule)"]),
-        ("figure_04_attention", ["AI", "No AI", "Seconds"]),
-        ("figure_05_intervention", ["Y yes / compliant", "? unknown / indeterminate"]),
+        (DIVERGENCE, "v1", ["AI", "No AI", "clinician", "rule"]),
+        (CASE_FLOW, "v1", ["C completed", "I incomplete", "P planned schedule items"]),
+        (PROVENANCE, "v2", ["AC answered (clinician)", "AR answered (rule)"]),
+        (ATTENTION, "v1", ["AI", "No AI", "Seconds"]),
+        (INTERVENTION, "v2", ["Y yes / compliant", "? unknown / indeterminate"]),
     ],
 )
 def test_svg_keeps_legend_title_and_caption_as_text(
-    rendered: Path, stem: str, legend: list[str]
+    rendered: Path, stem: str, version: str, legend: list[str]
 ) -> None:
-    text = _svg_text(rendered / f"{stem}.svg")
+    text = _svg_text(rendered / f"{_name(stem, version)}.svg")
     for item in [*legend, "Descriptive only"]:
         assert item in text, item
 
 
 def test_saving_twice_is_byte_stable(walked, tmp_path: Path) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_02_case_flow", bundle, summaries)
+    plot = _build(walked, CASE_FLOW, "v1")
     first = save_figure(plot, tmp_path / "a")
     second = save_figure(plot, tmp_path / "b")
     for a, b in zip(first, second, strict=True):
         assert a.read_bytes() == b.read_bytes()
 
 
+def test_save_keeps_a_dotted_version_in_the_file_name(walked, tmp_path: Path) -> None:
+    """A config version may contain dots (``v1.2``): never read as a suffix."""
+    written = save_figure(_build(walked, CASE_FLOW, "v1"), tmp_path / "supplementary_v1.2")
+    assert [p.name for p in written] == ["supplementary_v1.2.svg", "supplementary_v1.2.pdf"]
+
+
+# ---------------------------------------------------------------------------
+# One config version per figure (owner decision 2026-10-19)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("stem", "version"), FIGURES_BY_VERSION)
+def test_figure_names_its_version_and_never_another(
+    rendered: Path, stem: str, version: str
+) -> None:
+    text = _svg_text(rendered / f"{_name(stem, version)}.svg")
+    assert f"Config version {version}" in text
+    for other in VERSIONS:
+        if other != version:
+            assert other not in text, other
+
+
+@pytest.mark.parametrize(("stem", "version"), FIGURES_BY_VERSION)
+def test_figure_data_and_strips_hold_one_version(walked, stem: str, version: str) -> None:
+    plot = _build(walked, stem, version)
+    for frame in _frames(plot):
+        if "version" in frame.columns:
+            assert set(frame["version"].astype(str)) <= {version}
+        if "config_version" in frame.columns:
+            assert set(frame["config_version"].astype(str)) <= {version}
+    for strip in _facets(plot) if _has_facets(plot) else []:
+        assert not any(v in strip.split(" ") for v in VERSIONS), strip
+
+
+def test_unknown_version_is_refused(walked) -> None:
+    with pytest.raises(AnalysisError, match="not in this bundle"):
+        _build(walked, CASE_FLOW, "v9")
+
+
+def test_case_figure_shows_only_its_version(walked, rendered: Path) -> None:
+    bundle, _summaries = walked
+    for version in VERSIONS:
+        plot = case_divergence_figure(bundle, SELECTED_PATIENT, version)
+        frames = [f for f in _frames(plot) if "version" in f.columns]
+        assert {v for f in frames for v in f["version"].astype(str)} == {version}
+        text = _svg_text(rendered / f"{_name(CASE_STEM, version)}.svg")
+        assert f"Config version {version}" in text
+        assert not any(v in text for v in VERSIONS if v != version)
+
+
 # ---------------------------------------------------------------------------
 # Versions and option order (tests 10, 11)
 # ---------------------------------------------------------------------------
+
+
+def _has_facets(plot) -> bool:
+    return any("facet" in frame.columns for frame in _frames(plot))
 
 
 def _facets(plot) -> list[str]:
@@ -161,37 +229,27 @@ def _facets(plot) -> list[str]:
     raise AssertionError("no facet column")
 
 
-def test_divergence_rows_follow_each_version_snapshot(walked) -> None:
-    bundle, summaries = walked
-    facets = _facets(build_figure("figure_01_divergence", bundle, summaries))
+@pytest.mark.parametrize("version", VERSIONS)
+def test_divergence_rows_follow_the_version_snapshot(walked, version: str) -> None:
+    bundle, _summaries = walked
+    facets = _facets(_build(walked, DIVERGENCE, version))
 
-    for version in bundle.versions.values():
-        expected = []
-        for q in version.questions.questions:
-            if q.response_type in ("likert", "probability-0-100"):
-                expected.append(q.question_id)
-            elif q.response_type in ("categorical", "multi-select"):
-                binary = len(q.options) == 2
-                expected.append(f"{q.question_id}: {q.options[0]}" if binary else q.question_id)
-        mine = [f.removeprefix(f"{version.version} · ") for f in facets]
-        mine = [f for f, full in zip(mine, facets, strict=True) if full.startswith(version.version)]
-        present = [m for m in mine if m in expected]
-        assert present == expected  # historical question and option order
+    expected = []
+    for q in bundle.versions[version].questions.questions:
+        if q.response_type in ("likert", "probability-0-100"):
+            expected.append(q.question_id)
+        elif q.response_type in ("categorical", "multi-select"):
+            binary = len(q.options) == 2
+            expected.append(f"{q.question_id}: {q.options[0]}" if binary else q.question_id)
+    assert facets == expected  # historical question and option order, no version prefix
 
 
 def test_v2_only_questions_are_never_pooled_into_v1(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_01_divergence", bundle, summaries)
-
-    absent = _labelled(plot, NOT_IN_VERSION)
-    assert set(absent["version"]) == {"v1"}
-    assert set(absent["panel"].astype(str).str.split(":").str[0]) == {
-        "supporting_findings",
-        "deterioration_probability",
-    }
-    data = pd.concat([f for f in _frames(plot) if "source" in f.columns])
-    v1_panels = set(data.loc[data["version"] == "v1", "panel"].astype(str))
-    assert not any(p.startswith("supporting_findings") for p in v1_panels)
+    v2_only = {"supporting_findings", "deterioration_probability"}
+    v1 = {f.split(":")[0] for f in _facets(_build(walked, DIVERGENCE, "v1"))}
+    v2 = {f.split(":")[0] for f in _facets(_build(walked, DIVERGENCE, "v2"))}
+    assert not v1 & v2_only
+    assert v2_only <= v2
 
 
 def test_multi_select_shares_are_independent(walked) -> None:
@@ -225,25 +283,23 @@ def _one_arm(bundle: ValidatedStudyBundle, arm: str) -> ValidatedStudyBundle:
     )
 
 
-def test_one_arm_panels_say_no_between_arm_comparison(walked) -> None:
+@pytest.mark.parametrize("version", VERSIONS)
+def test_one_arm_panels_say_no_between_arm_comparison(walked, version: str) -> None:
     bundle, _summaries = walked
     one_arm = _one_arm(bundle, Arm.AI.value)
-    plot = build_figure("figure_01_divergence", one_arm, build_summaries(one_arm))
+    plot = build_figure(DIVERGENCE, one_arm, build_summaries(one_arm), version)
 
     notes = _labelled(plot, SINGLE_ARM)
     answered = pd.concat([f for f in _frames(plot) if "source" in f.columns])
     assert set(answered["arm"]) == {Arm.AI.value}
     # Every answered panel carries the note: never an implied difference.
-    assert set(zip(notes["version"], notes["panel"].astype(str), strict=True)) >= set(
-        zip(answered["version"], answered["panel"].astype(str), strict=True)
-    )
+    assert set(notes["panel"].astype(str)) >= set(answered["panel"].astype(str))
 
 
 def test_rule_answers_are_plotted_and_distinguished(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_01_divergence", bundle, summaries)
+    plots = [_build(walked, DIVERGENCE, version) for version in VERSIONS]
 
-    data = pd.concat([f for f in _frames(plot) if "source" in f.columns])
+    data = pd.concat([f for plot in plots for f in _frames(plot) if "source" in f.columns])
     rule = data[data["source"] == AnswerSource.RULE]
     clinician = data[data["source"] == AnswerSource.CLINICIAN]
     assert not rule.empty
@@ -254,10 +310,10 @@ def test_rule_answers_are_plotted_and_distinguished(walked) -> None:
 
 def test_n_labels_count_answers_per_arm(walked) -> None:
     bundle, summaries = walked
-    plot = build_figure("figure_01_divergence", bundle, summaries)
+    plot = _build(walked, DIVERGENCE, "v1")
 
     texts = _layer_frame(plot, Layer.COUNTS)
-    confidence = texts[(texts["panel"] == "confidence") & (texts["version"] == "v1")]
+    confidence = texts[texts["panel"] == "confidence"]
     # v1 AI t0: X and Z both answered confidence → n=2 (S12a numeric_responses).
     numeric = summaries.numeric_responses
     n = numeric[
@@ -271,7 +327,7 @@ def test_n_labels_count_answers_per_arm(walked) -> None:
     assert len(labels) == len(bundle.versions["v1"].timepoints_minutes)
 
     keys = _layer_frame(plot, Layer.KEYS)
-    mine = keys[(keys["panel"] == "confidence") & (keys["version"] == "v1")]
+    mine = keys[keys["panel"] == "confidence"]
     assert sorted(mine["label"]) == ["▲ n", "● n"]  # one count row per arm, keyed once
 
 
@@ -311,14 +367,41 @@ def _layer_frame(plot, kind: Layer) -> pd.DataFrame:
 
 @pytest.mark.parametrize("stem", STEMS)
 def test_empty_cohort_renders_a_placeholder_only(empty, stem: str, tmp_path: Path) -> None:
+    """One placeholder per registered version (the empty bundle has v1 only)."""
     bundle, summaries = empty
-    plot = build_figure(stem, bundle, summaries)
+    assert list(bundle.versions) == ["v1"]
+    plot = build_figure(stem, bundle, summaries, "v1")
 
     frames = _frames(plot)
     assert [list(f["label"]) for f in frames] == [[NO_CASES]]
     assert "Descriptive only" in plot.labels.caption
     svg, _pdf = save_figure(plot, tmp_path / stem)
     assert NO_CASES in _svg_text(svg)
+    assert "Config version v1" in _svg_text(svg)
+
+
+@pytest.mark.parametrize("stem", STEMS)
+def test_version_without_cases_renders_a_placeholder(walked, stem: str) -> None:
+    """A version without activated cases is a placeholder, even when another has cases."""
+    bundle, _summaries = walked
+    v1_only = _only_cases_of(bundle, "v1")
+    summaries = build_summaries(v1_only)
+
+    plot = build_figure(stem, v1_only, summaries, "v2")
+    assert [list(f["label"]) for f in _frames(plot)] == [[NO_CASES]]
+    assert NO_CASES not in _plot_text(build_figure(stem, v1_only, summaries, "v1"))
+
+
+def _only_cases_of(bundle: ValidatedStudyBundle, version: str) -> ValidatedStudyBundle:
+    def only(frame: pd.DataFrame) -> pd.DataFrame:
+        return frame[frame["config_version"] == version]
+
+    return dataclasses.replace(
+        bundle,
+        cases=only(bundle.cases),
+        timepoints=only(bundle.timepoints),
+        answers=only(bundle.answers),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -326,31 +409,33 @@ def test_empty_cohort_renders_a_placeholder_only(empty, stem: str, tmp_path: Pat
 # ---------------------------------------------------------------------------
 
 
-def _segments(plot, row: str, version: str) -> dict[str, int]:
+def _segments(plot, row: str) -> dict[str, int]:
     data = plot.data
-    mine = data[(data["row"] == row) & (data["col"] == version)]
+    mine = data[data["row"] == row]
     return mine.groupby("category", observed=True)["count"].sum().to_dict()
 
 
 def test_display_failure_and_leakage_keep_the_itt_arm(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_05_intervention", bundle, summaries)
+    bundle, _summaries = walked
+    plot = _build(walked, INTERVENTION, "v2")
 
-    leak = _segments(plot, "AI leakage (No AI arm)", "v2")
+    leak = _segments(plot, "AI leakage (No AI arm)")
     assert leak["yes"] == 3  # the leaking no AI case, all three timepoints
-    delivered = _segments(plot, "AI delivered (AI arm)", "v2")
+    delivered = _segments(plot, "AI delivered (AI arm)")
     assert delivered["yes"] == 0 and delivered["no"] + delivered["unknown"] == 3
 
     # Each observation stays under its realised arm: exposure never moves it.
     reached = bundle.timepoints[bundle.timepoints["timepoint_reached"]]
+    plots = {version: _build(walked, INTERVENTION, version) for version in VERSIONS}
     for (version, arm), group in reached.groupby(["config_version", "arm"]):
         label = "AI" if arm == Arm.AI else "No AI"
-        assert sum(_segments(plot, f"per protocol ({label} arm)", version).values()) == len(group)
+        row = f"per protocol ({label} arm)"
+        assert sum(_segments(plots[version], row).values()) == len(group)
 
 
 def test_unknown_telemetry_is_excluded_never_zero(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_04_attention", bundle, summaries)
+    bundle, _summaries = walked
+    plot = _build(walked, ATTENTION, "v2")
 
     frames = _frames(plot)
     points = pd.concat([f for f in frames if "label" not in f.columns and "arm" in f.columns])
@@ -368,12 +453,13 @@ def test_unknown_telemetry_is_excluded_never_zero(walked) -> None:
     assert not ((foreground["x"] - x).abs() < 10).any()  # no point for the gap
 
     strips = _facets(plot)
-    assert "v2 · foreground (s) excl: AI t60 1" in strips
-    assert "v2 · active (s) excl: AI t60 1" in strips
+    assert "foreground (s) excl: AI t60 1" in strips
+    assert "active (s) excl: AI t60 1" in strips
     assert "missing 1" in plot.labels.caption
 
 
-def test_no_browser_telemetry_shows_no_valid_durations(walked) -> None:
+@pytest.mark.parametrize("version", VERSIONS)
+def test_no_browser_telemetry_shows_no_valid_durations(walked, version: str) -> None:
     """A study without the telemetry block: foreground / active are absent, not 0."""
     bundle, _summaries = walked
     tp = bundle.timepoints.assign(
@@ -382,11 +468,11 @@ def test_no_browser_telemetry_shows_no_valid_durations(walked) -> None:
         active_seconds=pd.NA,
     ).astype({"foreground_seconds": "Float64", "active_seconds": "Float64"})
     no_telemetry = dataclasses.replace(bundle, timepoints=tp)
-    plot = build_figure("figure_04_attention", no_telemetry, build_summaries(no_telemetry))
+    plot = build_figure(ATTENTION, no_telemetry, build_summaries(no_telemetry), version)
 
     notes = _labelled(plot, NO_DURATIONS)
     assert set(zip(notes["version"], notes["measure"], strict=True)) == {
-        (v, m) for v in bundle.versions for m in ("foreground (s)", "active (s)")
+        (version, m) for m in ("foreground (s)", "active (s)")
     }
     points = pd.concat(
         [f for f in _frames(plot) if "label" not in f.columns and "arm" in f.columns]
@@ -417,11 +503,12 @@ def test_no_identifier_or_free_text_reaches_a_figure(walked, rendered: Path) -> 
 
     forbidden = _identifiers(bundle) | {FREE_TEXT_SENTINEL}
     texts = []
-    for stem in FIGURES:
-        texts += _plot_text(build_figure(stem, tainted, tainted_summaries))
-        texts.append(_svg_text(rendered / f"{stem}.svg"))
-    texts += _plot_text(case_divergence_figure(tainted, SELECTED_PATIENT))
-    texts.append(_svg_text(rendered / f"{CASE_STEM}.svg"))
+    for stem, version in FIGURES_BY_VERSION:
+        texts += _plot_text(build_figure(stem, tainted, tainted_summaries, version))
+        texts.append(_svg_text(rendered / f"{_name(stem, version)}.svg"))
+    for version in VERSIONS:
+        texts += _plot_text(case_divergence_figure(tainted, SELECTED_PATIENT, version))
+        texts.append(_svg_text(rendered / f"{_name(CASE_STEM, version)}.svg"))
 
     for text in texts:
         for item in forbidden:
@@ -430,23 +517,30 @@ def test_no_identifier_or_free_text_reaches_a_figure(walked, rendered: Path) -> 
 
 def test_figure_stems_are_fixed_names() -> None:
     for stem in FIGURES:
-        assert re.fullmatch(r"figure_0[1-5]_[a-z_]+", stem)
+        assert re.fullmatch(r"supplementary_0[1-5]_[a-z_]+", stem)
 
 
-def test_case_figure_labels_cases_by_ordinal(walked) -> None:
+@pytest.mark.parametrize("version", VERSIONS)
+def test_case_figure_labels_cases_by_ordinal(walked, version: str) -> None:
     bundle, _summaries = walked
-    plot = case_divergence_figure(bundle, SELECTED_PATIENT)
+    plot = case_divergence_figure(bundle, SELECTED_PATIENT, version)
 
     assert SELECTED_PATIENT not in plot.labels.title
     labels = {v for f in _frames(plot) if "series" in f.columns for v in f["series"].astype(str)}
-    cases = bundle.cases[bundle.cases["patient_id"] == SELECTED_PATIENT]
+    cases = bundle.cases[
+        (bundle.cases["patient_id"] == SELECTED_PATIENT)
+        & (bundle.cases["config_version"] == version)
+    ]
     assert labels == {f"case {i}" for i in range(1, len(cases) + 1)}
 
 
-def test_case_figure_refuses_an_unknown_patient(walked) -> None:
+@pytest.mark.parametrize(("patient", "version"), [("synth_999", "v1"), ("synth_002", "v2")])
+def test_case_figure_refuses_a_patient_without_a_case_of_the_version(
+    walked, patient: str, version: str
+) -> None:
     bundle, _summaries = walked
     with pytest.raises(AnalysisError, match="no activated case"):
-        case_divergence_figure(bundle, "synth_999")
+        case_divergence_figure(bundle, patient, version)
 
 
 def test_timepoint_labels_keep_distinct_minutes_apart() -> None:
@@ -465,11 +559,10 @@ MIN_TEXT_POINTS = 6
 MAX_PAGE_INCHES = 9.5
 
 
-@pytest.mark.parametrize("stem", STEMS)
-def test_text_is_legible_in_print(walked, stem: str) -> None:
+@pytest.mark.parametrize(("stem", "version"), FIGURES_BY_VERSION)
+def test_text_is_legible_in_print(walked, stem: str, version: str) -> None:
     """At least 6 pt, and arm text is told apart by its words, not its colour."""
-    bundle, summaries = walked
-    plot = build_figure(stem, bundle, summaries)
+    plot = _build(walked, stem, version)
 
     texts = [layer for layer in plot.layers if "label" in layer.mapping]
     for layer in texts:
@@ -477,22 +570,21 @@ def test_text_is_legible_in_print(walked, stem: str) -> None:
         assert "color" not in layer.mapping
     assert plot.theme.getp(("plot_caption", "size")) >= MIN_TEXT_POINTS
     assert plot.theme.getp(("strip_text", "size")) >= MIN_TEXT_POINTS  # e.g. "excl: AI t60 1"
+    assert plot.theme.getp(("plot_subtitle", "size")) >= MIN_TEXT_POINTS
 
 
-@pytest.mark.parametrize("stem", STEMS)
-def test_figures_fit_a_page(walked, stem: str) -> None:
+@pytest.mark.parametrize(("stem", "version"), FIGURES_BY_VERSION)
+def test_figures_fit_a_page(walked, stem: str, version: str) -> None:
     """Every figure of the walked bundle fits one page at one column width."""
-    bundle, summaries = walked
-    width, height = build_figure(stem, bundle, summaries).theme.getp("figure_size")
+    width, height = _build(walked, stem, version).theme.getp("figure_size")
     assert width == ONE_COLUMN_INCHES
     assert height <= MAX_PAGE_INCHES
 
 
-@pytest.mark.parametrize("stem", STEMS)
-def test_captions_start_at_the_figure_edge(walked, stem: str) -> None:
+@pytest.mark.parametrize(("stem", "version"), FIGURES_BY_VERSION)
+def test_captions_start_at_the_figure_edge(walked, stem: str, version: str) -> None:
     """Anchored at the plot, not the panels: a caption is never clipped right."""
-    bundle, summaries = walked
-    plot = build_figure(stem, bundle, summaries)
+    plot = _build(walked, stem, version)
     assert plot.theme.getp("plot_caption_position") == "plot"
     assert plot.theme.getp(("plot_caption", "linespacing")) >= MIN_CAPTION_LINESPACING
 
@@ -514,12 +606,11 @@ def _caption(plot) -> str:
 
 
 def test_divergence_has_one_panel_per_question(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_01_divergence", bundle, summaries)
+    bundle, _summaries = walked
+    plot = _build(walked, DIVERGENCE, "v2")
 
-    counts = _layer_frame(plot, Layer.COUNTS)
+    mine = _layer_frame(plot, Layer.COUNTS)
     v2 = bundle.versions["v2"]
-    mine = counts[counts["version"] == "v2"]
     assert mine["panel"].nunique() == len(v2.questions.questions)
     # The count strip appears once per panel: one count per timepoint and arm.
     per_panel = mine.groupby("panel", observed=True).size()
@@ -527,8 +618,8 @@ def test_divergence_has_one_panel_per_question(walked) -> None:
 
 
 def test_binary_question_plots_only_its_first_option(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_01_divergence", bundle, summaries)
+    _bundle, summaries = walked
+    plot = _build(walked, DIVERGENCE, "v2")
 
     lines = _layer_frame(plot, Layer.MEDIANS)
     shares = summaries.option_proportions
@@ -538,7 +629,7 @@ def test_binary_question_plots_only_its_first_option(walked) -> None:
         & (shares["option_order"] == 0)
         & shares["proportion"].notna()
     ]
-    death = lines[(lines["version"] == "v2") & (lines["panel"] == BINARY_PANEL)]
+    death = lines[lines["panel"] == BINARY_PANEL]
     assert sorted(death["y"]) == sorted(float(v) for v in expected["proportion"])
     assert not lines["panel"].astype(str).str.endswith(": No").any()
     ends = _layer_frame(plot, Layer.ENDS)
@@ -546,11 +637,11 @@ def test_binary_question_plots_only_its_first_option(walked) -> None:
 
 
 def test_multi_option_lines_are_labelled_at_their_end(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_01_divergence", bundle, summaries)
+    bundle, _summaries = walked
+    plot = _build(walked, DIVERGENCE, "v2")
 
     ends = _layer_frame(plot, Layer.ENDS)
-    findings = ends[(ends["version"] == "v2") & (ends["panel"] == "supporting_findings")]
+    findings = ends[ends["panel"] == "supporting_findings"]
     question = next(
         q
         for q in bundle.versions["v2"].questions.questions
@@ -563,13 +654,12 @@ def test_multi_option_lines_are_labelled_at_their_end(walked) -> None:
 
 def test_lines_break_where_a_series_has_no_value(walked) -> None:
     """v2 death_3mo AI: rule answers at t0 and t2, a clinician answer at t1."""
-    bundle, summaries = walked
-    plot = build_figure("figure_01_divergence", bundle, summaries)
+    bundle, _summaries = walked
+    plot = _build(walked, DIVERGENCE, "v2")
 
     def rule(frame: pd.DataFrame) -> pd.DataFrame:
         return frame[
-            (frame["version"] == "v2")
-            & (frame["panel"] == BINARY_PANEL)
+            (frame["panel"] == BINARY_PANEL)
             & (frame["style"] == f"{Arm.AI.value}:{AnswerSource.RULE.value}")
         ]
 
@@ -593,8 +683,7 @@ def test_arm_and_source_lines_differ_without_colour() -> None:
 
 
 def test_likert_axis_has_integer_ticks_inside_its_scale(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_01_divergence", bundle, summaries)
+    plot = _build(walked, DIVERGENCE, "v2")
     breaks = next(sc for sc in plot.scales if "y" in sc.aesthetics).breaks
 
     assert breaks((-0.8, 5.2)) == [1.0, 2.0, 3.0, 4.0, 5.0]  # confidence 1-5: no 0 tick
@@ -603,11 +692,9 @@ def test_likert_axis_has_integer_ticks_inside_its_scale(walked) -> None:
 
 
 def test_intervention_drops_structurally_not_applicable_rows(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_05_intervention", bundle, summaries)
+    plot = _build(walked, INTERVENTION, "v1")
 
-    strips = [f.removeprefix("v1 · ") for f in _facets(plot) if f.startswith("v1 · ")]
-    assert strips == [
+    assert _facets(plot) == [
         "AI delivered (AI arm)",
         "AI viewed (AI arm)",
         "intervention failure (AI arm)",
@@ -621,10 +708,9 @@ def test_intervention_drops_structurally_not_applicable_rows(walked) -> None:
 
 
 def test_unknown_delivery_plots_failure_unknown(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_05_intervention", bundle, summaries)
+    plot = _build(walked, INTERVENTION, "v2")
 
-    failure = _segments(plot, "intervention failure (AI arm)", "v2")
+    failure = _segments(plot, "intervention failure (AI arm)")
     assert (failure["yes"], failure["no"], failure["unknown"]) == (2, 0, 1)
 
 
@@ -655,8 +741,7 @@ def test_category_fills_are_greyscale_distinct(palette: str) -> None:
 def test_in_bar_codes_read_on_their_fill(walked) -> None:
     from ehr_simulator.analysis.figures import OUTCOME_COLORS, TILE_COLORS
 
-    bundle, summaries = walked
-    plot = build_figure("figure_05_intervention", bundle, summaries)
+    plot = _build(walked, INTERVENTION, "v2")
     hexes = {"white": WHITE, "black": BLACK}
     layers = [
         layer for layer in plot.layers if layer.mapping.get("label") in ("on_dark", "on_light")
@@ -674,14 +759,14 @@ def test_in_bar_codes_read_on_their_fill(walked) -> None:
 
 def test_provenance_is_one_tile_grid_per_version(walked) -> None:
     bundle, summaries = walked
-    plot = build_figure("figure_03_response_provenance", bundle, summaries)
-
-    tiles = plot.data
     for version in bundle.versions.values():
-        mine = tiles[tiles["version"] == version.version]
-        questions = [str(r).split("\x1f")[1] for r in mine["row"].unique()]
+        tiles = _build(walked, PROVENANCE, version.version).data
+        questions = [str(r) for r in tiles["row"].unique()]
         assert sorted(questions) == sorted(q.question_id for q in version.questions.questions)
-        assert mine["column"].nunique() == len(Arm) * len(version.timepoints_minutes)
+        assert tiles["column"].nunique() == len(Arm) * len(version.timepoints_minutes)
+
+    plot = _build(walked, PROVENANCE, "v1")
+    tiles = plot.data
 
     # Codes carry the meaning: every non-zero category of a cell is named.
     r = summaries.response_provenance
@@ -691,27 +776,21 @@ def test_provenance_is_one_tile_grid_per_version(walked) -> None:
         & (r["arm"] == Arm.AI)
         & (r["t_index"] == 0)
     ].iloc[0]
-    tile = tiles[
-        (tiles["version"] == "v1")
-        & tiles["row"].astype(str).str.endswith("primary_cause")
-        & (tiles["column"] == "AI\n0")
-    ]
+    tile = tiles[(tiles["row"] == "primary_cause") & (tiles["column"] == "AI\n0")]
     expected = f"NA{cell['not_applicable']}\nMU{cell['missing_reached_unanswered']}"
     assert tile["label"].item() == expected
     assert "n=3" in set(_labelled(plot, "n=3")["label"])
 
 
 def test_provenance_caption_limits_hidden_to_reached_timepoints(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_03_response_provenance", bundle, summaries)
+    plot = _build(walked, PROVENANCE, "v1")
     assert "reached timepoints only" in " ".join(_caption(plot).split())
 
 
 def test_attention_exclusions_of_every_timepoint_share_one_strip(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_04_attention", bundle, summaries)
+    plot = _build(walked, ATTENTION, "v1")
 
-    assert "v1 · wall clock elapsed (s) excl: AI t0 1, t60 1" in _facets(plot)
+    assert "wall clock elapsed (s) excl: AI t0 1, t60 1" in _facets(plot)
     assert "horizontal ticks: median" in _caption(plot)
 
 
@@ -767,16 +846,15 @@ def _x_gap(a: DrawnText, b: DrawnText) -> float:
     return max(a.box[0], b.box[0]) - min(a.box[2], b.box[2])
 
 
-def test_divergence_texts_never_touch_and_stay_inside_their_panel(walked) -> None:
+@pytest.mark.parametrize("version", VERSIONS)
+def test_divergence_texts_never_touch_and_stay_inside_their_panel(walked, version: str) -> None:
     """Count rows: glyph key clear of the counts, counts ≥ 4 pt apart (no
     "n=3 2" read as "n=32"), end labels clear of the t180 count, nothing on
     the panel border."""
-    bundle, summaries = walked
-    plot = build_figure("figure_01_divergence", bundle, summaries)
+    plot = _build(walked, DIVERGENCE, version)
 
     problems = []
     for panel, texts in _drawn_panels(plot):
-        texts = [t for t in texts if t.text != NOT_IN_VERSION]
         for t in texts:
             inside = (
                 t.box[0] >= panel[0] + MIN_BORDER_POINTS
@@ -793,8 +871,7 @@ def test_divergence_texts_never_touch_and_stay_inside_their_panel(walked) -> Non
 
 
 def test_divergence_count_rows_key_n_once_with_bare_counts(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_01_divergence", bundle, summaries)
+    plot = _build(walked, DIVERGENCE, "v1")
 
     counts = _layer_frame(plot, Layer.COUNTS)
     assert counts["label"].str.fullmatch(r"\d+").all()
@@ -803,11 +880,10 @@ def test_divergence_count_rows_key_n_once_with_bare_counts(walked) -> None:
 
 
 def test_multi_option_end_labels_have_leaders_to_their_lines(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_01_divergence", bundle, summaries)
+    plot = _build(walked, DIVERGENCE, "v2")
 
     def mine(frame: pd.DataFrame) -> pd.DataFrame:
-        return frame[(frame["version"] == "v2") & (frame["panel"] == "supporting_findings")]
+        return frame[frame["panel"] == "supporting_findings"]
 
     ends = mine(_layer_frame(plot, Layer.ENDS))
     leaders = mine(_layer_frame(plot, Layer.LEADERS))
@@ -824,21 +900,19 @@ def test_multi_option_end_labels_have_leaders_to_their_lines(walked) -> None:
 
 
 def test_attention_exclusions_are_words_outside_the_data(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_04_attention", bundle, summaries)
+    plot = _build(walked, ATTENTION, "v2")
 
     for text in _plot_text(plot):
         assert not any(glyph in text for glyph in GLYPHS), text
     strips = _facets(plot)
-    assert "v2 · foreground (s) excl: AI t60 1" in strips
-    assert not any("excl" in s for s in strips if s.startswith("v2 · wall clock"))
+    assert "foreground (s) excl: AI t60 1" in strips
+    assert not any("excl" in s for s in strips if s.startswith("wall clock"))
 
 
 def test_attention_median_ticks_differ_by_arm_without_colour(walked) -> None:
     from ehr_simulator.analysis.figures import MEDIAN_LINETYPES
 
-    bundle, summaries = walked
-    plot = build_figure("figure_04_attention", bundle, summaries)
+    plot = _build(walked, ATTENTION, "v1")
 
     ticks = next(layer for layer in plot.layers if type(layer.geom).__name__ == "geom_segment")
     assert ticks.mapping["linetype"] == "arm"
@@ -852,14 +926,24 @@ def test_attention_median_ticks_differ_by_arm_without_colour(walked) -> None:
             assert ai["xend"].max() < no_ai["x"].min()
 
 
-def test_intervention_legend_lists_only_drawn_outcomes(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_05_intervention", bundle, summaries)
+@pytest.mark.parametrize("version", VERSIONS)
+def test_intervention_legend_lists_only_drawn_outcomes(walked, version: str) -> None:
+    plot = _build(walked, INTERVENTION, version)
 
     scale = next(sc for sc in plot.scales if "fill" in sc.aesthetics)
     drawn = set(plot.data.loc[plot.data["count"] > 0, "category"].astype(str))
     assert set(scale.limits) == drawn
     assert "not_applicable" not in scale.limits
+
+
+@pytest.mark.parametrize("version", VERSIONS)
+def test_case_flow_legend_lists_only_drawn_segments(walked, version: str) -> None:
+    """v2 has no incomplete or open case: its legend must not list them."""
+    plot = _build(walked, "supplementary_02_case_flow", version)
+
+    scale = next(sc for sc in plot.scales if "fill" in sc.aesthetics)
+    drawn = set(plot.data.loc[plot.data["count"] > 0, "segment"].astype(str))
+    assert set(scale.limits) == drawn
 
 
 @pytest.mark.parametrize("palette", ["OUTCOME_COLORS", "FLOW_COLORS"])
@@ -880,8 +964,7 @@ def test_category_fills_keep_one_dark_fill_apart(palette: str) -> None:
 def test_case_flow_codes_read_on_their_fill(walked) -> None:
     from ehr_simulator.analysis.figures import FLOW_COLORS
 
-    bundle, summaries = walked
-    plot = build_figure("figure_02_case_flow", bundle, summaries)
+    plot = _build(walked, CASE_FLOW, "v1")
     hexes = {"white": WHITE, "black": BLACK}
     layers = [
         layer for layer in plot.layers if layer.mapping.get("label") in ("on_dark", "on_light")
@@ -894,9 +977,9 @@ def test_case_flow_codes_read_on_their_fill(walked) -> None:
             assert _contrast(FLOW_COLORS[segment], color) >= MIN_TEXT_CONTRAST, segment
 
 
-def test_case_flow_replacement_note_clears_the_panel_border(walked) -> None:
-    bundle, summaries = walked
-    plot = build_figure("figure_02_case_flow", bundle, summaries)
+@pytest.mark.parametrize("version", VERSIONS)
+def test_case_flow_replacement_note_clears_the_panel_border(walked, version: str) -> None:
+    plot = _build(walked, CASE_FLOW, version)
 
     for panel, texts in _drawn_panels(plot):
         for t in texts:

@@ -89,7 +89,7 @@ Unknown values are never treated as zero:
 
 ## Report: figures and published outputs (S12b)
 
-The figure set is **provisional**. The stable contract is the reader and the summary tables above. Figure stems, layouts and their number may change once the study analysis plan exists.
+The figures are **supplementary**, confirmatory descriptive figures (`"figure_role": "supplementary"` in the manifest). The main-message figures will come from the approved analysis plan in a follow-on session (owner decision 2026-10-19). The stable contract is the reader and the summary tables above. Figure stems, layouts and their number may change.
 
 ```
 publish_report(bundle_dir, out_dir, overwrite=Overwrite.REFUSE)
@@ -98,32 +98,32 @@ publish_report(bundle_dir, out_dir, overwrite=Overwrite.REFUSE)
     <parent>/.<name>.staging-<id>/  ─► rename to <out_dir>          (REPLACE: old report aside, restored on failure)
 ```
 
-`REPLACE` replaces only an empty directory or a previous report (an `analysis_manifest.json` of this schema), never a symbolic link. Both modes re-check the output right before the rename, so a report published meanwhile by another run is kept.
+`REPLACE` replaces only an empty directory or a previous report (an `analysis_manifest.json` of a known schema: `phase2_analysis_v1` or `phase2_analysis_v2`), never a symbolic link. Both modes re-check the output right before the rename, so a report published meanwhile by another run is kept.
 
 | Path | Content |
 | --- | --- |
-| `figures/<stem>.svg`, `.pdf` | One per `figures.FIGURES` entry. SVG text stays text. Neither format carries a creation date. |
+| `figures/<stem>_<config_version>.svg`, `.pdf` | One per `figures.FIGURES` entry and config version: versions never share a figure. SVG text stays text. Neither format carries a creation date. |
 | `tables/<summary>.csv` | The six S12a tables. `<NA>` is written as an empty cell, never 0. Text cells pass the S9c formula guard. |
 | `denominators.csv` | The S12a `denominators` table |
-| `analysis_manifest.json` | Written last. It holds: <br>• `analysis_schema_version` (`phase2_analysis_v1`) <br>• input schema, manifest SHA256 and `study_id` <br>• software versions <br>• every `config_version` + `config_hash` <br>• `cohort` <br>• settings <br>• the figure inventory <br>• each table's rows and SHA256. <br>There is no timestamp, so equal inputs give an equal manifest. |
+| `analysis_manifest.json` | Written last. It holds: <br>• `analysis_schema_version` (`phase2_analysis_v2`; v1 had one figure file for all versions) <br>• input schema, manifest SHA256 and `study_id` <br>• software versions <br>• every `config_version` + `config_hash` <br>• `cohort` <br>• `figure_role` (`supplementary`) <br>• settings <br>• the figure inventory: `stem`, `title`, `config_version`, `files` per figure file <br>• each table's rows and SHA256. <br>There is no timestamp, so equal inputs give an equal manifest. |
 
 | Stem | Source tables | Shows |
 | --- | --- | --- |
-| `figure_01_divergence` | `numeric_observations`, `numeric_responses`, `option_proportions` | One panel per question and version: <br>• likert / probability: individual values plus the median; likert ticks are the scale's integers <br>• two option questions: the first option's share, named in the strip <br>• more options: one line per option, labelled at its right end (multi-select shares are independent) <br>• one `● / ▲ n=` count row per arm <br>• line type per arm × source (AI solid, No AI dashed, rule AI dotted, rule No AI dash-dot); rule markers hollow <br>• a line breaks where its series has no value <br>• no free text |
-| `figure_02_case_flow` | `case_flow` | Planned items beside activated cases by lifecycle state, with replacement counts as text |
-| `figure_03_response_provenance` | `response_provenance` | One tile grid per version: questions × ITT arm · timepoint. Each tile names its non-zero categories as code + count (answered clinician / rule, not applicable, missing by S11l reason); fill = share missing; an `n` row gives the case timepoints |
-| `figure_04_attention` | `attention_observations`, `attention` | Elapsed, foreground and active seconds (median = horizontal tick), with `excl k` for reached observations that have no valid duration |
-| `figure_05_intervention` | `intervention` | Delivered and viewed (AI arm), failure (both arms), AI leakage (No AI arm) and PP, as yes / no / unknown counts by ITT arm. Rows that would be all not applicable are omitted |
+| `supplementary_01_divergence` | `numeric_observations`, `numeric_responses`, `option_proportions` | One panel per question: <br>• likert / probability: individual values plus the median; likert ticks are the scale's integers <br>• two option questions: the first option's share, named in the strip <br>• more options: one line per option, labelled at its right end (multi-select shares are independent) <br>• one `● / ▲ n=` count row per arm <br>• line type per arm × source (AI solid, No AI dashed, rule AI dotted, rule No AI dash-dot); rule markers hollow <br>• a line breaks where its series has no value <br>• no free text |
+| `supplementary_02_case_flow` | `case_flow` | Planned items beside activated cases by lifecycle state, with replacement counts as text |
+| `supplementary_03_response_provenance` | `response_provenance` | One tile grid: questions × ITT arm · timepoint. Each tile names its non-zero categories as code + count (answered clinician / rule, not applicable, missing by S11l reason); fill = share missing; an `n` row gives the case timepoints |
+| `supplementary_04_attention` | `attention_observations`, `attention` | Elapsed, foreground and active seconds (median = horizontal tick), with `excl k` for reached observations that have no valid duration |
+| `supplementary_05_intervention` | `intervention` | Delivered and viewed (AI arm), failure (both arms), AI leakage (No AI arm) and PP, as yes / no / unknown counts by ITT arm. Rows that would be all not applicable are omitted |
 
 Every figure follows these rules:
 - One column wide (3.5 in), at most 9.5 in tall on the reference bundle. Captions start at the figure's left edge.
 - The arm is shown by colour **and** shape. Category fills are ≥ 15 L* apart, so they stay distinct in greyscale; codes on dark fills are white.
-- One strip per `version · question` (or `arm · version · question`). A question missing from a version shows `not in this version`.
+- One config version per figure file, named in the subtitle (`Config version v1`). Strips name the question, measure or outcome row only.
 - The caption states the population, the denominator and "Descriptive only".
-- An empty cohort renders `No activated cases`.
+- A version without activated cases renders `No activated cases`. A bundle without any case gives one placeholder file per figure and registered version.
 - Plotted text comes only from constants, config versions, question ids, option labels and counts.
 
-`figures.case_divergence_figure(bundle, patient_id)` draws one explicitly selected patient, one line per case (`case 1…`). It is not part of the report.
+`figures.case_divergence_figure(bundle, patient_id, version)` draws one explicitly selected patient's cases of one config version, one line per case (`case 1…`). It is not part of the report.
 
 ## Notebook
 
