@@ -1,0 +1,1 @@
+study_id,clinician_id,patient_id,t_index,timepoint_minutes,config_version,config_hash,question_id,response_type,branch_state,required_now,response_status,response_value,value_exported,answer_source,derived_from_question_id,missing_reason,ts_recorded

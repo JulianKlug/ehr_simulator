@@ -5,12 +5,12 @@ every routing path in :func:`ehr_simulator.ingestion.mimic.load_mimic`
 without any real patient data. Inputs are the schema files already in
 the fixture directory:
 
-* ``categorical_variable_encoding.csv`` — population-level encoding;
-  defines the categorical groups + their one-hot columns.
-* ``reference_population_normalisation_parameters.csv`` — population-
-  level (mean, std) per variable.
+* ``categorical_variable_encoding.csv`` — schema: the categorical groups +
+  their one-hot columns, other categories in alphabetical order.
+* ``reference_population_normalisation_parameters.csv`` — fabricated (mean, std) per variable:
+  row i is (10·(i+1), i+1), pinned by ``tests/test_shared.py``.
 
-Both inputs are aggregate / schema-defining and carry no patient data.
+Neither input holds a cohort aggregate or patient data.
 The generator emits patient rows whose ``sample_label`` values reference
 those schema files but whose ``value`` cells are hand-crafted constants.
 

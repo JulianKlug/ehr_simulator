@@ -77,7 +77,7 @@ Helpers declared at module scope inside `geneva.py` (will be lifted to `_shared.
 
 **Test inventory:** ≥11 tests. 5+ unit (`_drop_imputed`, `_inverse_normalize`, `_decode_categorical` including the 0.5-edge case, hour-bucket → minutes, `_path_traversal_guard`). 3+ integration (source-routing branches, strict vs lenient on real-shaped data, empty IMAGING/AI_OUTPUT frame assertions). 2+ E2E (full Geneva fixture round-trip; `docs/data-contract.md` drift CI check). 1+ regression (`AdapterError` on missing required cols).
 
-**Fixture strategy:** `tests/fixtures/geneva/build_geneva_fixture.py` reads the real CSV, samples N rows per source category, replaces `value`/identifiers with random-but-realistic fakes, writes `tests/fixtures/geneva/geneva_sample.csv`. Both committed. Re-run when source schema changes. (Session 4 mirrored the layout under `tests/fixtures/mimic/`.)
+**Fixture strategy:** `tests/fixtures/geneva/build_geneva_fixture.py` generates fabricated rows in the real CSV shape (no real data), writes `tests/fixtures/geneva/geneva_sample.csv`. Both committed. Re-run when source schema changes. (Session 4 mirrored the layout under `tests/fixtures/mimic/`.)
 
 ### Session 4 — MIMIC-III adapter [SHIPPED]
 
@@ -241,19 +241,23 @@ What shipped:
 - **Integration gate (S11o):** end to end scenarios in `tests/test_phase2_integration.py`, `tests/e2e/test_phase2_walk.py`, `tests/e2e/test_multitab_walk.py`.
 - **Clinician characteristics (S11p):** role, years of practice, country and specialty collected before the first measured case, locked once it starts, exported as `clinicians.csv`.
 
-### Session 12 — Phase 2.5 polished divergence + v1.0 release [NEXT]
+### Session 12 — Phase 2.5 polished divergence + v1.0 release [SHIPPED; tag pending]
+
+Spec: `specs/session-12-phase25-release.md` (slices S12a analysis contract, S12b figures + notebook, S12c release).
+
+S12a (bundle reader, summaries, synthetic fixture), S12b (figures, report publication, notebook) and S12c (`serve --demo`, README quickstart + clean clone CI smoke, reference/analysis/release docs, build allowlist) shipped. The v1.0.0 version bump and tag are owner steps in `docs/release-checklist.md`, coordinated with the preprint. No Geneva sample is published (no sharing permission).
 
 Goal: publication-quality divergence view + reproducible analysis notebook + open-source v1.0 release. This is a **must-have** for v1.0 per the design doc — "do not ship v1.0 without it."
 
 Scope:
 - Polished divergence figure suitable for inclusion in the paper.
-- Reproducible analysis notebook generating all study figures from the SQLite export.
+- Reproducible analysis notebook generating all study figures from the validated `export-phase2` bundle (never SQLite directly).
 - README quickstart (~10-min: clone, install, run, see one synthetic patient via `--demo`).
 - `docs/data-contract.md` final pass + drift CI green.
 - Reference dataset pointer (MIMIC-III access instructions + Geneva sample path if shareable).
 - v1.0 git tag cut in parallel with preprint submission.
 
-**Test inventory:** ≥4 tests. Notebook runs end-to-end; all figures regenerate from SQLite; README quickstart smoke test on a fresh clone; data-contract drift CI passes.
+**Test inventory:** ≥4 tests. Notebook runs end-to-end; all figures regenerate from the export bundle; README quickstart smoke test on a fresh clone; data-contract drift CI passes.
 
 ## Deliberately deferred
 

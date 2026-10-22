@@ -61,7 +61,7 @@ _DATASET_NAME = "geneva"
 SOURCE_TIMESTEPS = 72
 _MINUTES_PER_TIMESTEP = 60.0
 
-#: Largest allowed ``|sigmoid(sum(shap row)) - y_prob|`` (observed max 3.6e-7).
+#: Largest allowed ``|sigmoid(sum(shap row)) - y_prob|``.
 SHAP_PROBABILITY_TOLERANCE = 1e-5
 
 #: Canonical Geneva patient id, e.g. ``900001_0001``.

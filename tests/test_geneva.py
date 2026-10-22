@@ -1,8 +1,8 @@
 """Unit + integration + E2E + regression tests for the Geneva adapter.
 
 Inline DataFrames cover the helper-level contracts (#1–#7e). The
-``geneva_fixture_dir`` fixture supplies a 2-patient slice of the real CSV
-for the integration / E2E tests (#8–#12, #14). The 1.5 GB real-CSV smoke
+``geneva_fixture_dir`` fixture supplies 2 fabricated patients in the real CSV
+shape for the integration / E2E tests (#8–#12, #14). The real-CSV smoke
 test lives in ``test_geneva_real.py`` behind the ``real_data`` marker.
 """
 
@@ -44,11 +44,11 @@ _SEX_GROUP = CategoricalGroup(
 _IAT_GROUP = CategoricalGroup(
     group_name="categorical_IAT",
     baseline="271-540min",
-    other_labels=("no_IAT", ">540min", "<270min"),
+    other_labels=("<270min", ">540min", "no_IAT"),
     one_hot_columns=(
-        "categorical_iat_no_iat",
-        "categorical_iat_>540min",
         "categorical_iat_<270min",
+        "categorical_iat_>540min",
+        "categorical_iat_no_iat",
     ),
 )
 
@@ -643,9 +643,8 @@ def test_every_rename_target_is_a_registered_scalar() -> None:
 
 def test_load_geneva_filters_to_patient_ids(geneva_fixture_dir: Path) -> None:
     """When ``patient_ids`` is set, every row in scalar_ts and admission must
-    belong to that subset. Pilot use case: 3 patients out of 3K should not
-    pay the full-dataset memory + load-time cost (~600 MB / 51 s on the real
-    Geneva CSV).
+    belong to that subset. Pilot use case: a few patients out of the full
+    cohort should not pay the full-dataset memory + load-time cost.
     """
     only_one = ("geneva_fixture_001",)
     dataset = load_geneva(

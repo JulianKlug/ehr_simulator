@@ -34,8 +34,17 @@ def serve(
         "--backup-dir",
         help="Directory for shutdown-time SQLite backups. Defaults to <db parent>/backups.",
     ),
+    demo: bool = typer.Option(
+        False,
+        "--demo",
+        help="Synthetic demonstration: no input data or study config, every page bannered.",
+    ),
 ) -> None:
     """Run the FastAPI server via uvicorn."""
+    if demo:
+        _serve_demo(host, port, reload, config, questions, db_path, backup_dir)
+        return
+
     if config is None and questions is None:
         if db_path is None and backup_dir is None:
             uvicorn.run(
@@ -92,3 +101,35 @@ def serve(
         raise typer.Exit(code=1) from exc
 
     uvicorn.run(app_instance, host=host, port=port, reload=reload)
+
+
+def _serve_demo(
+    host: str,
+    port: int,
+    reload: bool,
+    config: Path | None,
+    questions: Path | None,
+    db_path: Path | None,
+    backup_dir: Path | None,
+) -> None:
+    """Config free synthetic path, bannered; a study config would make it a study."""
+    if config is not None or questions is not None:
+        typer.echo("Error: --demo cannot be combined with --config/--questions.", err=True)
+        raise typer.Exit(code=2)
+
+    if reload:
+        typer.echo(
+            "Warning: --reload disabled with --demo "
+            "(reload requires the import-string entry point).",
+            err=True,
+        )
+
+    from ehr_simulator.web.app import DemoMode, create_app
+
+    app_instance = create_app(
+        log_dir=LOG_DIR,
+        db_path=db_path,
+        backup_dir=backup_dir,
+        demo=DemoMode.SYNTHETIC,
+    )
+    uvicorn.run(app_instance, host=host, port=port, reload=False)

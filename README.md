@@ -7,12 +7,45 @@ AI model predicted, and asks you a short set of questions at each timepoint.
 The point isn't the chart. The point is to measure how AI assistance changes
 the assessments and decisions you'd make.
 
-> **Status — September 2026.** Phase 1 (walk patients, answer gated
-> questions, CSV export) and Phase 2 (randomised AI / no AI cases with
-> behavioural telemetry and a linked research export) are implemented on
-> synthetic patients. Real Geneva / MIMIC data in the UI is not wired yet.
-> If a teammate asked you to use this for a study session, you are an early
-> reviewer, not an end user. See *What this build is for* below.
+> **Status — October 2026.** Phase 1 (walk patients, answer gated
+> questions, CSV export), Phase 2 (randomised AI / no AI cases with
+> behavioural telemetry and a linked research export) and the Phase 2
+> analysis notebook are implemented. The Geneva and MIMIC-III adapters read
+> real data, but **no real patient data is bundled**: you bring your own
+> access (see [`docs/reference-data.md`](docs/reference-data.md)). Everything
+> in this repository runs on synthetic patients.
+
+## Quickstart (about ten minutes)
+
+Requires [`git`](https://git-scm.com/) and [`uv`](https://docs.astral.sh/uv/).
+
+```bash
+git clone https://github.com/JulianKlug/ehr_simulator.git
+cd ehr_simulator
+uv sync --locked
+uv run ehr-simulator serve --demo
+# open http://127.0.0.1:8000; sign in; open synth_001
+```
+
+Any name signs you in. Pick `synth_001`, then `epic` or `dense`. Walk the
+timepoints with <kbd>]</kbd> and <kbd>[</kbd>.
+
+`--demo` is the config free synthetic mode. It needs no data, study config or
+secret, and it never creates a study case. A **Synthetic demonstration**
+banner sits on every page. It cannot be combined with `--config`/`--questions`,
+and it refuses to boot on a study's database (`--db-path`, `EHR_SIM_DB_PATH`).
+
+The demo writes `./data/ehr_simulator.db`, its backups
+`./data/backups/ehr_simulator_*.db` and `./logs/` under the directory you
+started it from. To reset it, stop the server and delete the demo files only.
+Study databases, their backups under `data/backups/<study_id>/` and the shared
+`logs/` stay:
+
+```bash
+rm -f data/ehr_simulator.db data/ehr_simulator.db-wal data/ehr_simulator.db-shm data/backups/ehr_simulator_*.db
+```
+
+Running a study is a separate path: see *Running a Phase 2 study* below.
 
 ---
 
@@ -21,7 +54,7 @@ the assessments and decisions you'd make.
 Requires [`uv`](https://docs.astral.sh/uv/) on the machine.
 
 ```bash
-uv sync
+uv sync --locked
 uv run ehr-simulator serve \
   --config configs/example_config.yaml \
   --questions configs/example_questions.yaml
@@ -61,8 +94,35 @@ uv run ehr-simulator activate-config STUDY.yaml QUESTIONS.yaml --version v1 --de
 uv run ehr-simulator serve --config STUDY.yaml --questions QUESTIONS.yaml
 uv run ehr-simulator expire-cases STUDY.yaml      # cases whose clinician never came back
 uv run ehr-simulator backup --db-path data/study_<study_id>.db
-uv run ehr-simulator export-phase2 STUDY.yaml --pseudonym-secret keys/pseudonym.secret  # the research bundle
+uv run ehr-simulator export-phase2 STUDY.yaml --pseudonym-secret keys/pseudonym.secret --out-dir BUNDLE  # the research bundle
 ```
+
+**The shipped examples are placeholders.** The questions and options in
+`configs/example_phase2_questions.yaml` and the specialties and countries in
+`configs/example_phase2_config.yaml` exist to exercise the software. They are
+not a preregistered clinical instrument. Replace them, then activate a new
+version, before you collect measured data.
+
+**Analysis.** The analysis reads only the exported bundle. It never reads the
+database, the secret or the keyfile. Copy only `BUNDLE/` into the analysis
+environment, then:
+
+```bash
+uv sync --locked --group analysis
+# absolute paths: the notebook kernel may not start in your shell's directory
+EHR_SIM_PHASE2_BUNDLE="$PWD/BUNDLE" EHR_SIM_ANALYSIS_OUT="$PWD/analysis_out/phase2" \
+  uv run jupyter execute notebooks/phase2_analysis.ipynb   # or open it in Jupyter
+```
+
+The notebook validates the bundle's manifest and refuses a bundle that fails
+it. It writes figures (SVG + PDF), per table CSVs, `denominators.csv` and
+`analysis_manifest.json`, which records the input digest, configuration
+versions and hashes. Results are descriptive and stratified by configuration
+version. Clinical values are not in the bundle, so the "newly visible data"
+annotations of `divergence-view` are absent. Methods:
+[`docs/analysis.md`](docs/analysis.md). Contract:
+[`docs/analysis-contract.md`](docs/analysis-contract.md). Review any figure
+from a real cohort for disclosure before publishing it.
 
 **Geneva AI (S7).** A `dataset: geneva` study delivers real AI output through a
 `geneva_ai` block (`predictions_path`, `patient_ids_path`, `model_path`,
@@ -109,6 +169,10 @@ Nothing enforces this; it is the operator's record of what clinicians saw.
 - **One tab per case.** A second browser tab of the same active case shows a
   notice and cannot save; close the other tab and press Retry.
 - **Backups are study isolated:** `data/backups/<study_id>/study_<study_id>_schema_<N>_<UTC>.db`.
+  The shutdown backup blocks the server's exit. A large database (over
+  ~100 MB) takes seconds to copy, so wait for the process to exit. A second
+  `Ctrl-C` or a kill can skip the backup; `ehr-simulator backup` with the
+  server stopped makes one at any time.
 - **`export-phase2` writes linked CSVs** (`timepoints`, `answers`,
   `panel_summaries`, `behavioral_events`, `randomisation_audit`,
   `configuration_history`, `configuration_counts`, `clinicians`, `manifest.json`) across every
@@ -305,8 +369,9 @@ database, and the identity check still applies to any path you name.
 These are scheduled for later sessions. If you're missing one of these, you
 are not missing it because of a bug:
 
-- **MIMIC / Geneva real-data** — only synthetic patients today. (Sessions 7
-  and 8.)
+- **Real patient data** — the Geneva and MIMIC-III adapters are implemented,
+  but no source data or AI artifact ships with the repository. See
+  [`docs/reference-data.md`](docs/reference-data.md).
 - **DICOM image rendering** — the imaging panel shows the report text, not
   the images. (Out of scope for v1.)
 

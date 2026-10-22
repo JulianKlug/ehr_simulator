@@ -258,7 +258,7 @@ def test_legacy_geneva_ai_bounded_and_latest_row_only(geneva_client: TestClient)
 
 def test_geneva_ai_html_is_not_the_shap_dictionary(geneva_client: TestClient) -> None:
     html = str(_panel(_soup(geneva_client, PATIENT, LEAK_T_INDEX), "ai"))
-    for absent in ("base_value", "contributions", "std_glucose", "timestep_idx", "{'", "-0.64"):
+    for absent in ("base_value", "contributions", "std_glucose", "timestep_idx", "{'", "-1.25"):
         assert absent not in html, absent
     assert "Weight" not in html  # sixth negative contributor
 

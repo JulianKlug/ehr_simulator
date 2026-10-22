@@ -1,0 +1,1 @@
+study_id,event_id,session_id,clinician_id,patient_id,timepoint,t_index,visit_kind,config_version,config_hash,render_id,tab_id,kind,client_ts,server_ts,client_seq,client_mono_ms,payload_json

@@ -1,0 +1,4 @@
+study_id,clinician_id,profile_status,professional_role,years_of_practice,country_of_practice,primary_specialty
+example_phase2,35fba20224fed954,complete,physician,7.5,CH,neurology
+example_phase2,cdb810acd708acd2,complete,physician,7.5,CH,neurology
+example_phase2,f06ed32d0119f976,complete,physician,7.5,CH,neurology

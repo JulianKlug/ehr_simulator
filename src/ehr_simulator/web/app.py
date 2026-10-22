@@ -30,9 +30,11 @@ Middleware stack (outermost first) unchanged.
 from __future__ import annotations
 
 import contextlib
+import sqlite3
 import sys
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from enum import StrEnum
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -53,6 +55,7 @@ from ehr_simulator.db.exceptions import (
 from ehr_simulator.db.ingestion_issues import record_batch as record_ingestion_issues
 from ehr_simulator.db.migrations import apply_migrations
 from ehr_simulator.db.study_identity import bind as bind_study_identity
+from ehr_simulator.db.study_identity import fetch as fetch_study_identity
 from ehr_simulator.ingestion.exceptions import AdapterError
 from ehr_simulator.ingestion.provenance import ai_provenance_of
 from ehr_simulator.ingestion.synthetic import load_synthetic
@@ -73,6 +76,21 @@ _TEMPLATES_DIR = _THIS_DIR / "templates"
 _STATIC_DIR = _THIS_DIR / "static"
 
 
+class DemoMode(StrEnum):
+    """Whether every page carries the synthetic demonstration banner (S12c)."""
+
+    OFF = "off"
+    SYNTHETIC = "synthetic"
+
+
+def _bound_study(conn: sqlite3.Connection) -> str | None:
+    """The database's study id; a database older than the identity table has none."""
+    try:
+        return fetch_study_identity(conn)
+    except StudyIdentityError:
+        return None
+
+
 def create_app(
     *,
     log_dir: Path = Path("logs"),
@@ -80,6 +98,7 @@ def create_app(
     db_path: Path | None = None,
     backup_dir: Path | None = None,
     clock: Clock = system_clock,
+    demo: DemoMode = DemoMode.OFF,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -119,6 +138,20 @@ def create_app(
             backup_dir if backup_dir is not None else db_path_resolved.parent / "backups"
         )
         app.state.db = connect(db_path_resolved)
+
+        # S12c: a demo never writes to a study's database, not even a migration.
+        bound_study = _bound_study(app.state.db) if demo is DemoMode.SYNTHETIC else None
+        if bound_study is not None:
+            log.error("demo refused on a study database", event_kind="app.boot.failed")
+            print(
+                f"Refusing to boot: --demo on the database of study {bound_study!r}; "
+                "use another --db-path.",
+                file=sys.stderr,
+            )
+            with contextlib.suppress(Exception):
+                app.state.db.close()
+            raise SystemExit(1)
+
         versions = apply_migrations(app.state.db)
         # S11a: study mode binds the database to exactly one study. A
         # mismatching or nonempty unbound legacy database fails startup
@@ -223,6 +256,8 @@ def create_app(
 
     app = FastAPI(lifespan=lifespan)
     app.state.templates = Jinja2Templates(directory=str(_TEMPLATES_DIR))
+    # S12c: `serve --demo` marks every full page so it cannot pass for a study.
+    app.state.templates.env.globals["synthetic_demo"] = demo is DemoMode.SYNTHETIC
     # Study mode is opt-in via app_from_study_config; bare create_app() has
     # no questions to ask, so the pane stays hidden and /answer returns 409.
     app.state.study = None

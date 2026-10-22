@@ -1,0 +1,1 @@
+study_id,clinician_id,patient_id,t_index,timepoint_minutes,config_version,config_hash,visit_kind,panel_id,mounted,telemetry_status,qualifying_seconds,viewed,episode_count,panel_open_count,time_to_first_view_seconds,first_view_client_ts,last_view_client_ts,tab_conflict_detected

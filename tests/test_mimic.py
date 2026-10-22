@@ -1,13 +1,12 @@
 """Unit + integration + E2E + regression tests for the MIMIC adapter.
 
 Inline DataFrames cover the helper-level contracts; ``mimic_fixture_dir``
-supplies a 2-patient slice of the real CSV for the integration / E2E
-tests. The 1.83M-row real-CSV smoke test lives in ``test_mimic_real.py``
+supplies 2 fabricated patients in the real CSV shape for the integration /
+E2E tests. The real-CSV smoke test lives in ``test_mimic_real.py``
 behind the ``real_data`` marker.
 
-Anchor assertions in test #9 sub-(b) were locked at S4 implementation
-time by reading raw upstream rows for the two anonymised fixture patients
-(see :func:`tests/fixtures/mimic/build_mimic_fixture.py`). They are
+Anchor assertions in test #9 sub-(b) are locked from the fabricated rows
+of :func:`tests/fixtures/mimic/build_mimic_fixture.py`. They are
 independent of ``load_mimic`` so a regression in the adapter that also
 drifts the sidecar still gets caught.
 """
@@ -137,7 +136,7 @@ def test_load_mimic_admission_matches_expected_sidecar_plus_anchors(
         ("mimic_fixture_001", "Referral", "Emergency service (144)"),
         ("mimic_fixture_002", "Sex", "Male"),
         ("mimic_fixture_002", "categorical_IVT", "91-270min"),
-        ("mimic_fixture_002", "Prestroke disability (Rankin)", "2.0"),
+        ("mimic_fixture_002", "Prestroke disability (Rankin)", "1.0"),
     ]
     admission = dataset.admission
     for patient_id, field, value in anchors:

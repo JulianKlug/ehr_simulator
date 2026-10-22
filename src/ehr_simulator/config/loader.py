@@ -28,9 +28,9 @@ class _ConfigLoader(yaml.SafeLoader):
     """SafeLoader with the YAML 1.1 ``_``-as-digit-separator int resolver
     removed.
 
-    Geneva's ``case_admission_id`` values look like ``100023_4784``. Under
+    Geneva's ``case_admission_id`` values look like ``912345_6789``. Under
     pyyaml's default YAML 1.1 parsing those tokens match the int implicit
-    resolver (``100023_4784`` → int ``1000234784``, underscore stripped),
+    resolver (``912345_6789`` → int ``9123456789``, underscore stripped),
     so the original ID is unrecoverable by the time Pydantic sees the data.
     Removing the underscore-aware int pattern lets such tokens fall
     through as plain strings, while plain numerics like ``60`` (in

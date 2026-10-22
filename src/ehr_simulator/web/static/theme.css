@@ -747,6 +747,16 @@ body.chrome-epic [role="tabpanel"][hidden] {
     color: var(--color-muted);
 }
 
+/* S12c: `serve --demo` marks every page as fabricated data. */
+.demo-banner {
+    margin: 0;
+    padding: 0.4rem 0.8rem;
+    background: var(--color-warn);
+    color: var(--color-bg);
+    font-weight: 600;
+    text-align: center;
+}
+
 /* S11m: another tab owns this case. The notice blocks; the pane is inert
    to the pointer (case_tab_guard.js also cancels every write). */
 .tab-conflict {

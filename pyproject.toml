@@ -2,6 +2,9 @@
 name = "ehr_simulator"
 version = "0.0.1"
 description = "Browser-based EHR simulator for clinician-AI decision studies."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=2",
@@ -33,10 +36,21 @@ dev = [
     "openpyxl>=3.1",
     "types-pyyaml>=6.0",
 ]
+# Opt in notebook execution (S12b): `uv sync --group analysis`.
+analysis = [
+    "nbclient>=0.10",
+    "nbformat>=5.10",
+    "ipykernel>=6.29",
+]
 
 [build-system]
 requires = ["hatchling>=1.32,<2"]
 build-backend = "hatchling.build"
+
+# Allowlist: hatch reads only the root .gitignore, so local files ignored
+# elsewhere (configs/.gitignore: pilot patient ids) would otherwise ship.
+[tool.hatch.build.targets.sdist]
+only-include = ["src", "README.md", "LICENSE"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ehr_simulator"]
@@ -46,13 +60,14 @@ packages = ["src/ehr_simulator"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-n auto --dist loadgroup --strict-markers -m 'not e2e and not real_data and not slow'"
+addopts = "-n auto --dist loadgroup --strict-markers -m 'not e2e and not real_data and not slow and not notebook'"
 markers = [
     "unit: pure logic + SQLite DAOs, no app boot (tagged in tests/conftest.py)",
     "integration: boots the FastAPI app or the CLI (tagged in tests/conftest.py)",
     "slow: full Phase 2 study walks; deselected by default, run in CI",
     "e2e: end-to-end Playwright tests (require chromium installed)",
-    "real_data: opt-in smoke tests against the real Geneva CSV (~1.5 GB)",
+    "real_data: opt-in smoke tests against the real Geneva CSV",
+    "notebook: executes notebooks/phase2_analysis.ipynb (needs `uv sync --group analysis`)",
 ]
 
 [tool.ruff]

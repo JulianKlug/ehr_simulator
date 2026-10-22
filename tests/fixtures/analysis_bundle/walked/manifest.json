@@ -1,0 +1,45 @@
+{
+  "export_schema_version": "phase2_export_v1",
+  "files": {
+    "answers.csv": {
+      "rows": 102,
+      "sha256": "7a6fe834b660ffa76708de35b0f670c9d84001fe8b887cab7a8315cf90a28675"
+    },
+    "behavioral_events.csv": {
+      "rows": 241,
+      "sha256": "7e8480e3caac2e17ee7d2ade417fc60e19f07f9a238404358d54725e7acf7c5a"
+    },
+    "clinicians.csv": {
+      "rows": 3,
+      "sha256": "2f9a70aa9fdcab3184980d7b87edb6d1aa6cf485794d440db238b669e0d4c3ee"
+    },
+    "configuration_counts.csv": {
+      "rows": 2,
+      "sha256": "6dfa09f8aa1e81e169a28279ac53923c41f1b922c4d47d4523f1bb03e08412b7"
+    },
+    "configuration_history.csv": {
+      "rows": 2,
+      "sha256": "bc57bb56e2f3751eed6f45a387720d87b0164cfb0580af94f7fd2126b882bf93"
+    },
+    "panel_summaries.csv": {
+      "rows": 87,
+      "sha256": "a480dcec81a2add4d4ff57d1627a4031212e474b3bd668ee909efa69f73992ee"
+    },
+    "randomisation_audit.csv": {
+      "rows": 9,
+      "sha256": "d742f277e14ac9e26d491efcd251f615cb3a05b8fd1374e6d65275ff70625a14"
+    },
+    "timepoints.csv": {
+      "rows": 18,
+      "sha256": "65692cff17ed57b035393c2039e40919d345517b6a35bebde454ec4e25ee7939"
+    }
+  },
+  "generated_at_utc": "2026-01-01T12:00:00Z",
+  "included_config_versions": [
+    "v1",
+    "v2"
+  ],
+  "practice_included": false,
+  "source_schema_version": 15,
+  "study_id": "example_phase2"
+}

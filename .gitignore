@@ -2,8 +2,19 @@
 docs/data-contract.md.tmp
 logs/
 data/
+# Packaged Geneva units table; `data/` above would drop it from the sdist.
+# Only that file: anything else dropped there stays ignored.
+!src/ehr_simulator/ingestion/data/
+src/ehr_simulator/ingestion/data/*
+!src/ehr_simulator/ingestion/data/geneva_units.json
 exports/
 *.keyfile.csv
+# Study databases, pseudonym secrets (README: keys/pseudonym.secret).
+*.db
+*.db-wal
+*.db-shm
+keys/
+*.secret
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -213,3 +224,4 @@ marimo/_static/
 marimo/_lsp/
 __marimo__/
 .gstack/
+analysis_out/
