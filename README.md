@@ -1,19 +1,8 @@
 # EHR simulator
 
 A browser-based simulated electronic health record. It replays a real patient's
-timeline to you at a few discrete moments in time, optionally shows you what an
-AI model predicted, and asks you a short set of questions at each timepoint.
+timeline at a few discrete moments in time, optionally shows AI input, and asks a short set of questions at each timepoint.
 
-The point isn't the chart. The point is to measure how AI assistance changes
-the assessments and decisions you'd make.
-
-> **Status — October 2026.** Phase 1 (walk patients, answer gated
-> questions, CSV export), Phase 2 (randomised AI / no AI cases with
-> behavioural telemetry and a linked research export) and the Phase 2
-> analysis notebook are implemented. The Geneva and MIMIC-III adapters read
-> real data, but **no real patient data is bundled**: you bring your own
-> access (see [`docs/reference-data.md`](docs/reference-data.md)). Everything
-> in this repository runs on synthetic patients.
 
 ## Quickstart (about ten minutes)
 
@@ -27,13 +16,9 @@ uv run ehr-simulator serve --demo
 # open http://127.0.0.1:8000; sign in; open synth_001
 ```
 
-Any name signs you in. Pick `synth_001`, then `epic` or `dense`. Walk the
-timepoints with <kbd>]</kbd> and <kbd>[</kbd>.
 
 `--demo` is the config free synthetic mode. It needs no data, study config or
-secret, and it never creates a study case. A **Synthetic demonstration**
-banner sits on every page. It cannot be combined with `--config`/`--questions`,
-and it refuses to boot on a study's database (`--db-path`, `EHR_SIM_DB_PATH`).
+secret, and it never creates a study case. 
 
 The demo writes `./data/ehr_simulator.db`, its backups
 `./data/backups/ehr_simulator_*.db` and `./logs/` under the directory you
@@ -60,25 +45,6 @@ uv run ehr-simulator serve \
   --questions configs/example_questions.yaml
 ```
 
-`--config` and `--questions` go together. Pass neither and you get the same
-three synthetic patients without a questions pane — sign-in and the database
-are there either way. A study config must declare a `study_id` (lowercase
-letters, digits, `-`, `_`): it names the study, and its answers are bound to
-exactly one database. One database holds exactly one study — the server
-refuses to boot against a database owned by another `study_id`, or a database
-that already holds unlabelled data.
-
-Then open http://localhost:8000 in any modern browser. Type your name on the
-sign-in page, pick a patient, pick a chrome variant (see below), and you're in.
-The name is all the login is — no password, no account. It is case-folded and
-hashed into a short `clinician_id` that every stored answer is keyed by. You
-stay signed in for 30 days; **Logout** in the header stripe switches clinician.
-
-The server stays in your terminal — `Ctrl-C` to stop. Logs go to
-`./logs/current.jsonl` (one JSON record per request, rolled at UTC midnight);
-answers and interaction events go to `./data/study_<study_id>.db` in study
-mode, or `./data/ehr_simulator.db` without a study config.
-
 ---
 
 ## Running a Phase 2 study
@@ -97,12 +63,6 @@ uv run ehr-simulator backup --db-path data/study_<study_id>.db
 uv run ehr-simulator export-phase2 STUDY.yaml --pseudonym-secret keys/pseudonym.secret --out-dir BUNDLE  # the research bundle
 ```
 
-**The shipped examples are placeholders.** The questions and options in
-`configs/example_phase2_questions.yaml` and the specialties and countries in
-`configs/example_phase2_config.yaml` exist to exercise the software. They are
-not a preregistered clinical instrument. Replace them, then activate a new
-version, before you collect measured data.
-
 **Analysis.** The analysis reads only the exported bundle. It never reads the
 database, the secret or the keyfile. Copy only `BUNDLE/` into the analysis
 environment, then:
@@ -114,17 +74,7 @@ EHR_SIM_PHASE2_BUNDLE="$PWD/BUNDLE" EHR_SIM_ANALYSIS_OUT="$PWD/analysis_out/phas
   uv run jupyter execute notebooks/phase2_analysis.ipynb   # or open it in Jupyter
 ```
 
-The notebook validates the bundle's manifest and refuses a bundle that fails
-it. It writes figures (SVG + PDF), per table CSVs, `denominators.csv` and
-`analysis_manifest.json`, which records the input digest, configuration
-versions and hashes. Results are descriptive and stratified by configuration
-version. Clinical values are not in the bundle, so the "newly visible data"
-annotations of `divergence-view` are absent. Methods:
-[`docs/analysis.md`](docs/analysis.md). Contract:
-[`docs/analysis-contract.md`](docs/analysis-contract.md). Review any figure
-from a real cohort for disclosure before publishing it.
-
-**Geneva AI (S7).** A `dataset: geneva` study delivers real AI output through a
+**Geneva AI.** A `dataset: geneva` study delivers real AI output through a
 `geneva_ai` block (`predictions_path`, `patient_ids_path`, `model_path`,
 `model_id`, `explanations_dir` — optional, required with `randomisation`;
 relative to the YAML). Before
@@ -144,79 +94,7 @@ test subset (preflight FAILs a missing AI row). The `geneva_ai` paths are part
 of the configuration hash: moving the files needs a new `--version`. Only point
 it at the trusted local artifact — the files are pickles.
 
-The AI panel (S8) shows the predicted probability and the five strongest
-contributions of each sign. Set `ai_intervention.outcome_label` (e.g.
-`poor functional outcome at 3 months`) to name the outcome in the heading;
-preflight WARNs a Phase 2 study without it.
 
-**Presentation versioning (S8).** Rendering code is not part of the
-configuration snapshot, so a pinned case shows whatever the deployed code
-renders. Before collecting measured cases:
-
-1. set `ai_intervention.intervention_build_id` to the deployed commit;
-2. bump `ai_intervention.presentation_version` whenever AI panel rendering changes;
-3. `activate-config` a new version before collecting further measured cases.
-
-Nothing enforces this; it is the operator's record of what clinicians saw.
-
-- **One database per study.** The server refuses a database of another `study_id`.
-- **Configuration changes are explicit.** Editing the YAML changes its hash;
-  activate a new `--version` and restart. Started cases keep their version.
-- **Start case is the allocation boundary.** Opening a page never assigns an arm.
-- **Clinician profile first.** A study with a `clinician_profile` block asks each
-  clinician for role, years of practice, country and (physicians) specialty
-  before their first case; it locks once that case starts.
-- **One tab per case.** A second browser tab of the same active case shows a
-  notice and cannot save; close the other tab and press Retry.
-- **Backups are study isolated:** `data/backups/<study_id>/study_<study_id>_schema_<N>_<UTC>.db`.
-  The shutdown backup blocks the server's exit. A large database (over
-  ~100 MB) takes seconds to copy, so wait for the process to exit. A second
-  `Ctrl-C` or a kill can skip the backup; `ehr-simulator backup` with the
-  server stopped makes one at any time.
-- **`export-phase2` writes linked CSVs** (`timepoints`, `answers`,
-  `panel_summaries`, `behavioral_events`, `randomisation_audit`,
-  `configuration_history`, `configuration_counts`, `clinicians`, `manifest.json`) across every
-  configuration version. `--keyfile FILE` (outside the bundle, mode 600) is the
-  only output that maps `clinician_id` back to names. `export-answers` stays the
-  single configuration wide CSV.
-- **Exported clinician ids are keyed pseudonyms.** Both exports require
-  `--pseudonym-secret FILE`: 32 random bytes, mode 600, created on first use,
-  never inside `--out-dir`. Ids (and schedule/replacement ids) export as
-  `HMAC-SHA256(secret, id)[:16]`; keep the same file for stable ids across
-  exports, and never share it with the bundle. The DB id is
-  `sha256(name)[:16]`, so a roster would reverse an unkeyed one.
-- **Known residual risk (accepted):** the Phase 2 bundle carries the
-  randomisation seeds so schedules stay regenerable. Anyone holding the
-  bundle and a staff roster can regenerate each candidate's schedule and
-  match it to a pseudonym. Treat the bundle as re-identifiable.
-
----
-
-## Walking a patient
-
-You'll see the patient view at **timepoint 0** (the moment of first contact).
-
-| Key | Action |
-|---|---|
-| <kbd>]</kbd> | Next timepoint (presses the advance button when you're at the newest one) |
-| <kbd>[</kbd> | Previous timepoint |
-| <kbd>?</kbd> | Show keyboard shortcuts overlay |
-
-Pressing past the first timepoint — or past the last one with nothing left to
-advance to — **does nothing** and shows a small "already at first/last
-timepoint" notice in the summary header. There is no wraparound.
-
-The summary card at the top always shows: patient ID, age, sex, the current
-clinical time `t = N min`, and how many rows of each kind have been revealed
-so far.
-
-### What you see, and when
-
-The simulator only reveals data **up to and including the current timepoint**.
-At t=0 you see what was knowable at first contact; at t=60 you also see what
-was recorded in the first hour; and so on. You cannot peek ahead — neither in
-the visible panels nor in the underlying HTML — and that's enforced by a
-regression test on every commit.
 
 ---
 
@@ -230,6 +108,8 @@ regression test on every commit.
 | **Labs** | every lab measured so far, one row per lab, one column per observation time |
 | **Imaging** | perfusion volumes (Tmax, CBF, CBV), imaging / vascular findings, and report entries when a dataset has them |
 | **AI** | the precomputed model output; for Geneva the predicted probability and its top contributors |
+
+The simulator only reveals data **up to and including the current timepoint**.
 
 Each panel can be in one of these states, shown as a small italicized note
 when relevant:
@@ -245,145 +125,3 @@ when relevant:
 An empty panel is not a bug: either that patient has no data of that kind, or
 none has been recorded yet.
 
----
-
-## Answering the questions
-
-In study mode a questions pane sits beside the panels, one form per question
-from your `--questions` file. There is no save button: every choice saves as
-you make it, free text 1.5 seconds after you stop typing. The badge under each
-question reads `Saved ✓`, `Cleared`, the reason the save was rejected, or
-`Save failed — retry` if the request never reached the server. Clearing every
-field of a question deletes that answer. Free text is capped at 4000
-characters; a probability must be a whole number from 0 to 100.
-
-`[` and `]` still work while a radio or checkbox has focus, but not from
-inside the free-text box — click out of it first.
-
-Questions are required by default. `required: false` in your `--questions` file
-opts one out — that's how a free-text "anything else?" box stays optional. A
-required multi-select has to offer an explicit opt-out (the example config uses
-`None of these`), because an empty multi-select stores nothing and the gate
-reads nothing as unanswered.
-
-### Advancing
-
-The button at the foot of the pane is the only way forward. It stays muted
-until every required question is answered, and its label counts what's left —
-`Next timepoint · 3 unanswered`. Clicking it while blocked doesn't move you: it
-scrolls to the first unanswered question and focuses it. Once you're done the
-label becomes `Next timepoint ›`, or `Finish patient ✓` on the last timepoint,
-which takes you back to the patient list. <kbd>]</kbd> presses the same button.
-
-**Advancing freezes what's behind you.** Earlier timepoints stay readable with
-your answers pre-filled, but every field is disabled and the pane says
-`Locked — answered before you advanced.` That's the point of the study: an
-answer at t=60 has to reflect what you knew at t=60, not what t=180 told you.
-A URL for a timepoint you haven't unlocked bounces you back to the one you're
-on, and no patient data is rendered on the way.
-
-The patient list marks each patient `not started`, `in progress · t 2/3` or
-`complete ✓`, and every link resumes where you left off.
-
-There is no undo. If you press Next by mistake, whoever runs the study can
-rewind it for you:
-
-```bash
-uv run ehr-simulator reset-progress configs/example_config.yaml \
-  --clinician "Your Name" --patient synth_001 --to-t-index 0
-```
-
-`--to-t-index` defaults to 0. Answers *after* the target timepoint are deleted;
-answers at it survive and pre-fill the re-opened pane. `--db-path` points it at
-a database other than the study config's.
-
----
-
-## Two chrome variants
-
-The same data, two different layouts. Pick whichever feels more natural —
-during the embedded-clinician sessions we want feedback on which one you'd
-actually use day-to-day.
-
-- **`?chrome=dense`** — single scrollable page, all six panels visible at
-  once, tighter type. Optimized for "see everything."
-- **`?chrome=epic`** — tabbed interface (one panel at a time), larger type and
-  more whitespace, layout closer to Epic's conventions. Optimized for
-  "focus on one panel."
-
-The chrome is in the URL, not a cookie, so you can paste a link to the exact
-view you want a colleague to look at.
-
----
-
-## What this build is for
-
-Reviewer sessions with the embedded neurologist target layout, density, and
-discoverability — not clinical accuracy.
-
-A note on the data: **the patient values are synthetic and not clinically
-realistic.** They're physiologically plausible noise, not real cases. Don't
-read into the numbers. We're asking you to evaluate the *interface*, not the
-*patients*.
-
-If you have feedback during the session, we're particularly interested in:
-
-- Which panel did you look at first, and why?
-- Did the timepoint walking feel natural with `[`/`]`, or did you reach for the
-  mouse?
-- When a panel was in `partial` or `empty-unexpected` state, was it obvious
-  what that meant?
-- Anything in the chrome that felt "wrong" relative to a real EHR — even
-  small things.
-
-Findings from earlier sessions: `specs/feedback/session-02-feedback.md`.
-
----
-
-## Privacy
-
-The simulator runs entirely on your local machine. Nothing leaves your laptop.
-No cloud. In Phase 2 the page reports interaction timing (visibility, focus,
-clicks/keys/scrolls without their content, which panels were on screen) to the
-local server only. Three things are written to disk:
-
-- `logs/current.jsonl` — request paths, timepoint indices, and your
-  `clinician_id`. Never any free-text input.
-- `data/ehr_simulator.db` (or `data/study_<study_id>.db` in study mode) —
-  your name (case-folded, in the clinicians table only), your answers including
-  free text, and one row per interaction event keyed by `clinician_id`.
-- `data/backups/` — a copy of that database, made when a server that wrote
-  something shuts down (`data/backups/<study_id>/` in study mode).
-  `serve --backup-dir` moves it.
-
-Move the database with `serve --db-path`, the `EHR_SIM_DB_PATH` environment
-variable, or `db_path:` in the study config. The last two must point inside the
-working directory; `--db-path` is taken at face value. In study mode the
-per-study default is `data/study_<study_id>.db` — each study gets its own
-database, and the identity check still applies to any path you name.
-
----
-
-## What's *not* in this build
-
-These are scheduled for later sessions. If you're missing one of these, you
-are not missing it because of a bug:
-
-- **Real patient data** — the Geneva and MIMIC-III adapters are implemented,
-  but no source data or AI artifact ships with the repository. See
-  [`docs/reference-data.md`](docs/reference-data.md).
-- **DICOM image rendering** — the imaging panel shows the report text, not
-  the images. (Out of scope for v1.)
-
----
-
-## Reporting issues
-
-If something breaks or feels wrong, please grab these and send them along:
-
-1. The URL in the address bar at the moment it broke.
-2. The last few lines of `logs/current.jsonl` (one JSON object per line — easy
-   to copy).
-3. If it happened while answering a question, the badge text you saw.
-
-That's enough to reconstruct what happened on our end.
