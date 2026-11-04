@@ -4,7 +4,7 @@ A browser-based simulated electronic health record. It replays a real patient's
 timeline at a few discrete moments in time, optionally shows AI input, and asks a short set of questions at each timepoint.
 
 
-## Quickstart (about ten minutes)
+## Quickstart
 
 Requires [`git`](https://git-scm.com/) and [`uv`](https://docs.astral.sh/uv/).
 
